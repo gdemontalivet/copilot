@@ -89,7 +89,8 @@ export class AzureBYOKModelProvider extends AbstractCustomOAIBYOKModelProvider {
 		progress: Progress<LanguageModelResponsePart2>,
 		token: CancellationToken
 	): Promise<void> {
-		if (model.configuration?.apiKey) {
+		const resolvedApiKey = model.configuration?.apiKey ?? (model as any).apiKey;
+		if (resolvedApiKey) {
 			return super.provideLanguageModelChatResponse(model, messages, options, progress, token);
 		}
 

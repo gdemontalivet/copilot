@@ -1,0 +1,24 @@
+# GitHub Copilot Chat (vscode-copilot-chat) Developer Rules & Learnings
+
+## BYOK (Bring Your Own Key) & Offline Mode
+- When testing the extension without a Copilot license, the system generates a fake offline token (`username: 'offline-user'`, `token: 'fake-token'`).
+- **CAPI Model Fetching**: `ModelMetadataFetcher._fetchModels` must intercept this fake token and skip hitting the CAPI models endpoint. Failure to do so will result in a `400 Bad Request: Authorization header is badly formatted` error and crash the startup flow.
+- **Authentication Event Firing**: In `BaseAuthenticationService.getCopilotToken()`, it's critical to manually trigger `fireAuthenticationChange('getCopilotToken success')` when the token is successfully acquired and differs from the previous one. If this event is not fired, `ConversationFeature` will stay stuck waiting for the token, resulting in the UI hanging with the message: `"Chat took too long to get ready. Please ensure you are signed in to GitHub..."`
+
+## Build Process
+- The `package.json` in this repository gets its `scripts`, `devDependencies`, and `dependencies` stripped out by a patching step in `.esbuild.ts`.
+- Because `npm run compile` or `npm run build` will fail with "Missing script", you must compile the project directly using Node 22's experimental TypeScript support:
+  ```bash
+  node --experimental-strip-types .esbuild.ts --dev
+  ```
+
+## Packaging / VSIX Generation
+- The build script `node --experimental-strip-types .esbuild.ts` must be run before packaging to build all TS files into the `dist/` directory.
+- `yarn` isn't available in this stripped down environment, so you must pass the `--no-dependencies` flag to `vsce package`:
+  ```bash
+  node --experimental-strip-types .esbuild.ts && npx vsce package --no-dependencies
+  ```
+- Because of the way dependencies are injected/stripped, a regular build will otherwise fail if vsce tries to resolve them using yarn/npm.
+- `LanguageModelAccess` provides the CAPI models to VS Code's Language Model API.
+- `BYOKContrib` is responsible for registering custom (BYOK) providers like Anthropic and Gemini.
+- If `LanguageModelAccess` yields 0 endpoints, BYOK models can still be used seamlessly as long as the providers register correctly and the authentication loop resolves successfully.

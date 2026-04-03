@@ -117,6 +117,66 @@ describe('GeminiFunctionDeclarationConverter', () => {
 			});
 		});
 
+		it('should handle array types by picking the first non-null type', () => {
+			const schema: ToolJsonSchema = {
+				type: 'object',
+				properties: {
+					value: {
+						type: ['number', 'string', 'boolean'],
+						description: 'A value of multiple types'
+					},
+					nullableString: {
+						type: ['null', 'string'],
+						description: 'A nullable string'
+					}
+				}
+			};
+
+			const result = toGeminiFunction('arrayTypesFunction', 'Function with array types', schema);
+
+			expect(result.parameters).toBeDefined();
+			expect(result.parameters!.type).toBe(Type.OBJECT);
+			expect(result.parameters!.properties).toBeDefined();
+			expect(result.parameters!.properties!['value']).toEqual({
+				type: Type.NUMBER,
+				description: 'A value of multiple types'
+			});
+			expect(result.parameters!.properties!['nullableString']).toEqual({
+				type: Type.STRING,
+				description: 'A nullable string'
+			});
+		});
+
+		it('should handle comma-separated string types by picking the first non-null type', () => {
+			const schema: ToolJsonSchema = {
+				type: 'object',
+				properties: {
+					value: {
+						type: 'number,string,boolean',
+						description: 'A value of multiple types in a string'
+					},
+					nullableString: {
+						type: 'null, string',
+						description: 'A nullable string in a string'
+					}
+				}
+			};
+
+			const result = toGeminiFunction('commaTypesFunction', 'Function with comma types', schema);
+
+			expect(result.parameters).toBeDefined();
+			expect(result.parameters!.type).toBe(Type.OBJECT);
+			expect(result.parameters!.properties).toBeDefined();
+			expect(result.parameters!.properties!['value']).toEqual({
+				type: Type.NUMBER,
+				description: 'A value of multiple types in a string'
+			});
+			expect(result.parameters!.properties!['nullableString']).toEqual({
+				type: Type.STRING,
+				description: 'A nullable string in a string'
+			});
+		});
+
 		it('should handle array schema by using items as parameters', () => {
 			const schema: ToolJsonSchema = {
 				type: 'array',

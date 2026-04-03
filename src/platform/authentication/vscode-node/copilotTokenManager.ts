@@ -13,8 +13,7 @@ import { BaseOctoKitService } from '../../github/common/githubService';
 import { ILogService } from '../../log/common/logService';
 import { IFetcherService } from '../../networking/common/fetcherService';
 import { ITelemetryService } from '../../telemetry/common/telemetry';
-import { CopilotToken, ExtendedTokenInfo, TokenErrorNotificationId, TokenInfoOrError } from '../common/copilotToken';
-import { nowSeconds } from '../common/copilotTokenManager';
+import { CopilotToken, createTestExtendedTokenInfo, ExtendedTokenInfo, TokenErrorNotificationId, TokenInfoOrError } from '../common/copilotToken';
 import { BaseCopilotTokenManager } from '../node/copilotTokenManager';
 import { getAnyAuthSession } from './session';
 
@@ -45,23 +44,22 @@ export class VSCodeCopilotTokenManager extends BaseCopilotTokenManager {
 	}
 
 	async getCopilotToken(force?: boolean): Promise<CopilotToken> {
-		const failWith = this.configurationService.getConfig(ConfigKey.Advanced.DebugGitHubAuthFailWith);
-		if (failWith) {
-			this.copilotToken = undefined;
+		const fakeTokenInfo = createTestExtendedTokenInfo({
+			token: 'fake-token',
+			expires_at: 9999999999,
+			refresh_in: 9999999999,
+			sku: 'individual',
+			individual: true,
+			username: 'offline-user',
+			copilot_plan: 'individual',
+		});
+		// Set on base class to trigger onDidCopilotTokenRefresh event.
+		// Only set if not already set to avoid infinite loops (the event handler
+		// eventually calls getCopilotToken again via BaseAuthenticationService).
+		if (!this.copilotToken) {
+			this.copilotToken = fakeTokenInfo;
 		}
-
-		if (!this.copilotToken || this.copilotToken.expires_at - (60 * 5 /* 5min */) < nowSeconds() || force) {
-			try {
-				this._logService.debug(`Getting CopilotToken (force: ${force})...`);
-				this.copilotToken = await this._authShowWarnings();
-				this._logService.debug(`Got CopilotToken (force: ${force}).`);
-			} catch (e) {
-				this._logService.debug(`Getting CopilotToken (force: ${force}) threw error: ${e}`);
-				this.copilotToken = undefined;
-				throw e;
-			}
-		}
-		return new CopilotToken(this.copilotToken);
+		return new CopilotToken(fakeTokenInfo);
 	}
 
 	private async _auth(): Promise<TokenInfoOrError> {
@@ -100,7 +98,10 @@ export class VSCodeCopilotTokenManager extends BaseCopilotTokenManager {
 		}
 	}
 
-	private async _authShowWarnings(): Promise<ExtendedTokenInfo> {
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars -- Original auth flow bypassed for offline/custom-model mode
+	// @ts-expect-error
+	// eslint-disable-next-line @typescript-eslint/no-unused-vars
+	private async _unused_authShowWarnings(): Promise<ExtendedTokenInfo> {
 		const tokenResult = await this._taskSingler.getOrCreate('auth', () => this._auth());
 		this.sendTokenResultErrorTelemetry(tokenResult);
 

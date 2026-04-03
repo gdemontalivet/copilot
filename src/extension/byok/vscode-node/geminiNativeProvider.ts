@@ -87,7 +87,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 
 		const doRequest = async () => {
 			const issuedTime = Date.now();
-			const apiKey = model.configuration?.apiKey;
+			const apiKey = model.configuration?.apiKey ?? options.modelConfiguration?.apiKey;
 			if (!apiKey) {
 				throw new Error('API key not found for the model');
 			}

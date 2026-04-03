@@ -90,18 +90,19 @@ export class ConversationFeature implements IExtensionContribution {
 
 		const activationBlockerDeferred = new DeferredPromise<void>();
 		this.activationBlocker = activationBlockerDeferred.p;
+		this.logService.info(`[STARTUP] ConversationFeature: constructor, copilotToken available=${!!authenticationService.copilotToken}`);
 		if (authenticationService.copilotToken) {
-			this.logService.info(`ConversationFeature: Copilot token already available`);
+			this.logService.info(`[STARTUP] ConversationFeature: Copilot token already available, activating immediately`);
 			this.activated = true;
 			activationBlockerDeferred.complete();
 		} else {
 			markChatExtGlobal(ChatExtGlobalPerfMark.WillWaitForCopilotToken);
-			this.logService.info(`ConversationFeature: Waiting for copilot token to activate conversation feature`);
+			this.logService.info(`[STARTUP] ConversationFeature: Waiting for copilot token to activate conversation feature`);
 		}
 
 		this._disposables.add(authenticationService.onDidAuthenticationChange(async () => {
 			const hasSession = !!authenticationService.copilotToken;
-			this.logService.info(`ConversationFeature: onDidAuthenticationChange has token: ${hasSession}`);
+			this.logService.info(`[STARTUP] ConversationFeature: onDidAuthenticationChange fired, hasToken=${hasSession}, sku=${authenticationService.copilotToken?.sku ?? 'none'}`);
 			if (hasSession) {
 				markChatExtGlobal(ChatExtGlobalPerfMark.DidWaitForCopilotToken);
 				this.activated = true;
@@ -118,6 +119,7 @@ export class ConversationFeature implements IExtensionContribution {
 	}
 
 	set enabled(value: boolean) {
+		this.logService.info(`[STARTUP] ConversationFeature.enabled setter: value=${value}, current=${this._enabled}, activated=${this._activated}`);
 		if (value && !this.activated) {
 			this.activated = true;
 		}
@@ -132,16 +134,18 @@ export class ConversationFeature implements IExtensionContribution {
 	}
 
 	set activated(value: boolean) {
+		this.logService.info(`[STARTUP] ConversationFeature.activated setter: value=${value}, current=${this._activated}`);
 		if (this._activated === value) {
+			this.logService.info(`[STARTUP] ConversationFeature.activated setter: no change, skipping`);
 			return;
 		}
 		this._activated = value;
 
 		if (!value) {
-			this.logService.info('ConversationFeature: Deactivating contributions');
+			this.logService.info('[STARTUP] ConversationFeature: Deactivating contributions');
 			this._activatedDisposables.clear();
 		} else {
-			this.logService.info('ConversationFeature: Activating contributions');
+			this.logService.info('[STARTUP] ConversationFeature: Activating contributions');
 			const options: IConversationOptions = this.conversationOptions;
 
 			this._activatedDisposables.add(this.registerProviders());
@@ -341,9 +345,10 @@ export class ConversationFeature implements IExtensionContribution {
 	}
 
 	private registerCopilotTokenListener() {
+		this.logService.info(`[STARTUP] ConversationFeature.registerCopilotTokenListener: registering listener`);
 		this._disposables.add(this.authenticationService.onDidAuthenticationChange(() => {
 			const chatEnabled = this.authenticationService.copilotToken !== undefined;
-			this.logService.info(`copilot token sku: ${this.authenticationService.copilotToken?.sku ?? ''}`);
+			this.logService.info(`[STARTUP] ConversationFeature.copilotTokenListener: copilot token sku: ${this.authenticationService.copilotToken?.sku ?? 'none'}, chatEnabled=${chatEnabled}`);
 			this.enabled = chatEnabled ?? false;
 		}));
 	}

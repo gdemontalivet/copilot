@@ -21,7 +21,9 @@ function _getNativePolyfill(): IMonacoPerformanceMarks {
 				}
 			}
 			for (const name of toRemove) {
-				performance.clearMarks(name);
+				if (typeof performance.clearMarks === 'function') {
+					performance.clearMarks(name);
+				}
 			}
 		},
 	};
@@ -95,7 +97,9 @@ export function markChatExt(sessionId: string | undefined, name: ChatExtPerfMark
  * Clears all performance marks for the given chat session.
  */
 export function clearChatExtMarks(sessionId: string): void {
-	perf.clearMarks(`${chatExtPrefix}${sessionId}/`);
+	if (typeof perf.clearMarks === 'function') {
+		perf.clearMarks(`${chatExtPrefix}${sessionId}/`);
+	}
 }
 
 export const ChatExtGlobalPerfMark = {

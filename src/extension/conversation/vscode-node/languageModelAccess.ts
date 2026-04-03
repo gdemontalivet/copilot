@@ -237,18 +237,38 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 		}
 
 		const models: vscode.LanguageModelChatInformation[] = [];
-		const allEndpoints = await this._endpointProvider.getAllChatEndpoints();
+		let allEndpoints: IChatEndpoint[];
+		try {
+			allEndpoints = await this._endpointProvider.getAllChatEndpoints();
+		} catch (e) {
+			this._logService.warn(`[STARTUP] [LanguageModelAccess] Failed to get chat endpoints: ${e}`);
+			allEndpoints = [];
+		}
 		const chatEndpoints = allEndpoints.filter(e => e.showInModelPicker || e.model === 'gpt-4o-mini');
-		const autoEndpoint = await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);
-		chatEndpoints.push(autoEndpoint);
+		let autoEndpoint: IChatEndpoint | undefined;
+		if (allEndpoints.length > 0) {
+			try {
+				autoEndpoint = await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);
+				chatEndpoints.push(autoEndpoint);
+			} catch (e) {
+				this._logService.warn(`[LanguageModelAccess] Failed to resolve auto mode endpoint: ${e}`);
+			}
+		}
+		if (chatEndpoints.length === 0) {
+			// No CAPI models available - return empty so BYOK models can be used directly
+			this._logService.info('[LanguageModelAccess] No Copilot models available. BYOK/custom models can still be used.');
+			this._currentModels = [];
+			this._chatEndpoints = [];
+			return [];
+		}
 		let defaultChatEndpoint: IChatEndpoint;
 		const defaultExpModel = this._expService.getTreatmentVariable<string>('chat.defaultLanguageModel')?.replace('copilot/', '');
 		if (this._authenticationService.copilotToken?.isNoAuthUser || !defaultExpModel || defaultExpModel === AutoChatEndpoint.pseudoModelId) {
 			// No auth, no experiment, and exp that sets auto to default all get default model
-			defaultChatEndpoint = autoEndpoint;
+			defaultChatEndpoint = autoEndpoint ?? chatEndpoints[0];
 		} else {
 			// Find exp default
-			defaultChatEndpoint = chatEndpoints.find(e => e.model === defaultExpModel) || autoEndpoint;
+			defaultChatEndpoint = chatEndpoints.find(e => e.model === defaultExpModel) || (autoEndpoint ?? chatEndpoints[0]);
 		}
 
 		const seenFamilies = new Set<string>();
@@ -441,7 +461,7 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 			const copilotToken = await this._authenticationService.getCopilotToken();
 			return copilotToken;
 		} catch (e) {
-			this._logService.warn('[LanguageModelAccess] LanguageModel/Embeddings are not available without auth token');
+			this._logService.warn(`[STARTUP] [LanguageModelAccess] LanguageModel/Embeddings are not available without auth token: ${e}`);
 			this._logService.error(e);
 			return undefined;
 		}

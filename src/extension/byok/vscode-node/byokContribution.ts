@@ -20,6 +20,7 @@ import { GeminiNativeBYOKLMProvider } from './geminiNativeProvider';
 import { OllamaLMProvider } from './ollamaProvider';
 import { OAIBYOKLMProvider } from './openAIProvider';
 import { OpenRouterLMProvider } from './openRouterProvider';
+import { VertexAnthropicLMProvider } from './vertexAnthropicProvider';
 import { XAIBYOKLMProvider } from './xAIProvider';
 
 export class BYOKContrib extends Disposable implements IExtensionContribution {
@@ -46,7 +47,8 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 	}
 
 	private async _authChange(authService: IAuthenticationService, instantiationService: IInstantiationService) {
-		if (authService.copilotToken && isBYOKEnabled(authService.copilotToken, this._capiClientService) && !this._byokProvidersRegistered) {
+		const byokEnabled = authService.copilotToken ? isBYOKEnabled(authService.copilotToken, this._capiClientService) : false;
+		if (authService.copilotToken && byokEnabled && !this._byokProvidersRegistered) {
 			this._byokProvidersRegistered = true;
 			// Update known models list from CDN so all providers have the same list
 			const knownModels = await this.fetchKnownModelList(this._fetcherService);
@@ -55,6 +57,7 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 			}
 			this._providers.set(OllamaLMProvider.providerName.toLowerCase(), instantiationService.createInstance(OllamaLMProvider, this._byokStorageService));
 			this._providers.set(AnthropicLMProvider.providerName.toLowerCase(), instantiationService.createInstance(AnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService));
+			this._providers.set(VertexAnthropicLMProvider.providerName.toLowerCase(), instantiationService.createInstance(VertexAnthropicLMProvider, knownModels[VertexAnthropicLMProvider.providerName], this._byokStorageService));
 			this._providers.set(GeminiNativeBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiNativeBYOKLMProvider, knownModels[GeminiNativeBYOKLMProvider.providerName], this._byokStorageService));
 			this._providers.set(XAIBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(XAIBYOKLMProvider, knownModels[XAIBYOKLMProvider.providerName], this._byokStorageService));
 			this._providers.set(OAIBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(OAIBYOKLMProvider, knownModels[OAIBYOKLMProvider.providerName], this._byokStorageService));
