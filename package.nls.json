@@ -381,6 +381,7 @@
 	"github.copilot.config.chat.agentDebugLog.fileLogging.enabled": "Enable writing chat debug events to JSONL files on disk for diagnostics. When disabled, the built-in `troubleshoot` skill is also disabled. Requires window reload to take effect.",
 	"github.copilot.config.chat.agentDebugLog.fileLogging.flushIntervalMs": "How often (in milliseconds) buffered debug log entries are flushed to disk. Lower values provide more up-to-date logs at the cost of more frequent disk writes.",
 	"github.copilot.config.chat.agentDebugLog.fileLogging.maxRetainedSessionLogs": "Maximum number of chat debug session log directories to retain on disk. Each chat session produces one directory. Older session logs are automatically deleted when this limit is exceeded.",
+	"github.copilot.config.chat.agentDebugLog.fileLogging.maxSessionLogSizeMB": "Maximum size (in megabytes) for a single session log directory before writing stops for that session.",
 	"github.copilot.config.inlineEdits.diagnosticsContextProvider.enabled": "Enable diagnostics context provider for next edit suggestions.",
 	"github.copilot.config.inlineEdits.chatSessionContextProvider.enabled": "Enable chat session context provider for next edit suggestions.",
 	"github.copilot.config.codesearch.agent.enabled": "Enable code search capabilities in agent mode.",
@@ -392,6 +393,7 @@
 	"github.copilot.config.instantApply.shortContextLimit": "Token limit for short context instant apply.",
 	"github.copilot.config.summarizeAgentConversationHistoryThreshold": "Threshold for compacting agent conversation history.",
 	"github.copilot.config.agentHistorySummarizationMode": "Mode for agent history summarization.",
+	"github.copilot.config.agentHistorySummarizationCacheFriendly": "Use cache-friendly format for agent history summarization.",
 	"github.copilot.config.backgroundCompaction": "Enable background compaction of conversation history.",
 	"github.copilot.config.agentHistorySummarizationWithPromptCache": "Use prompt caching for agent history summarization.",
 
@@ -410,6 +412,7 @@
 	"github.copilot.config.cli.isolationOption.enabled": "Enable the isolation mode option for Background Agents. When enabled, users can choose between Worktree and Workspace modes.",
 	"github.copilot.config.cli.autoCommit.enabled": "Enable automatic commit for Background Agents. When enabled, changes made by Background Agents will be automatically committed to the repository at the end of each turn.",
 	"github.copilot.config.cli.sessionController.enabled": "Enable the new session controller API for Background Agents. Requires VS Code reload.",
+	"github.copilot.config.cli.sessionControllerForSessionsApp.enabled": "Enable the new session controller API for the Sessions App.",
 	"github.copilot.config.cli.terminalLinks.enabled": "Enable advanced clickable file links in Copilot CLI terminals. Resolves relative paths against session state directories. Requires VS Code reload.",
 	"github.copilot.config.backgroundAgent.enabled": "Enable the Background Agent. When disabled, the Background Agent will not be available in 'Continue In' context menus.",
 	"github.copilot.config.cloudAgent.enabled": "Enable the Cloud Agent. When disabled, the Cloud Agent will not be available in 'Continue In' context menus.",
@@ -465,6 +468,9 @@
 	"github.copilot.command.cloudSessions.clearCaches.title": "Clear Cloud Agent Caches",
 	"github.copilot.command.applyCopilotCLIAgentSessionChanges": "Apply Changes to Workspace",
 	"github.copilot.config.githubMcpServer.enabled": "Enable built-in support for the GitHub MCP Server.",
+	"github.copilot.config.githubMcpServer.channel": "Channel to use for the GitHub MCP server.",
+	"github.copilot.config.githubMcpServer.channel.stable": "Stable",
+	"github.copilot.config.githubMcpServer.channel.insiders": "Insiders",
 	"github.copilot.config.githubMcpServer.toolsets": "Specify toolsets to use from the GitHub MCP Server. [Learn more](https://aka.ms/vscode-gh-mcp-toolsets).",
 	"github.copilot.config.githubMcpServer.readonly": "Enable read-only mode for the GitHub MCP Server. When enabled, only read tools are available. [Learn more](https://aka.ms/vscode-gh-mcp-readonly).",
 	"github.copilot.config.githubMcpServer.lockdown": "Enable lockdown mode for the GitHub MCP Server. When enabled, hides public issue details created by users without push access. [Learn more](https://aka.ms/vscode-gh-mcp-lockdown).",
@@ -484,8 +490,13 @@
 	"github.copilot.session.providerDescription.claude": "Delegate tasks to the Claude SDK running locally on your machine. The agent iterates via chat and works asynchronously to implement changes.",
 	"github.copilot.session.providerDescription.cloud": "Delegate tasks to the GitHub Copilot coding agent. The agent iterates via chat and works asynchronously in the cloud to implement changes and pull requests as needed.",
 	"github.copilot.session.providerDescription.background": "Delegate tasks to a background agent running locally on your machine. The agent iterates via chat and works asynchronously in a Git worktree to implement changes isolated from your main workspace using the GitHub Copilot CLI.",
+	"github.copilot.command.sessions.commit": "Commit",
+	"github.copilot.command.sessions.commitAndSync": "Commit & Sync",
+	"github.copilot.command.sessions.sync": "Sync",
 	"github.copilot.command.sessions.commitChanges": "Commit",
 	"github.copilot.command.sessions.discardChanges": "Discard Changes",
 	"github.copilot.command.sessions.refreshChanges": "Refresh",
-	"github.copilot.command.sessions.initializeRepository": "Initialize Repository"
+	"github.copilot.command.sessions.initializeRepository": "Initialize Repository",
+	"github.copilot.command.cli.plan.description": "Description text here",
+	"github.copilot.command.cli.fleet.description": "Description text here"
 }
