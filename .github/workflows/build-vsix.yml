@@ -31,6 +31,7 @@ jobs:
 
       - name: Build Extension (VSIX)
         run: |
+          npm run build
           # Install vsce globally
           npm install -g @vscode/vsce
           # Package the extension
