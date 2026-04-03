@@ -1,0 +1,41 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Runs daily at midnight UTC
+  workflow_dispatch: # Allows you to trigger this manually from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to push changes back to the repository
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Need full history to perform merges
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync with Upstream
+        run: |
+          # Add the official Microsoft repo as upstream
+          git remote add upstream https://github.com/microsoft/vscode-copilot-chat.git
+          
+          # Fetch changes
+          git fetch upstream
+          
+          # Switch to main branch
+          git checkout main
+          
+          # Merge the upstream changes
+          # Note: If there are merge conflicts, this step will fail and you will be notified.
+          git merge upstream/main --no-edit
+          
+          # Push changes back to your fork
+          git push origin main
