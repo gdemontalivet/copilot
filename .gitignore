@@ -62,3 +62,5 @@ test/aml/out
 .agents/skills/.local/
 .github/skills/.local/
 *.vsix
+
+package.nls.json
