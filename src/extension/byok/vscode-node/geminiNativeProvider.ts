@@ -435,17 +435,23 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 							} else if (part.functionCall && part.functionCall.name) {
 								// Gemini 3 includes thought signatures for function calling
 								// If we have a pending signature, emit it as a thinking part with metadata.signature
+								let thoughtSignatureForCallId: string | undefined;
 								if (pendingThinkingSignature) {
 									const thinkingPart = new LanguageModelThinkingPart('', undefined, { signature: pendingThinkingSignature });
 									progress.report(thinkingPart);
+									thoughtSignatureForCallId = pendingThinkingSignature;
 									pendingThinkingSignature = undefined;
 								}
 
 								if (ttfte === undefined) {
 									ttfte = Date.now() - issuedTime;
 								}
+								const baseUuid = generateUuid();
+								const finalCallId = thoughtSignatureForCallId
+									? `${part.functionCall.name}___uuid___${baseUuid}___thoughtsig___${thoughtSignatureForCallId}`
+									: `${part.functionCall.name}___uuid___${baseUuid}`;
 								progress.report(new LanguageModelToolCallPart(
-									generateUuid(),
+									finalCallId,
 									part.functionCall.name,
 									part.functionCall.args || {}
 								));
