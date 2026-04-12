@@ -6,7 +6,7 @@
 import { ApiError, GenerateContentParameters, GoogleGenAI, Tool, Type } from '@google/genai';
 import { CancellationToken, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelResponsePart2, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
 import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';
-import { CopilotConfig, IConfigurationService } from '../../../platform/configuration/common/configurationService';
+import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IResponseDelta, OpenAiFunctionTool } from '../../../platform/networking/common/fetch';
 import { APIUsage } from '../../../platform/networking/common/openai';
@@ -94,7 +94,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 		let otelSpan: ReturnType<typeof this._otelService.startSpan> | undefined;
 
 		const doRequest = async () => {
-			const maxRpm = this._configurationService.lookup(CopilotConfig.BYOKMaxRPM);
+			const maxRpm = this._configurationService.lookup(ConfigKey.BYOKMaxRPM);
 			await this._byokStorageService.throttleIfNecessary(maxRpm, GeminiNativeBYOKLMProvider.providerName);
 
 			const issuedTime = Date.now();

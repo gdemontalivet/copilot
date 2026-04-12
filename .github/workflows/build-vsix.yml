@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout code
@@ -42,3 +44,13 @@ jobs:
         with:
           name: copilot-custom-build
           path: copilot-custom-build.vsix
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="build-${GITHUB_SHA::7}"
+          gh release create "$TAG_NAME" copilot-custom-build.vsix \
+            --title "Build ${GITHUB_SHA::7}" \
+            --notes "Automated build from commit $GITHUB_SHA" \
+            --target $GITHUB_SHA
