@@ -71,7 +71,11 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 			let error: Error;
 			if (e instanceof ApiError) {
 				let message = e.message;
-				try { message = JSON.parse(message).error?.message; } catch { /* ignore */ }
+				try {
+					// The Gemini SDK sometimes appends " : Error: { ... }" to the message
+					const jsonPart = message.split(' : Error: ')[0] || message;
+					message = JSON.parse(jsonPart).error?.message ?? message;
+				} catch { /* ignore */ }
 				error = new Error(message ?? e.message, { cause: e });
 			} else {
 				error = new Error(toErrorMessage(e, true));
@@ -523,7 +527,11 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 			}
 			if (error instanceof ApiError) {
 				let message = error.message;
-				try { message = JSON.parse(message).error?.message ?? message; } catch { /* ignore */ }
+				try {
+					// The Gemini SDK sometimes appends " : Error: { ... }" to the message
+					const jsonPart = message.split(' : Error: ')[0] || message;
+					message = JSON.parse(jsonPart).error?.message ?? message;
+				} catch { /* ignore */ }
 				error = new Error(message, { cause: error });
 			}
 			this._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);
