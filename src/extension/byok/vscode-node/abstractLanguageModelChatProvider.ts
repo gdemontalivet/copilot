@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { CancellationToken, commands, EventEmitter, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatProvider, LanguageModelResponsePart2, PrepareLanguageModelChatModelOptions, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
-import { CopilotConfig, IConfigurationService } from '../../../platform/configuration/common/configurationService';
+import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { IChatModelInformation, ModelSupportedEndpoint } from '../../../platform/endpoint/common/endpointProvider';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
@@ -118,7 +118,7 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 	}
 
 	async provideLanguageModelChatResponse(model: OpenAICompatibleLanguageModelChatInformation<T>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {
-		const maxRpm = this._configurationService.lookup(CopilotConfig.BYOKMaxRPM);
+		const maxRpm = this._configurationService.lookup(ConfigKey.BYOKMaxRPM);
 		await this._byokStorageService.throttleIfNecessary(maxRpm, this._name);
 
 		const openAIChatEndpoint = await this.createOpenAIEndPoint(model, options);
@@ -222,8 +222,10 @@ export function getApproximateTokenCount(text: string | LanguageModelChatMessage
 	let textStr = '';
 	if (typeof text === 'string') {
 		textStr = text;
+	} else if (typeof (text as unknown as { content: unknown }).content === 'string') {
+		textStr = (text as unknown as { content: string }).content;
 	} else if (Array.isArray((text as LanguageModelChatMessage).content)) {
-		textStr = ((text as LanguageModelChatMessage).content as unknown as Array<string | { value: string }>).map(part => {
+		textStr = ((text as LanguageModelChatMessage).content as unknown as Array<string | { value?: string; name?: string; input?: unknown; callId?: string; content?: unknown }>).map(part => {
 			if (typeof part === 'string') {
 				return part;
 			} else if (part && typeof part === 'object') {
@@ -239,7 +241,7 @@ export function getApproximateTokenCount(text: string | LanguageModelChatMessage
 			return String(part);
 		}).join(' ');
 	} else {
-		textStr = String(text);
+		textStr = JSON.stringify(text);
 	}
 	return Math.ceil(textStr.length / 4);
 }
