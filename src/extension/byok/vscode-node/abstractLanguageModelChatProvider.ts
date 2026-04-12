@@ -50,13 +50,28 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 		await commands.executeCommand('lm.migrateLanguageModelsProviderGroup', { vendor: this._id, name, ...configuration });
 	}
 
+	private _modelsCache = new Map<string, { models: T[]; timestamp: number }>();
+	private readonly CACHE_DURATION_MS = 1000 * 60 * 60 * 24; // 24 hours
+
 	async provideLanguageModelChatInformation({ silent, configuration }: PrepareLanguageModelChatModelOptions, token: CancellationToken): Promise<T[]> {
 		let apiKey: string | undefined = (configuration as C)?.apiKey;
 		if (!apiKey) {
 			apiKey = await this.configureDefaultGroupWithApiKeyOnly();
 		}
 
+		const cacheKey = JSON.stringify({ apiKey, configuration });
+		const cached = this._modelsCache.get(cacheKey);
+		if (cached && (Date.now() - cached.timestamp) < this.CACHE_DURATION_MS) {
+			return cached.models.map(model => ({
+				...model,
+				apiKey,
+				configuration
+			}));
+		}
+
 		const models = await this.getAllModels(silent, apiKey, configuration as C);
+		this._modelsCache.set(cacheKey, { models, timestamp: Date.now() });
+
 		return models.map(model => ({
 			...model,
 			apiKey,
@@ -164,7 +179,7 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 		const url = modelInfo.supported_endpoints?.includes(ModelSupportedEndpoint.Responses) ?
 			`${model.url}/responses` :
 			`${model.url}/chat/completions`;
-		return this._instantiationService.createInstance(OpenAIEndpoint, modelInfo, model.configuration?.apiKey ?? (model as any).apiKey ?? options?.modelConfiguration?.apiKey ?? '', url);
+		return this._instantiationService.createInstance(OpenAIEndpoint, modelInfo, model.configuration?.apiKey ?? (model as unknown as { apiKey?: string }).apiKey ?? options?.modelConfiguration?.apiKey ?? '', url);
 	}
 
 	protected getModelInfo(modelId: string, modelUrl: string): IChatModelInformation {
