@@ -3,8 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { CancellationToken, commands, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatProvider, LanguageModelResponsePart2, LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolResultPart, PrepareLanguageModelChatModelOptions, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
-import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
+import { CancellationToken, commands, EventEmitter, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatProvider, LanguageModelResponsePart2, PrepareLanguageModelChatModelOptions, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
+import { CopilotConfig, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { IChatModelInformation, ModelSupportedEndpoint } from '../../../platform/endpoint/common/endpointProvider';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
@@ -25,6 +25,9 @@ export interface ExtendedLanguageModelChatInformation<C extends LanguageModelCha
 }
 
 export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelChatConfiguration = LanguageModelChatConfiguration, T extends ExtendedLanguageModelChatInformation<C> = ExtendedLanguageModelChatInformation<C>> implements LanguageModelChatProvider<T> {
+
+	protected readonly _onDidChangeLanguageModelChatInformation = new EventEmitter<void>();
+	public readonly onDidChangeLanguageModelChatInformation = this._onDidChangeLanguageModelChatInformation.event;
 
 	constructor(
 		protected readonly _id: string,
@@ -70,7 +73,15 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 		}
 
 		const models = await this.getAllModels(silent, apiKey, configuration as C);
-		this._modelsCache.set(cacheKey, { models, timestamp: Date.now() });
+
+		// If models changed, fire the event
+		if (!cached || JSON.stringify(cached.models) !== JSON.stringify(models)) {
+			this._modelsCache.set(cacheKey, { models, timestamp: Date.now() });
+			this._onDidChangeLanguageModelChatInformation.fire();
+		} else {
+			// Update timestamp even if models didn't change
+			this._modelsCache.set(cacheKey, { models, timestamp: Date.now() });
+		}
 
 		return models.map(model => ({
 			...model,
@@ -107,6 +118,9 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 	}
 
 	async provideLanguageModelChatResponse(model: OpenAICompatibleLanguageModelChatInformation<T>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {
+		const maxRpm = this._configurationService.lookup(CopilotConfig.BYOKMaxRPM);
+		await this._byokStorageService.throttleIfNecessary(maxRpm, this._name);
+
 		const openAIChatEndpoint = await this.createOpenAIEndPoint(model, options);
 		return this._lmWrapper.provideLanguageModelResponse(openAIChatEndpoint, messages, options, options.requestInitiator, progress, token);
 	}
@@ -168,7 +182,11 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 				modelList[model.id] = modelCapabilities;
 			}
 			return modelList;
-		} catch (error) {
+		} catch (error) {			// If we hit a rate limit or other error, fallback to known models to prevent infinite polling
+			if (this._knownModels) {
+				this._logService.warn(`Error fetching models from ${endpoint}, falling back to known models. Error: ${error instanceof Error ? error.message : error}`);
+				return this._knownModels;
+			}
 			this._logService.error(error, `Error fetching available OpenRouter models`);
 			throw error;
 		}
@@ -198,20 +216,30 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 
 }
 export function getApproximateTokenCount(text: string | LanguageModelChatMessage | LanguageModelChatMessage2): number {
+	if (!text) {
+		return 0;
+	}
 	let textStr = '';
 	if (typeof text === 'string') {
 		textStr = text;
-	} else {
-		textStr = text.content.map(part => {
-			if (part instanceof LanguageModelTextPart) {
-				return part.value;
-			} else if (part instanceof LanguageModelToolCallPart) {
-				return part.name + JSON.stringify(part.input);
-			} else if (part instanceof LanguageModelToolResultPart) {
-				return part.callId + JSON.stringify(part.content);
+	} else if (Array.isArray((text as LanguageModelChatMessage).content)) {
+		textStr = ((text as LanguageModelChatMessage).content as unknown as Array<string | { value: string }>).map(part => {
+			if (typeof part === 'string') {
+				return part;
+			} else if (part && typeof part === 'object') {
+				if (typeof part.value === 'string') {
+					return part.value;
+				} else if (part.name && part.input) {
+					return part.name + JSON.stringify(part.input);
+				} else if (part.callId && part.content) {
+					return part.callId + JSON.stringify(part.content);
+				}
+				return JSON.stringify(part);
 			}
-			return JSON.stringify(part);
+			return String(part);
 		}).join(' ');
+	} else {
+		textStr = String(text);
 	}
 	return Math.ceil(textStr.length / 4);
 }

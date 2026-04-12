@@ -53,6 +53,11 @@ export interface IBYOKStorageService {
 	 * 3. Custom model, and isDeletingCustomModel = false -> Do not delete from storage as we do not have the known model list. Instead mark unregistered
 	 */
 	removeModelConfig(modelId: string, providerName: string, isDeletingCustomModel: boolean): Promise<void>;
+
+	/**
+	 * Block the current request if the provider has exceeded the configured max RPM limit
+	 */
+	throttleIfNecessary(maxRpm: number, providerName: string): Promise<void>;
 }
 
 export class BYOKStorageService implements IBYOKStorageService {
@@ -164,6 +169,36 @@ export class BYOKStorageService implements IBYOKStorageService {
 				`copilot-byok-${providerName}-models-config`,
 				existingConfigs
 			);
+		}
+	}
+
+	public async throttleIfNecessary(maxRpm: number, providerName: string): Promise<void> {
+		if (!maxRpm || maxRpm <= 0) {
+			return;
+		}
+
+		const key = `copilot-byok-${providerName}-request-timestamps`;
+
+		while (true) {
+			const now = Date.now();
+			const oneMinuteAgo = now - 60000;
+			const timestamps = this._extensionContext.globalState.get<number[]>(key, []);
+
+			// Filter out timestamps older than 1 minute
+			const validTimestamps = timestamps.filter(t => t > oneMinuteAgo);
+
+			if (validTimestamps.length < maxRpm) {
+				validTimestamps.push(now);
+				await this._extensionContext.globalState.update(key, validTimestamps);
+				return;
+			}
+
+			// Calculate how long to wait until the oldest valid timestamp expires
+			const oldestValid = validTimestamps[0];
+			const waitTime = oldestValid - oneMinuteAgo;
+
+			// Wait and try again
+			await new Promise(resolve => setTimeout(resolve, Math.max(50, waitTime)));
 		}
 	}
 }

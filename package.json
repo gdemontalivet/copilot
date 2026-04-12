@@ -3034,6 +3034,11 @@
 							"onExp"
 						]
 					},
+					"github.copilot.chat.byok.maxRpm": {
+						"type": "number",
+						"default": 0,
+						"description": "Maximum number of requests per minute to send to Bring Your Own Key (BYOK) model APIs (0 for unlimited). This limit applies per provider across all VS Code windows."
+					},
 					"github.copilot.chat.customInstructionsInSystemMessage": {
 						"type": "boolean",
 						"default": true,

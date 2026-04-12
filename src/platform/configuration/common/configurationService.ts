@@ -869,6 +869,8 @@ export namespace ConfigKey {
 		export const AzureAuthType = defineSetting<AzureAuthMode>('chat.azureAuthType', ConfigType.Simple, AzureAuthMode.EntraId);
 	}
 
+	export const BYOKMaxRPM = defineSetting<number>('chat.byok.maxRpm', ConfigType.Simple, 0);
+
 	export const Enable = defineSetting<{ [key: string]: boolean }>('enable', ConfigType.Simple, {
 		'*': true,
 		'plaintext': false,

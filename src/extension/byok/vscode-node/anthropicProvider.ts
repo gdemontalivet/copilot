@@ -89,6 +89,12 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 			}
 			return byokKnownModelsToAPIInfoWithEffort(this._name, modelList);
 		} catch (error) {
+			// If we hit a rate limit or other error, fallback to known models to prevent infinite polling
+			if (this._knownModels) {
+				this._logService.warn(`Error fetching available ${AnthropicLMProvider.providerName} models, falling back to known models. Error: ${error.message ?? error}`);
+				return byokKnownModelsToAPIInfoWithEffort(this._name, this._knownModels);
+			}
+
 			this._logService.error(error, `Error fetching available ${AnthropicLMProvider.providerName} models`);
 			throw new Error(error.message ? error.message : error);
 		}
@@ -111,6 +117,9 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		let otelSpan: ReturnType<typeof this._otelService.startSpan> | undefined;
 
 		const doRequest = async () => {
+			const maxRpm = this._configurationService.lookup(CopilotConfig.BYOKMaxRPM);
+			await this._byokStorageService.throttleIfNecessary(maxRpm, AnthropicLMProvider.providerName);
+
 			const issuedTime = Date.now();
 			const apiKey = model.configuration?.apiKey;
 			if (!apiKey) {
