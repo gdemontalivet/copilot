@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { CancellationToken, commands, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatProvider, LanguageModelResponsePart2, PrepareLanguageModelChatModelOptions, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
+import { CancellationToken, commands, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatProvider, LanguageModelResponsePart2, LanguageModelTextPart, LanguageModelToolCallPart, LanguageModelToolResultPart, PrepareLanguageModelChatModelOptions, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
 import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { IChatModelInformation, ModelSupportedEndpoint } from '../../../platform/endpoint/common/endpointProvider';
 import { ILogService } from '../../../platform/log/common/logService';
@@ -196,4 +196,22 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 		return `${modelsBaseUrl}/models`;
 	}
 
+}
+export function getApproximateTokenCount(text: string | LanguageModelChatMessage | LanguageModelChatMessage2): number {
+	let textStr = '';
+	if (typeof text === 'string') {
+		textStr = text;
+	} else {
+		textStr = text.content.map(part => {
+			if (part instanceof LanguageModelTextPart) {
+				return part.value;
+			} else if (part instanceof LanguageModelToolCallPart) {
+				return part.name + JSON.stringify(part.input);
+			} else if (part instanceof LanguageModelToolResultPart) {
+				return part.callId + JSON.stringify(part.content);
+			}
+			return JSON.stringify(part);
+		}).join(' ');
+	}
+	return Math.ceil(textStr.length / 4);
 }
