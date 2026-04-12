@@ -60,6 +60,12 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 			}
 			return byokKnownModelsToAPIInfo(this._name, modelList);
 		} catch (e) {
+			// If we hit a rate limit or other error, fallback to known models to prevent infinite polling
+			if (this._knownModels) {
+				this._logService.warn(`Error fetching available ${GeminiNativeBYOKLMProvider.providerName} models, falling back to known models. Error: ${toErrorMessage(e, true)}`);
+				return byokKnownModelsToAPIInfo(this._name, this._knownModels);
+			}
+
 			let error: Error;
 			if (e instanceof ApiError) {
 				let message = e.message;
@@ -509,6 +515,11 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				this._logService.trace('Gemini streaming aborted');
 				// Return partial usage data collected before cancellation
 				return { ttft, ttfte, usage };
+			}
+			if (error instanceof ApiError) {
+				let message = error.message;
+				try { message = JSON.parse(message).error?.message ?? message; } catch { /* ignore */ }
+				error = new Error(message, { cause: error });
 			}
 			this._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);
 			throw error;
