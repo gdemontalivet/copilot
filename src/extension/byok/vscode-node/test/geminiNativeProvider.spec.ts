@@ -71,6 +71,7 @@ function createStorageService(overrides?: Partial<IBYOKStorageService>): IBYOKSt
 		getStoredModelConfigs: vi.fn().mockResolvedValue({}),
 		saveModelConfig: vi.fn().mockResolvedValue(undefined),
 		removeModelConfig: vi.fn().mockResolvedValue(undefined),
+		throttleIfNecessary: vi.fn().mockResolvedValue(undefined),
 		...overrides,
 	};
 }
@@ -105,7 +106,8 @@ describe('GeminiNativeBYOKLMProvider', () => {
 	it.skip('throws a clear error when no API key is configured (no silent return)', async () => {
 		const { GeminiNativeBYOKLMProvider } = await import('../geminiNativeProvider');
 		const storage = createStorageService({ getAPIKey: vi.fn().mockResolvedValue(undefined) });
-		const provider = new GeminiNativeBYOKLMProvider(undefined, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })));
+		const configService = { getConfig: vi.fn().mockReturnValue(0) } as any;
+		const provider = new GeminiNativeBYOKLMProvider(undefined, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })), configService);
 
 		const model: vscode.LanguageModelChatInformation = {
 			id: 'gemini-2.0-flash',
@@ -235,7 +237,8 @@ describe('GeminiNativeBYOKLMProvider', () => {
 
 		mockHandleAPIKeyUpdate.mockResolvedValue({ apiKey: undefined, deleted: false, cancelled: true });
 
-		const provider = new GeminiNativeBYOKLMProvider(undefined, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })));
+		const configService = { getConfig: vi.fn().mockReturnValue(0) } as any;
+		const provider = new GeminiNativeBYOKLMProvider(undefined, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })), configService);
 		const tokenSource = new vscode.CancellationTokenSource();
 		const models = await provider.provideLanguageModelChatInformation({ silent: false }, tokenSource.token);
 
@@ -281,7 +284,8 @@ describe('GeminiNativeBYOKLMProvider', () => {
 			}
 		};
 
-		const provider = new GeminiNativeBYOKLMProvider(knownModels, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })));
+		const configService = { getConfig: vi.fn().mockReturnValue(0) } as any;
+		const provider = new GeminiNativeBYOKLMProvider(knownModels, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })), configService);
 		const tokenSource = new vscode.CancellationTokenSource();
 		const models = await provider.provideLanguageModelChatInformation({ silent: false }, tokenSource.token);
 
