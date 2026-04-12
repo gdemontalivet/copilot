@@ -573,6 +573,7 @@ export namespace ConfigKey {
 	 * We should not change the names of these settings without coordinating with Completions extension.
 	*/
 	export namespace Shared {
+		export const BYOKMaxRPM = defineSetting<number>('chat.byok.maxRpm', ConfigType.Simple, 0);
 		/** Allows for overriding the base domain we use for making requests to the CAPI. This helps CAPI devs develop against a local instance. */
 		export const DebugOverrideProxyUrl = defineSetting<string | undefined>('advanced.debug.overrideProxyUrl', ConfigType.Simple, undefined);
 		export const DebugOverrideCAPIUrl = defineSetting<string | undefined>('advanced.debug.overrideCapiUrl', ConfigType.Simple, undefined);
@@ -868,8 +869,6 @@ export namespace ConfigKey {
 		export const CustomOAIModels = defineSetting<Record<string, { name: string; url: string; toolCalling: boolean; vision: boolean; maxInputTokens: number; maxOutputTokens: number; requiresAPIKey?: boolean; thinking?: boolean; streaming?: boolean; requestHeaders?: Record<string, string>; zeroDataRetentionEnabled?: boolean }>>('chat.customOAIModels', ConfigType.Simple, {});
 		export const AzureAuthType = defineSetting<AzureAuthMode>('chat.azureAuthType', ConfigType.Simple, AzureAuthMode.EntraId);
 	}
-
-	export const BYOKMaxRPM = defineSetting<number>('chat.byok.maxRpm', ConfigType.Simple, 0);
 
 	export const Enable = defineSetting<{ [key: string]: boolean }>('enable', ConfigType.Simple, {
 		'*': true,
