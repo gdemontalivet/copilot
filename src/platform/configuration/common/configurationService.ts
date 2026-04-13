@@ -581,6 +581,7 @@ export namespace ConfigKey {
 		export const DebugUseElectronFetcher = defineSetting('advanced.debug.useElectronFetcher', ConfigType.Simple, true);
 		export const AuthProvider = defineSetting<AuthProviderId>('advanced.authProvider', ConfigType.Simple, AuthProviderId.GitHub);
 		export const AuthPermissions = defineSetting<AuthPermissionMode>('advanced.authPermissions', ConfigType.Simple, AuthPermissionMode.Default);
+		export const BYOKMaxRPM = defineSetting<number>('chat.byok.maxRequestsPerMinute', ConfigType.Simple, 0);
 	}
 
 	/**
