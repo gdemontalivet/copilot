@@ -6,6 +6,7 @@
 import { ApiError, GenerateContentParameters, GoogleGenAI, Tool, Type } from '@google/genai';
 import { CancellationToken, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelResponsePart2, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
 import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';
+import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IResponseDelta, OpenAiFunctionTool } from '../../../platform/networking/common/fetch';
 import { APIUsage } from '../../../platform/networking/common/openai';
@@ -19,8 +20,38 @@ import { generateUuid } from '../../../util/vs/base/common/uuid';
 import { BYOKKnownModels, byokKnownModelsToAPIInfo, BYOKModelCapabilities, LMResponsePart } from '../common/byokProvider';
 import { toGeminiFunction as toGeminiFunctionDeclaration, ToolJsonSchema } from '../common/geminiFunctionDeclarationConverter';
 import { apiMessageToGeminiMessage, geminiMessagesToRawMessagesForLogging } from '../common/geminiMessageConverter';
-import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
+import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation, getApproximateTokenCount, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
 import { IBYOKStorageService } from './byokStorageService';
+
+/**
+ * Map a resource name from Gemini `models.list()` to a key in BYOK known models.
+ * The API may return `models/gemini-2.5-flash`, a short id, or a longer resource path;
+ * copilotChat.json keys are typically `models/...`.
+ */
+export function resolveGeminiKnownModelId(apiResourceName: string, knownModels: BYOKKnownModels | undefined): string | undefined {
+	if (!knownModels) {
+		return undefined;
+	}
+	const trimmed = apiResourceName.trim();
+	if (!trimmed) {
+		return undefined;
+	}
+	if (knownModels[trimmed]) {
+		return trimmed;
+	}
+	const shortId = trimmed.includes('/') ? trimmed.slice(trimmed.lastIndexOf('/') + 1) : trimmed;
+	if (!shortId) {
+		return undefined;
+	}
+	const modelsPrefixed = `models/${shortId}`;
+	if (knownModels[modelsPrefixed]) {
+		return modelsPrefixed;
+	}
+	if (knownModels[shortId]) {
+		return shortId;
+	}
+	return undefined;
+}
 
 export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvider {
 
@@ -33,11 +64,12 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 		@IRequestLogger private readonly _requestLogger: IRequestLogger,
 		@ITelemetryService private readonly _telemetryService: ITelemetryService,
 		@IOTelService private readonly _otelService: IOTelService,
+		@IConfigurationService private readonly _configurationService: IConfigurationService,
 	) {
 		super(GeminiNativeBYOKLMProvider.providerName.toLowerCase(), GeminiNativeBYOKLMProvider.providerName, knownModels, byokStorageService, logService);
 	}
 
-	protected async getAllModels(silent: boolean, apiKey: string | undefined): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
+	protected async getAllModels(silent: boolean, apiKey: string | undefined, _configuration?: LanguageModelChatConfiguration): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
 		if (!apiKey && silent) {
 			return [];
 		}
@@ -48,22 +80,41 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 			const modelList: Record<string, BYOKModelCapabilities> = {};
 
 			for await (const model of models) {
-				const modelId = model.name;
-				if (!modelId) {
+				const apiName = model.name;
+				if (!apiName) {
 					continue; // Skip models without names
 				}
 
-				// Enable only known models.
-				if (this._knownModels && this._knownModels[modelId]) {
-					modelList[modelId] = this._knownModels[modelId];
+				const knownId = resolveGeminiKnownModelId(apiName, this._knownModels);
+				if (knownId && this._knownModels) {
+					modelList[knownId] = this._knownModels[knownId];
 				}
 			}
+
+			// Successful list but no intersection (e.g. API name shape changed) — still offer CDN-known models
+			if (Object.keys(modelList).length === 0 && this._knownModels && Object.keys(this._knownModels).length > 0) {
+				this._logService.warn(
+					`${GeminiNativeBYOKLMProvider.providerName} BYOK: models.list() matched no known model ids; using CDN known model list. Check API vs copilotChat.json id alignment if chat fails for a model.`,
+				);
+				return byokKnownModelsToAPIInfo(this._name, this._knownModels);
+			}
+
 			return byokKnownModelsToAPIInfo(this._name, modelList);
 		} catch (e) {
+			// If we hit a rate limit or other error, fallback to known models to prevent infinite polling
+			if (this._knownModels) {
+				this._logService.warn(`Error fetching available ${GeminiNativeBYOKLMProvider.providerName} models, falling back to known models. Error: ${toErrorMessage(e, true)}`);
+				return byokKnownModelsToAPIInfo(this._name, this._knownModels);
+			}
+
 			let error: Error;
 			if (e instanceof ApiError) {
 				let message = e.message;
-				try { message = JSON.parse(message).error?.message; } catch { /* ignore */ }
+				try {
+					// The Gemini SDK sometimes appends " : Error: { ... }" to the message
+					const jsonPart = message.split(' : Error: ')[0] || message;
+					message = JSON.parse(jsonPart).error?.message ?? message;
+				} catch { /* ignore */ }
 				error = new Error(message ?? e.message, { cause: e });
 			} else {
 				error = new Error(toErrorMessage(e, true));
@@ -86,6 +137,9 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 		let otelSpan: ReturnType<typeof this._otelService.startSpan> | undefined;
 
 		const doRequest = async () => {
+			const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
+			await this._byokStorageService.throttleIfNecessary(maxRpm, GeminiNativeBYOKLMProvider.providerName);
+
 			const issuedTime = Date.now();
 			const apiKey = model.configuration?.apiKey ?? options.modelConfiguration?.apiKey;
 			if (!apiKey) {
@@ -309,8 +363,13 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				});
 			} catch (err) {
 				this._logService.error(`BYOK GeminiNative error: ${toErrorMessage(err, true)}`);
+				const isRateLimit = (err as any)?.status === 429 || ((err as Error)?.message?.toLowerCase().includes('rate limit'));
 				pendingLoggedChatRequest.resolve({
-					type: token.isCancellationRequested ? ChatFetchResponseType.Canceled : ChatFetchResponseType.Unknown,
+					type: token.isCancellationRequested
+						? ChatFetchResponseType.Canceled
+						: isRateLimit
+							? ChatFetchResponseType.RateLimited
+							: ChatFetchResponseType.Unknown,
 					requestId,
 					serverRequestId: requestId,
 					reason: token.isCancellationRequested ? 'cancelled' : toErrorMessage(err)
@@ -384,10 +443,11 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 
 	async provideTokenCount(model: LanguageModelChatInformation, text: string | LanguageModelChatMessage | LanguageModelChatMessage2, token: CancellationToken): Promise<number> {
 		// Simple estimation for approximate token count - actual token count would require Gemini's tokenizer
-		return Math.ceil(text.toString().length / 4);
+		return getApproximateTokenCount(text);
 	}
 
-	private async _makeRequest(client: GoogleGenAI, progress: Progress<LMResponsePart>, params: GenerateContentParameters, token: CancellationToken, issuedTime: number): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined }> {
+	private async _makeRequest(client: GoogleGenAI, progress: Progress<LMResponsePart>, params: GenerateContentParameters, token: CancellationToken, issuedTime: number, retryCount = 0): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined }> {
+		const MAX_RETRIES = 3;
 		const start = Date.now();
 		let ttft: number | undefined;
 		let ttfte: number | undefined;
@@ -509,6 +569,34 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				this._logService.trace('Gemini streaming aborted');
 				// Return partial usage data collected before cancellation
 				return { ttft, ttfte, usage };
+			}
+			if (error instanceof ApiError && error.status === 429) {
+				if (retryCount < MAX_RETRIES) {
+					const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
+					this._logService.warn(`Gemini rate limit (429), backing off before retry ${retryCount + 1}/${MAX_RETRIES}`);
+					await this._byokStorageService.onRateLimitHit(maxRpm, GeminiNativeBYOKLMProvider.providerName);
+					await this._byokStorageService.throttleIfNecessary(maxRpm, GeminiNativeBYOKLMProvider.providerName);
+					if (token.isCancellationRequested) {
+						return { ttft, ttfte, usage };
+					}
+					return this._makeRequest(client, progress, params, token, issuedTime, retryCount + 1);
+				}
+				// All retries exhausted — surface a clean message, not the raw JSON blob
+				let friendlyMsg = 'Rate limit exceeded. Please check your Gemini API quota.';
+				try {
+					const jsonPart = error.message.split(' : Error: ')[0] || error.message;
+					friendlyMsg = JSON.parse(jsonPart).error?.message ?? friendlyMsg;
+				} catch { /* ignore */ }
+				throw new Error(friendlyMsg);
+			}
+			if (error instanceof ApiError) {
+				let message = error.message;
+				try {
+					// The Gemini SDK sometimes appends " : Error: { ... }" to the message
+					const jsonPart = message.split(' : Error: ')[0] || message;
+					message = JSON.parse(jsonPart).error?.message ?? message;
+				} catch { /* ignore */ }
+				error = new Error(message, { cause: error });
 			}
 			this._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);
 			throw error;
