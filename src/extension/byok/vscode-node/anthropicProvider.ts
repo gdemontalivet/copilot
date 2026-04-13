@@ -118,7 +118,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 
 		const doRequest = async () => {
 			const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
-			await this._byokStorageService.throttleIfNecessary(maxRpm, AnthropicLMProvider.providerName);
+			await this._byokStorageService.throttleIfNecessary?.(maxRpm, AnthropicLMProvider.providerName);
 
 			const issuedTime = Date.now();
 			const apiKey = model.configuration?.apiKey;
@@ -567,8 +567,8 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 					const blockedUntil = Date.now() + (retryAfterSec > 0 ? retryAfterSec * 1000 : 60000);
 					const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
 					this._logService.warn(`Anthropic rate limit (429), backing off before retry ${retryCount + 1}/${MAX_RETRIES}`);
-					await this._byokStorageService.onRateLimitHit(maxRpm, AnthropicLMProvider.providerName, blockedUntil);
-					await this._byokStorageService.throttleIfNecessary(maxRpm, AnthropicLMProvider.providerName);
+					await this._byokStorageService.onRateLimitHit?.(maxRpm, AnthropicLMProvider.providerName, blockedUntil);
+					await this._byokStorageService.throttleIfNecessary?.(maxRpm, AnthropicLMProvider.providerName);
 					if (token.isCancellationRequested) {
 						return { ttft, ttfte, usage: undefined, contextManagement: undefined };
 					}

@@ -138,7 +138,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 
 		const doRequest = async () => {
 			const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
-			await this._byokStorageService.throttleIfNecessary(maxRpm, GeminiNativeBYOKLMProvider.providerName);
+			await this._byokStorageService.throttleIfNecessary?.(maxRpm, GeminiNativeBYOKLMProvider.providerName);
 
 			const issuedTime = Date.now();
 			const apiKey = model.configuration?.apiKey ?? options.modelConfiguration?.apiKey;
@@ -574,8 +574,8 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				if (retryCount < MAX_RETRIES) {
 					const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
 					this._logService.warn(`Gemini rate limit (429), backing off before retry ${retryCount + 1}/${MAX_RETRIES}`);
-					await this._byokStorageService.onRateLimitHit(maxRpm, GeminiNativeBYOKLMProvider.providerName);
-					await this._byokStorageService.throttleIfNecessary(maxRpm, GeminiNativeBYOKLMProvider.providerName);
+					await this._byokStorageService.onRateLimitHit?.(maxRpm, GeminiNativeBYOKLMProvider.providerName);
+					await this._byokStorageService.throttleIfNecessary?.(maxRpm, GeminiNativeBYOKLMProvider.providerName);
 					if (token.isCancellationRequested) {
 						return { ttft, ttfte, usage };
 					}

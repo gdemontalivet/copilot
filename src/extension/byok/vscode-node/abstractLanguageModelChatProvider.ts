@@ -119,7 +119,7 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 
 	async provideLanguageModelChatResponse(model: OpenAICompatibleLanguageModelChatInformation<T>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {
 		const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
-		await this._byokStorageService.throttleIfNecessary(maxRpm, this._name);
+		await this._byokStorageService.throttleIfNecessary?.(maxRpm, this._name);
 
 		const openAIChatEndpoint = await this.createOpenAIEndPoint(model, options);
 		return this._lmWrapper.provideLanguageModelResponse(openAIChatEndpoint, messages, options, options.requestInitiator, progress, token);
