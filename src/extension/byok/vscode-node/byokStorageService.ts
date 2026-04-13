@@ -53,6 +53,18 @@ export interface IBYOKStorageService {
 	 * 3. Custom model, and isDeletingCustomModel = false -> Do not delete from storage as we do not have the known model list. Instead mark unregistered
 	 */
 	removeModelConfig(modelId: string, providerName: string, isDeletingCustomModel: boolean): Promise<void>;
+
+	/**
+	 * Block the current request if the provider has exceeded the configured max RPM limit
+	 */
+	throttleIfNecessary(maxRpm: number, providerName: string): Promise<void>;
+
+	/**
+	 * Called when the provider API returns a 429 rate-limit response.
+	 * Fills the RPM timestamp bucket (if maxRpm > 0) and sets a blocked-until
+	 * timestamp so all subsequent requests across VS Code windows wait before retrying.
+	 */
+	onRateLimitHit(maxRpm: number, providerName: string, blockedUntil?: number): Promise<void>;
 }
 
 export class BYOKStorageService implements IBYOKStorageService {
@@ -164,6 +176,51 @@ export class BYOKStorageService implements IBYOKStorageService {
 				`copilot-byok-${providerName}-models-config`,
 				existingConfigs
 			);
+		}
+	}
+
+	public async onRateLimitHit(maxRpm: number, providerName: string, blockedUntil?: number): Promise<void> {
+		const blockedUntilKey = `copilot-byok-${providerName}-blocked-until`;
+		await this._extensionContext.globalState.update(blockedUntilKey, blockedUntil ?? Date.now() + 60000);
+
+		if (maxRpm > 0) {
+			const tsKey = `copilot-byok-${providerName}-request-timestamps`;
+			const fullBucket = new Array(maxRpm).fill(Date.now());
+			await this._extensionContext.globalState.update(tsKey, fullBucket);
+		}
+	}
+
+	public async throttleIfNecessary(maxRpm: number, providerName: string): Promise<void> {
+		const blockedUntilKey = `copilot-byok-${providerName}-blocked-until`;
+		const blockedUntil = this._extensionContext.globalState.get<number>(blockedUntilKey, 0);
+		if (blockedUntil > Date.now()) {
+			await new Promise(resolve => setTimeout(resolve, blockedUntil - Date.now()));
+			await this._extensionContext.globalState.update(blockedUntilKey, 0);
+		}
+
+		if (!maxRpm || maxRpm <= 0) {
+			return;
+		}
+
+		const key = `copilot-byok-${providerName}-request-timestamps`;
+
+		while (true) {
+			const now = Date.now();
+			const oneMinuteAgo = now - 60000;
+			const timestamps = this._extensionContext.globalState.get<number[]>(key, []);
+
+			const validTimestamps = timestamps.filter(t => t > oneMinuteAgo);
+
+			if (validTimestamps.length < maxRpm) {
+				validTimestamps.push(now);
+				await this._extensionContext.globalState.update(key, validTimestamps);
+				return;
+			}
+
+			const oldestValid = validTimestamps[0];
+			const waitTime = oldestValid - oneMinuteAgo;
+
+			await new Promise(resolve => setTimeout(resolve, Math.max(50, waitTime)));
 		}
 	}
 }
