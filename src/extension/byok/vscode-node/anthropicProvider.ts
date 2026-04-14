@@ -116,9 +116,14 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		// OTel span handle — created outside doRequest, enriched inside with usage data
 		let otelSpan: ReturnType<typeof this._otelService.startSpan> | undefined;
 
+		const reportThrottle = (waitMs: number) => {
+			const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
+			progress.report(new vscode.LanguageModelThinkingPart(`[Rate limit] Waiting ~${Math.ceil(waitMs / 1000)}s (${maxRpm} req/min limit)...\n`));
+		};
+
 		const doRequest = async () => {
 			const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
-			await this._byokStorageService.throttleIfNecessary?.(maxRpm, AnthropicLMProvider.providerName);
+			await this._byokStorageService.throttleIfNecessary?.(maxRpm, AnthropicLMProvider.providerName, reportThrottle);
 
 			const issuedTime = Date.now();
 			const apiKey = model.configuration?.apiKey;
@@ -574,7 +579,9 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 					const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
 					this._logService.warn(`Anthropic rate limit (429), backing off before retry ${retryCount + 1}/${MAX_RETRIES}`);
 					await this._byokStorageService.onRateLimitHit?.(maxRpm, AnthropicLMProvider.providerName, blockedUntil);
-					await this._byokStorageService.throttleIfNecessary?.(maxRpm, AnthropicLMProvider.providerName);
+					await this._byokStorageService.throttleIfNecessary?.(maxRpm, AnthropicLMProvider.providerName, (waitMs) => {
+						progress.report(new vscode.LanguageModelThinkingPart(`[Rate limit] 429 retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(waitMs / 1000)}s...\n`));
+					});
 					if (token.isCancellationRequested) {
 						return { ttft, ttfte, usage: undefined, contextManagement: undefined };
 					}

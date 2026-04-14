@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { CancellationToken, commands, EventEmitter, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatProvider, LanguageModelResponsePart2, PrepareLanguageModelChatModelOptions, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
+import { CancellationToken, commands, EventEmitter, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatProvider, LanguageModelResponsePart2, LanguageModelThinkingPart, PrepareLanguageModelChatModelOptions, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { IChatModelInformation, ModelSupportedEndpoint } from '../../../platform/endpoint/common/endpointProvider';
 import { ILogService } from '../../../platform/log/common/logService';
@@ -119,7 +119,9 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 
 	async provideLanguageModelChatResponse(model: OpenAICompatibleLanguageModelChatInformation<T>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {
 		const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
-		await this._byokStorageService.throttleIfNecessary?.(maxRpm, this._name);
+		await this._byokStorageService.throttleIfNecessary?.(maxRpm, this._name, (waitMs) => {
+			progress.report(new LanguageModelThinkingPart(`[Rate limit] Waiting ~${Math.ceil(waitMs / 1000)}s (${maxRpm} req/min limit)...\n`));
+		});
 
 		const openAIChatEndpoint = await this.createOpenAIEndPoint(model, options);
 		return this._lmWrapper.provideLanguageModelResponse(openAIChatEndpoint, messages, options, options.requestInitiator, progress, token);

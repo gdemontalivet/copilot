@@ -55,9 +55,10 @@ export interface IBYOKStorageService {
 	removeModelConfig(modelId: string, providerName: string, isDeletingCustomModel: boolean): Promise<void>;
 
 	/**
-	 * Block the current request if the provider has exceeded the configured max RPM limit
+	 * Block the current request if the provider has exceeded the configured max RPM limit.
+	 * @param onThrottled Optional callback invoked once when waiting begins, with the estimated wait time in ms.
 	 */
-	throttleIfNecessary(maxRpm: number, providerName: string): Promise<void>;
+	throttleIfNecessary(maxRpm: number, providerName: string, onThrottled?: (waitingMs: number) => void): Promise<void>;
 
 	/**
 	 * Called when the provider API returns a 429 rate-limit response.
@@ -190,10 +191,11 @@ export class BYOKStorageService implements IBYOKStorageService {
 		}
 	}
 
-	public async throttleIfNecessary(maxRpm: number, providerName: string): Promise<void> {
+	public async throttleIfNecessary(maxRpm: number, providerName: string, onThrottled?: (waitingMs: number) => void): Promise<void> {
 		const blockedUntilKey = `copilot-byok-${providerName}-blocked-until`;
 		const blockedUntil = this._extensionContext.globalState.get<number>(blockedUntilKey, 0);
 		if (blockedUntil > Date.now()) {
+			onThrottled?.(blockedUntil - Date.now());
 			await new Promise(resolve => setTimeout(resolve, blockedUntil - Date.now()));
 			await this._extensionContext.globalState.update(blockedUntilKey, 0);
 		}
@@ -203,6 +205,7 @@ export class BYOKStorageService implements IBYOKStorageService {
 		}
 
 		const key = `copilot-byok-${providerName}-request-timestamps`;
+		let notified = false;
 
 		while (true) {
 			const now = Date.now();
@@ -219,6 +222,11 @@ export class BYOKStorageService implements IBYOKStorageService {
 
 			const oldestValid = validTimestamps[0];
 			const waitTime = oldestValid - oneMinuteAgo;
+
+			if (!notified) {
+				onThrottled?.(waitTime);
+				notified = true;
+			}
 
 			await new Promise(resolve => setTimeout(resolve, Math.max(50, waitTime)));
 		}

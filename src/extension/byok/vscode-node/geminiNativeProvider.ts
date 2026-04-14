@@ -137,9 +137,14 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 		// OTel span handle — created outside doRequest, enriched inside with usage data
 		let otelSpan: ReturnType<typeof this._otelService.startSpan> | undefined;
 
+		const reportThrottle = (waitMs: number) => {
+			const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
+			progress.report(new LanguageModelThinkingPart(`[Rate limit] Waiting ~${Math.ceil(waitMs / 1000)}s (${maxRpm} req/min limit)...\n`));
+		};
+
 		const doRequest = async () => {
 			const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
-			await this._byokStorageService.throttleIfNecessary?.(maxRpm, GeminiNativeBYOKLMProvider.providerName);
+			await this._byokStorageService.throttleIfNecessary?.(maxRpm, GeminiNativeBYOKLMProvider.providerName, reportThrottle);
 
 			const issuedTime = Date.now();
 			const apiKey = model.configuration?.apiKey ?? options.modelConfiguration?.apiKey;
@@ -591,7 +596,9 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 					this._logService.warn(`Gemini ${error.status === 429 ? 'rate limit' : 'service unavailable'} (${error.status}), backing off before retry ${retryCount + 1}/${MAX_RETRIES}`);
 					if (error.status === 429) {
 						await this._byokStorageService.onRateLimitHit?.(maxRpm, GeminiNativeBYOKLMProvider.providerName);
-						await this._byokStorageService.throttleIfNecessary?.(maxRpm, GeminiNativeBYOKLMProvider.providerName);
+						await this._byokStorageService.throttleIfNecessary?.(maxRpm, GeminiNativeBYOKLMProvider.providerName, (waitMs) => {
+							progress.report(new LanguageModelThinkingPart(`[Rate limit] 429 retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(waitMs / 1000)}s...\n`));
+						});
 					} else {
 						await new Promise(resolve => setTimeout(resolve, Math.min(2000 * Math.pow(2, retryCount), 16000)));
 					}
