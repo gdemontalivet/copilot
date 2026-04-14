@@ -73,8 +73,12 @@ export class PlanAgentProvider extends Disposable implements vscode.ChatCustomAg
 		_context: unknown,
 		_token: vscode.CancellationToken
 	): Promise<vscode.ChatResource[]> {
+		// Detect BYOK-only mode: no copilot-vendor models means no Copilot subscription
+		const allModels = await vscode.lm.selectChatModels();
+		const hasCopilotModels = allModels.some(m => m.vendor === 'copilot');
+
 		// Build config with settings-based customization
-		const config = this.buildCustomizedConfig();
+		const config = this.buildCustomizedConfig(hasCopilotModels);
 
 		// Generate .agent.md content
 		const content = buildAgentMarkdown(config);
@@ -195,19 +199,22 @@ Rules:
 </plan_style_guide>`;
 	}
 
-	private buildCustomizedConfig(): AgentConfig {
+	private buildCustomizedConfig(hasCopilotModels: boolean): AgentConfig {
 		const additionalTools = this.configurationService.getConfig(ConfigKey.PlanAgentAdditionalTools);
 		const coreDefaultModel = this.configurationService.getNonExtensionConfig<string>('chat.planAgent.defaultModel');
 		const modelOverride = coreDefaultModel || this.configurationService.getConfig(ConfigKey.Deprecated.PlanAgentModel);
 
 		const implementAgentModelOverride = this.configurationService.getConfig(ConfigKey.ImplementAgentModel);
 
-		// Build handoffs dynamically with model override
+		// Build handoffs dynamically with model override.
+		// In BYOK-only mode (no Copilot subscription), hide the "Continue in ..." dropdown
+		// since Copilot CLI and Cloud sessions aren't available.
 		const startImplementationHandoff: AgentHandoff = {
 			label: 'Start Implementation',
 			agent: 'agent',
 			prompt: 'Start implementation',
 			send: true,
+			...(!hasCopilotModels ? { showContinueOn: false } : {}),
 			...(implementAgentModelOverride ? { model: implementAgentModelOverride } : {})
 		};
 
