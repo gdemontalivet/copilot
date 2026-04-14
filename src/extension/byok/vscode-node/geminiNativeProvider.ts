@@ -574,8 +574,16 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 		} catch (error) {
 			if ((error as any)?.name === 'AbortError' || token.isCancellationRequested) {
 				this._logService.trace('Gemini streaming aborted');
-				// Return partial usage data collected before cancellation
 				return { ttft, ttfte, usage };
+			}
+			if (error instanceof TypeError && error.message.includes('fetch failed') && retryCount < MAX_RETRIES) {
+				const delay = Math.min(2000 * Math.pow(2, retryCount), 16000);
+				this._logService.warn(`Gemini network error, retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES})`);
+				await new Promise(resolve => setTimeout(resolve, delay));
+				if (token.isCancellationRequested) {
+					return { ttft, ttfte, usage };
+				}
+				return this._makeRequest(client, progress, params, token, issuedTime, retryCount + 1);
 			}
 			if (error instanceof ApiError && error.status === 429) {
 				if (retryCount < MAX_RETRIES) {
@@ -588,25 +596,40 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 					}
 					return this._makeRequest(client, progress, params, token, issuedTime, retryCount + 1);
 				}
-				// All retries exhausted — surface a clean message, not the raw JSON blob
-				let friendlyMsg = 'Rate limit exceeded. Please check your Gemini API quota.';
-				try {
-					const jsonPart = error.message.split(' : Error: ')[0] || error.message;
-					friendlyMsg = JSON.parse(jsonPart).error?.message ?? friendlyMsg;
-				} catch { /* ignore */ }
-				throw new Error(friendlyMsg);
+				throw new Error(extractGeminiErrorMessage(error, 'Rate limit exceeded. Please check your Gemini API quota.'));
 			}
 			if (error instanceof ApiError) {
-				let message = error.message;
-				try {
-					// The Gemini SDK sometimes appends " : Error: { ... }" to the message
-					const jsonPart = message.split(' : Error: ')[0] || message;
-					message = JSON.parse(jsonPart).error?.message ?? message;
-				} catch { /* ignore */ }
-				error = new Error(message, { cause: error });
+				error = new Error(extractGeminiErrorMessage(error, error.message), { cause: error });
 			}
 			this._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);
 			throw error;
 		}
 	}
+}
+
+/**
+ * Extract the human-readable message from a Gemini ApiError.
+ * The SDK sometimes wraps the JSON body in formats like:
+ *   "{ json } : Error: { json }"  or  "{ json }"
+ */
+function extractGeminiErrorMessage(error: ApiError, fallback: string): string {
+	try {
+		const msg = error.message;
+		// Try the " : Error: " split first (SDK v2 format)
+		const parts = msg.split(' : Error: ');
+		for (const part of parts) {
+			try {
+				const parsed = JSON.parse(part.trim());
+				if (parsed?.error?.message) {
+					return parsed.error.message;
+				}
+			} catch { /* not JSON, try next part */ }
+		}
+		// Try the whole message as JSON
+		const parsed = JSON.parse(msg);
+		if (parsed?.error?.message) {
+			return parsed.error.message;
+		}
+	} catch { /* ignore all parse failures */ }
+	return fallback;
 }

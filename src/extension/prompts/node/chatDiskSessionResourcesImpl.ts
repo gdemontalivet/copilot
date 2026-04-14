@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { createHash } from 'crypto';
 import { IVSCodeExtensionContext } from '../../../platform/extContext/common/extensionContext';
 import { IFileSystemService } from '../../../platform/filesystem/common/fileSystemService';
 import { FileType } from '../../../platform/filesystem/common/fileTypes';
@@ -28,11 +29,23 @@ const RETENTION_PERIOD_MS = 8 * 60 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 /**
+ * Max length for a single path component. macOS enforces 255 bytes; we stay well
+ * under that to leave room for the file extension and parent path components.
+ */
+const MAX_PATH_COMPONENT_LENGTH = 200;
+
+/**
  * Sanitizes a string to only contain alphanumeric characters, underscores, and dashes.
- * This prevents path injection attacks.
+ * This prevents path injection attacks. Long strings (e.g. Gemini thought signatures
+ * embedded in tool call IDs) are truncated with a hash suffix for uniqueness.
  */
 function sanitizePathComponent(str: string): string {
-	return str.replace(/[^a-zA-Z0-9_.-]/g, '_');
+	const sanitized = str.replace(/[^a-zA-Z0-9_.-]/g, '_');
+	if (sanitized.length <= MAX_PATH_COMPONENT_LENGTH) {
+		return sanitized;
+	}
+	const hash = createHash('sha256').update(str).digest('hex').slice(0, 32);
+	return sanitized.slice(0, MAX_PATH_COMPONENT_LENGTH - 33) + '_' + hash;
 }
 
 export class ChatDiskSessionResources extends Disposable implements IChatDiskSessionResources {

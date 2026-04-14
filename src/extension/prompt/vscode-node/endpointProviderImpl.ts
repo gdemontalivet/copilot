@@ -30,6 +30,8 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 	private _chatEndpoints: Map<string, IChatEndpoint> = new Map();
 	private _embeddingEndpoints: Map<string, IEmbeddingsEndpoint> = new Map();
 	private readonly _modelFetcher: IModelMetadataFetcher;
+	private _cachedCustomEndpoint: IChatEndpoint | undefined;
+	private _customEndpointResolved = false;
 
 	constructor(
 		@IAutomodeService private readonly _autoModeService: IAutomodeService,
@@ -48,6 +50,8 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 		this._register(this._modelFetcher.onDidModelsRefresh(() => {
 			this._chatEndpoints.clear();
 			this._embeddingEndpoints.clear();
+			this._cachedCustomEndpoint = undefined;
+			this._customEndpointResolved = false;
 			this._onDidModelsRefresh.fire();
 		}));
 	}
@@ -63,15 +67,19 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 	}
 
 	private async _getFirstCustomModel(): Promise<IChatEndpoint | undefined> {
+		if (this._customEndpointResolved) {
+			return this._cachedCustomEndpoint;
+		}
 		try {
 			this._logService.info(`[STARTUP] _getFirstCustomModel: querying vscode.lm.selectChatModels()...`);
 			const models = await vscode.lm.selectChatModels();
 			this._logService.info(`[STARTUP] _getFirstCustomModel: got ${models.length} total models: ${models.map(m => `${m.vendor}/${m.id}`).join(', ')}`);
 			const customModels = models.filter(m => m.vendor !== 'copilot');
-			this._logService.info(`[STARTUP] _getFirstCustomModel: found ${customModels.length} custom (non-copilot) models: ${customModels.map(m => `${m.vendor}/${m.id}`).join(', ')}`);
 			if (customModels.length > 0) {
 				this._logService.info(`[STARTUP] _getFirstCustomModel: using custom model: ${customModels[0].vendor}/${customModels[0].id}`);
-				return this._instantiationService.createInstance(ExtensionContributedChatEndpoint, customModels[0]);
+				this._cachedCustomEndpoint = this._instantiationService.createInstance(ExtensionContributedChatEndpoint, customModels[0]);
+				this._customEndpointResolved = true;
+				return this._cachedCustomEndpoint;
 			}
 		} catch (e) {
 			this._logService.error(`[STARTUP] _getFirstCustomModel: failed to get custom models: ${e}`);
@@ -82,16 +90,16 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 
 	async getChatEndpoint(requestOrFamilyOrModel: LanguageModelChat | ChatRequest | ChatEndpointFamily): Promise<IChatEndpoint> {
 		const requestDesc = typeof requestOrFamilyOrModel === 'string' ? requestOrFamilyOrModel : ('model' in requestOrFamilyOrModel ? `model:${(requestOrFamilyOrModel as any).model?.id ?? 'none'}` : `chatRequest`);
-		this._logService.info(`[STARTUP] getChatEndpoint called with: ${requestDesc}`);
+		this._logService.trace(`getChatEndpoint called with: ${requestDesc}`);
 
 		if (typeof requestOrFamilyOrModel === 'string') {
 			try {
-				this._logService.info(`[STARTUP] getChatEndpoint: fetching model from family '${requestOrFamilyOrModel}'`);
+				this._logService.trace(`getChatEndpoint: fetching model from family '${requestOrFamilyOrModel}'`);
 				const modelMetadata = await this._modelFetcher.getChatModelFromFamily(requestOrFamilyOrModel);
-				this._logService.info(`[STARTUP] getChatEndpoint: got model from family '${requestOrFamilyOrModel}': ${modelMetadata?.id}`);
+				this._logService.trace(`getChatEndpoint: got model from family '${requestOrFamilyOrModel}': ${modelMetadata?.id}`);
 				return this.getOrCreateChatEndpointInstance(modelMetadata!);
 			} catch (e) {
-				this._logService.info(`[STARTUP] getChatEndpoint: failed to get model from family '${requestOrFamilyOrModel}', falling back to custom models. Error: ${e}`);
+				this._logService.trace(`[STARTUP] getChatEndpoint: failed to get model from family '${requestOrFamilyOrModel}', falling back to custom models. Error: ${e}`);
 				const customEndpoint = await this._getFirstCustomModel();
 				if (customEndpoint) {
 					return customEndpoint;
@@ -107,7 +115,7 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 			try {
 				return await this.getChatEndpoint('copilot-base');
 			} catch (e) {
-				this._logService.info(`Failed to get copilot-base, falling back to custom models. Error: ${e}`);
+				this._logService.trace(`Failed to get copilot-base, falling back to custom models. Error: ${e}`);
 				const customEndpoint = await this._getFirstCustomModel();
 				if (customEndpoint) {
 					return customEndpoint;
@@ -128,7 +136,7 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 					return await this._autoModeService.resolveAutoModeEndpoint(requestOrFamilyOrModel as ChatRequest, allEndpoints);
 				}
 			} catch (e) {
-				this._logService.info(`Failed to resolve auto mode endpoint: ${e}`);
+				this._logService.trace(`Failed to resolve auto mode endpoint: ${e}`);
 			}
 			// Auto mode failed - fall back to custom models
 			const customEndpoint = await this._getFirstCustomModel();
@@ -144,7 +152,7 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 				return this.getOrCreateChatEndpointInstance(modelMetadata);
 			}
 		} catch (e) {
-			this._logService.info(`Failed to get model from api model, falling back to custom models. Error: ${e}`);
+			this._logService.trace(`Failed to get model from api model, falling back to custom models. Error: ${e}`);
 		}
 		// Fall back to custom models instead of recursing into copilot-base
 		const customEndpoint = await this._getFirstCustomModel();
