@@ -585,21 +585,33 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				}
 				return this._makeRequest(client, progress, params, token, issuedTime, retryCount + 1);
 			}
-			if (error instanceof ApiError && error.status === 429) {
+			if (error instanceof ApiError && (error.status === 429 || error.status === 503)) {
 				if (retryCount < MAX_RETRIES) {
 					const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
-					this._logService.warn(`Gemini rate limit (429), backing off before retry ${retryCount + 1}/${MAX_RETRIES}`);
-					await this._byokStorageService.onRateLimitHit?.(maxRpm, GeminiNativeBYOKLMProvider.providerName);
-					await this._byokStorageService.throttleIfNecessary?.(maxRpm, GeminiNativeBYOKLMProvider.providerName);
+					this._logService.warn(`Gemini ${error.status === 429 ? 'rate limit' : 'service unavailable'} (${error.status}), backing off before retry ${retryCount + 1}/${MAX_RETRIES}`);
+					if (error.status === 429) {
+						await this._byokStorageService.onRateLimitHit?.(maxRpm, GeminiNativeBYOKLMProvider.providerName);
+						await this._byokStorageService.throttleIfNecessary?.(maxRpm, GeminiNativeBYOKLMProvider.providerName);
+					} else {
+						await new Promise(resolve => setTimeout(resolve, Math.min(2000 * Math.pow(2, retryCount), 16000)));
+					}
 					if (token.isCancellationRequested) {
 						return { ttft, ttfte, usage };
 					}
 					return this._makeRequest(client, progress, params, token, issuedTime, retryCount + 1);
 				}
-				throw new Error(extractGeminiErrorMessage(error, 'Rate limit exceeded. Please check your Gemini API quota.'));
+				const fallbackMsg = error.status === 429
+					? 'Rate limit exceeded. Please check your Gemini API quota.'
+					: 'Model is temporarily unavailable due to high demand. Please try again shortly.';
+				throw new Error(extractGeminiErrorMessage(error, fallbackMsg));
 			}
 			if (error instanceof ApiError) {
-				error = new Error(extractGeminiErrorMessage(error, error.message), { cause: error });
+				const friendlyMsg = extractGeminiErrorMessage(error, error.message);
+				if (error.status === 400 && /token count exceeds/i.test(friendlyMsg)) {
+					this._logService.warn(`Gemini context overflow (400): ${friendlyMsg}`);
+					throw new Error(friendlyMsg, { cause: error });
+				}
+				error = new Error(friendlyMsg, { cause: error });
 			}
 			this._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);
 			throw error;

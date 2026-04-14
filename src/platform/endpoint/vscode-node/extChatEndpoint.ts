@@ -274,9 +274,11 @@ export class ExtensionContributedChatEndpoint implements IChatEndpoint {
 				};
 			}
 		} catch (e) {
+			const reason = toErrorMessage(e, true);
+			const isContextOverflow = /token count exceeds|max.*token|context.length.*exceed/i.test(reason);
 			return {
-				type: ChatFetchResponseType.Failed,
-				reason: toErrorMessage(e, true),
+				type: isContextOverflow ? ChatFetchResponseType.BadRequest : ChatFetchResponseType.Failed,
+				reason,
 				requestId: generateUuid(),
 				serverRequestId: undefined
 			};
