@@ -299,6 +299,12 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				if (result.ttft) {
 					pendingLoggedChatRequest.markTimeToFirstToken(result.ttft);
 				}
+				if (result.usage) {
+					progress.report(new LanguageModelDataPart(
+						new TextEncoder().encode(JSON.stringify(result.usage)),
+						CustomDataPartMimeTypes.TokenUsage
+					));
+				}
 				const responseDeltas: IResponseDelta[] = wrappedProgress.items.map((i): IResponseDelta => {
 					if (i instanceof LanguageModelTextPart) {
 						return { text: i.value };

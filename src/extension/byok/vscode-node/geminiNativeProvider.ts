@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { ApiError, GenerateContentParameters, GoogleGenAI, Tool, Type } from '@google/genai';
-import { CancellationToken, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelResponsePart2, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
+import { CancellationToken, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelDataPart, LanguageModelResponsePart2, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
 import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { ILogService } from '../../../platform/log/common/logService';
@@ -17,6 +17,7 @@ import { ITelemetryService } from '../../../platform/telemetry/common/telemetry'
 import { toErrorMessage } from '../../../util/common/errorMessage';
 import { RecordedProgress } from '../../../util/common/progressRecorder';
 import { generateUuid } from '../../../util/vs/base/common/uuid';
+import { CustomDataPartMimeTypes } from '../../../platform/endpoint/common/endpointTypes';
 import { BYOKKnownModels, byokKnownModelsToAPIInfo, BYOKModelCapabilities, LMResponsePart } from '../common/byokProvider';
 import { toGeminiFunction as toGeminiFunctionDeclaration, ToolJsonSchema } from '../common/geminiFunctionDeclarationConverter';
 import { apiMessageToGeminiMessage, geminiMessagesToRawMessagesForLogging } from '../common/geminiMessageConverter';
@@ -224,6 +225,12 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				const result = await this._makeRequest(client, wrappedProgress, params, token, issuedTime);
 				if (result.ttft) {
 					pendingLoggedChatRequest.markTimeToFirstToken(result.ttft);
+				}
+				if (result.usage) {
+					progress.report(new LanguageModelDataPart(
+						new TextEncoder().encode(JSON.stringify(result.usage)),
+						CustomDataPartMimeTypes.TokenUsage
+					));
 				}
 				pendingLoggedChatRequest.resolve({
 					type: ChatFetchResponseType.Success,

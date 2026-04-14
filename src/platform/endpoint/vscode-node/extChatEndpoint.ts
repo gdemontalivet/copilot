@@ -205,6 +205,7 @@ export class ExtensionContributedChatEndpoint implements IChatEndpoint {
 			let text = '';
 			let numToolsCalled = 0;
 			const requestId = ourRequestId;
+			let tokenUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number; prompt_tokens_details: { cached_tokens: number } } | undefined;
 
 			// consume stream
 			for await (const chunk of response.stream) {
@@ -230,6 +231,16 @@ export class ExtensionContributedChatEndpoint implements IChatEndpoint {
 					} else if (chunk.mimeType === CustomDataPartMimeTypes.ContextManagement) {
 						const contextManagement = JSON.parse(new TextDecoder().decode(chunk.data)) as ContextManagementResponse;
 						await streamRecorder.callback?.(text, 0, { text: '', contextManagement });
+					} else if (chunk.mimeType === CustomDataPartMimeTypes.TokenUsage) {
+						try {
+							const parsed = JSON.parse(new TextDecoder().decode(chunk.data));
+							tokenUsage = {
+								prompt_tokens: parsed.prompt_tokens ?? 0,
+								completion_tokens: parsed.completion_tokens ?? 0,
+								total_tokens: parsed.total_tokens ?? ((parsed.prompt_tokens ?? 0) + (parsed.completion_tokens ?? 0)),
+								prompt_tokens_details: { cached_tokens: parsed.prompt_tokens_details?.cached_tokens ?? 0 },
+							};
+						} catch { /* ignore malformed usage data */ }
 					}
 				} else if (chunk instanceof vscode.LanguageModelThinkingPart) {
 					if (streamRecorder.callback) {
@@ -250,7 +261,7 @@ export class ExtensionContributedChatEndpoint implements IChatEndpoint {
 					type: ChatFetchResponseType.Success,
 					requestId,
 					serverRequestId: requestId,
-					usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } },
+					usage: tokenUsage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } },
 					value: text,
 					resolvedModel: this.languageModel.id
 				};
