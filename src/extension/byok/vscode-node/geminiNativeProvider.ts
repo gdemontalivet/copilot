@@ -581,9 +581,10 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				this._logService.trace('Gemini streaming aborted');
 				return { ttft, ttfte, usage };
 			}
-			if (error instanceof TypeError && error.message.includes('fetch failed') && retryCount < MAX_RETRIES) {
+			if (isTransientNetworkError(error) && retryCount < MAX_RETRIES) {
 				const delay = Math.min(2000 * Math.pow(2, retryCount), 16000);
-				this._logService.warn(`Gemini network error, retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES})`);
+				this._logService.warn(`Gemini network error, retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES}): ${toErrorMessage(error, true)}`);
+				progress.report(new LanguageModelThinkingPart(`[Network error] Retry ${retryCount + 1}/${MAX_RETRIES}: reconnecting in ~${Math.ceil(delay / 1000)}s...\n`));
 				await new Promise(resolve => setTimeout(resolve, delay));
 				if (token.isCancellationRequested) {
 					return { ttft, ttfte, usage };
@@ -600,7 +601,9 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 							progress.report(new LanguageModelThinkingPart(`[Rate limit] 429 retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(waitMs / 1000)}s...\n`));
 						});
 					} else {
-						await new Promise(resolve => setTimeout(resolve, Math.min(2000 * Math.pow(2, retryCount), 16000)));
+						const delay = Math.min(2000 * Math.pow(2, retryCount), 16000);
+						progress.report(new LanguageModelThinkingPart(`[Service unavailable] 503 retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(delay / 1000)}s...\n`));
+						await new Promise(resolve => setTimeout(resolve, delay));
 					}
 					if (token.isCancellationRequested) {
 						return { ttft, ttfte, usage };
@@ -619,6 +622,15 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 					throw new Error(friendlyMsg, { cause: error });
 				}
 				error = new Error(friendlyMsg, { cause: error });
+			}
+			if (isTransientNetworkError(error)) {
+				const causeHint = (error as any)?.cause?.code ?? (error as any)?.code ?? '';
+				const detail = causeHint ? ` (${causeHint})` : '';
+				this._logService.error(`Gemini network error after ${MAX_RETRIES} retries${detail}: ${toErrorMessage(error, true)}`);
+				throw new Error(
+					`Network connection to Gemini API failed after ${MAX_RETRIES} retries${detail}. Check your internet connection or try again later.`,
+					{ cause: error }
+				);
 			}
 			this._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);
 			throw error;
@@ -651,4 +663,21 @@ function extractGeminiErrorMessage(error: ApiError, fallback: string): string {
 		}
 	} catch { /* ignore all parse failures */ }
 	return fallback;
+}
+
+const TRANSIENT_NETWORK_CODES = new Set([
+	'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND',
+	'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH',
+	'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET',
+]);
+
+function isTransientNetworkError(error: unknown): boolean {
+	if (error instanceof TypeError && error.message.includes('fetch failed')) {
+		return true;
+	}
+	const code = (error as any)?.code ?? (error as any)?.cause?.code;
+	if (typeof code === 'string' && TRANSIENT_NETWORK_CODES.has(code)) {
+		return true;
+	}
+	return false;
 }
