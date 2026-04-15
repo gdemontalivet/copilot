@@ -591,11 +591,12 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				}
 				return this._makeRequest(client, progress, params, token, issuedTime, retryCount + 1);
 			}
-			if (error instanceof ApiError && (error.status === 429 || error.status === 503)) {
+			const apiStatus = getApiErrorStatus(error);
+			if (apiStatus === 429 || apiStatus === 503) {
 				if (retryCount < MAX_RETRIES) {
 					const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
-					this._logService.warn(`Gemini ${error.status === 429 ? 'rate limit' : 'service unavailable'} (${error.status}), backing off before retry ${retryCount + 1}/${MAX_RETRIES}`);
-					if (error.status === 429) {
+					this._logService.warn(`Gemini ${apiStatus === 429 ? 'rate limit' : 'service unavailable'} (${apiStatus}), backing off before retry ${retryCount + 1}/${MAX_RETRIES}`);
+					if (apiStatus === 429) {
 						await this._byokStorageService.onRateLimitHit?.(maxRpm, GeminiNativeBYOKLMProvider.providerName);
 						await this._byokStorageService.throttleIfNecessary?.(maxRpm, GeminiNativeBYOKLMProvider.providerName, (waitMs) => {
 							progress.report(new LanguageModelThinkingPart(`[Rate limit] 429 retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(waitMs / 1000)}s...\n`));
@@ -610,14 +611,14 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 					}
 					return this._makeRequest(client, progress, params, token, issuedTime, retryCount + 1);
 				}
-				const fallbackMsg = error.status === 429
+				const fallbackMsg = apiStatus === 429
 					? 'Rate limit exceeded. Please check your Gemini API quota.'
 					: 'Model is temporarily unavailable due to high demand. Please try again shortly.';
 				throw new Error(extractGeminiErrorMessage(error, fallbackMsg));
 			}
-			if (error instanceof ApiError) {
-				const friendlyMsg = extractGeminiErrorMessage(error, error.message);
-				if (error.status === 400 && /token count exceeds/i.test(friendlyMsg)) {
+			if (apiStatus !== undefined) {
+				const friendlyMsg = extractGeminiErrorMessage(error, (error as Error).message ?? String(error));
+				if (apiStatus === 400 && /token count exceeds/i.test(friendlyMsg)) {
 					this._logService.warn(`Gemini context overflow (400): ${friendlyMsg}`);
 					throw new Error(friendlyMsg, { cause: error });
 				}
@@ -639,14 +640,43 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 }
 
 /**
- * Extract the human-readable message from a Gemini ApiError.
+ * Reliably extract the HTTP status code from a Gemini SDK error.
+ * `instanceof ApiError` can fail across bundled module boundaries, so we also
+ * inspect duck-typed `.status` / `.code` and fall back to parsing the JSON body.
+ */
+function getApiErrorStatus(error: unknown): number | undefined {
+	if (error instanceof ApiError) {
+		return error.status;
+	}
+	const status = (error as any)?.status;
+	if (typeof status === 'number' && status >= 400) {
+		return status;
+	}
+	try {
+		const msg = (error as Error)?.message;
+		if (!msg) { return undefined; }
+		const parts = msg.split(' : Error: ');
+		for (const part of parts) {
+			try {
+				const code = JSON.parse(part.trim())?.error?.code;
+				if (typeof code === 'number') { return code; }
+			} catch { /* not JSON */ }
+		}
+		const code = JSON.parse(msg)?.error?.code;
+		if (typeof code === 'number') { return code; }
+	} catch { /* ignore */ }
+	return undefined;
+}
+
+/**
+ * Extract the human-readable message from a Gemini API error.
  * The SDK sometimes wraps the JSON body in formats like:
  *   "{ json } : Error: { json }"  or  "{ json }"
  */
-function extractGeminiErrorMessage(error: ApiError, fallback: string): string {
+function extractGeminiErrorMessage(error: unknown, fallback: string): string {
 	try {
-		const msg = error.message;
-		// Try the " : Error: " split first (SDK v2 format)
+		const msg = (error as Error)?.message;
+		if (!msg) { return fallback; }
 		const parts = msg.split(' : Error: ');
 		for (const part of parts) {
 			try {
@@ -656,7 +686,6 @@ function extractGeminiErrorMessage(error: ApiError, fallback: string): string {
 				}
 			} catch { /* not JSON, try next part */ }
 		}
-		// Try the whole message as JSON
 		const parsed = JSON.parse(msg);
 		if (parsed?.error?.message) {
 			return parsed.error.message;
