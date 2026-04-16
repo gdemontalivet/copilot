@@ -24,13 +24,18 @@ function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageMod
 			// Note: We don't emit thinking content to Gemini as it's already been processed
 			// The signature will be attached to the next function call
 		} else if (part instanceof LanguageModelToolCallPart) {
+			let extractedSignature = pendingSignature;
+			if (part.callId && part.callId.includes('___thoughtsig___')) {
+				extractedSignature = part.callId.split('___thoughtsig___')[1];
+			}
+
 			const functionCallPart: Part = {
 				functionCall: {
 					name: part.name,
 					args: part.input as Record<string, unknown> || {}
 				},
 				// Attach pending thought signature if available (required by Gemini 3 for function calling)
-				...(pendingSignature ? { thoughtSignature: pendingSignature } : {})
+				...(extractedSignature ? { thoughtSignature: extractedSignature } : {})
 			};
 
 			if (pendingSignature) {
@@ -68,8 +73,15 @@ function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageMod
 				imageDescription = `\n[Contains ${imageParts.length} image(s) with types: ${imageParts.map(p => p.mimeType).join(', ')}]`;
 			}
 
-			// extraction: functionName_timestamp => split on first underscore
-			const functionName = part.callId?.split('_')[0] || 'unknown_function';
+			// extraction: functionName___uuid___1234
+			let functionName = 'unknown_function';
+			if (part.callId) {
+				if (part.callId.includes('___uuid___')) {
+					functionName = part.callId.split('___uuid___')[0];
+				} else {
+					functionName = part.callId.split('_')[0];
+				}
+			}
 
 			// Preserve structured JSON if possible
 			let responsePayload: any = {};

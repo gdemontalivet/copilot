@@ -27,7 +27,7 @@ import { RecordedProgress } from '../../../util/common/progressRecorder';
 import { generateUuid } from '../../../util/vs/base/common/uuid';
 import { anthropicMessagesToRawMessagesForLogging, apiMessageToAnthropicMessage } from '../common/anthropicMessageConverter';
 import { BYOKKnownModels, BYOKModelCapabilities, LMResponsePart } from '../common/byokProvider';
-import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
+import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation, getApproximateTokenCount, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
 import { byokKnownModelsToAPIInfoWithEffort } from './byokModelInfo';
 import { IBYOKStorageService } from './byokStorageService';
 
@@ -91,6 +91,12 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 			}
 			return byokKnownModelsToAPIInfoWithEffort(this._name, modelList);
 		} catch (error) {
+			// If we hit a rate limit or other error, fallback to known models to prevent infinite polling
+			if (this._knownModels) {
+				this._logService.warn(`Error fetching available ${AnthropicLMProvider.providerName} models, falling back to known models. Error: ${error.message ?? error}`);
+				return byokKnownModelsToAPIInfoWithEffort(this._name, this._knownModels);
+			}
+
 			this._logService.error(error, `Error fetching available ${AnthropicLMProvider.providerName} models`);
 			throw new Error(error.message ? error.message : error);
 		}
@@ -108,7 +114,15 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		// OTel span handle — created outside doRequest, enriched inside with usage data
 		let otelSpan: ReturnType<typeof this._otelService.startSpan> | undefined;
 
+		const reportThrottle = (waitMs: number) => {
+			const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
+			progress.report(new vscode.LanguageModelThinkingPart(`[Rate limit] Waiting ~${Math.ceil(waitMs / 1000)}s (${maxRpm} req/min limit)...\n`));
+		};
+
 		const doRequest = async () => {
+			const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
+			await this._byokStorageService.throttleIfNecessary?.(maxRpm, AnthropicLMProvider.providerName, reportThrottle);
+
 			const issuedTime = Date.now();
 			const apiKey = model.configuration?.apiKey;
 			if (!apiKey) {
@@ -283,6 +297,12 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				if (result.ttft) {
 					pendingLoggedChatRequest.markTimeToFirstToken(result.ttft);
 				}
+				if (result.usage) {
+					progress.report(new LanguageModelDataPart(
+						new TextEncoder().encode(JSON.stringify(result.usage)),
+						CustomDataPartMimeTypes.TokenUsage
+					));
+				}
 				const responseDeltas: IResponseDelta[] = wrappedProgress.items.map((i): IResponseDelta => {
 					if (i instanceof LanguageModelTextPart) {
 						return { text: i.value };
@@ -441,11 +461,14 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				});
 			} catch (err) {
 				this._logService.error(`BYOK Anthropic error: ${toErrorMessage(err, true)}`);
+				const isRateLimit = err instanceof Anthropic.RateLimitError;
 				pendingLoggedChatRequest.resolve({
-					type: ChatFetchResponseType.Unknown,
+					type: isRateLimit
+						? ChatFetchResponseType.RateLimited
+						: ChatFetchResponseType.Unknown,
 					requestId,
 					serverRequestId: requestId,
-					reason: err.message
+					reason: toErrorMessage(err)
 				}, wrappedProgress.items.map((i): IResponseDelta => {
 					if (i instanceof LanguageModelTextPart) {
 						return { text: i.value };
@@ -535,18 +558,41 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 
 	async provideTokenCount(model: LanguageModelChatInformation, text: string | LanguageModelChatMessage | LanguageModelChatMessage2, token: CancellationToken): Promise<number> {
 		// Simple estimation - actual token count would require Claude's tokenizer
-		return Math.ceil(text.toString().length / 4);
+		return getApproximateTokenCount(text);
 	}
 
-	private async _makeRequest(anthropicClient: Anthropic, progress: RecordedProgress<LMResponsePart>, params: Anthropic.Beta.Messages.MessageCreateParamsStreaming, betas: string[], token: CancellationToken, issuedTime: number): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined; contextManagement: ContextManagementResponse | undefined }> {
+	private async _makeRequest(anthropicClient: Anthropic, progress: RecordedProgress<LMResponsePart>, params: Anthropic.Beta.Messages.MessageCreateParamsStreaming, betas: string[], token: CancellationToken, issuedTime: number, retryCount = 0): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined; contextManagement: ContextManagementResponse | undefined }> {
+		const MAX_RETRIES = 3;
 		const start = Date.now();
 		let ttft: number | undefined;
 		let ttfte: number | undefined;
 
-		const stream = await anthropicClient.beta.messages.create({
-			...params,
-			...(betas.length > 0 && { betas })
-		});
+		let stream: Awaited<ReturnType<typeof anthropicClient.beta.messages.create>>;
+		try {
+			stream = await anthropicClient.beta.messages.create({
+				...params,
+				...(betas.length > 0 && { betas })
+			});
+		} catch (err) {
+			if (err instanceof Anthropic.RateLimitError) {
+				if (retryCount < MAX_RETRIES) {
+					const retryAfterSec = parseInt(err.headers?.['retry-after'] ?? '0', 10);
+					const blockedUntil = Date.now() + (retryAfterSec > 0 ? retryAfterSec * 1000 : 60000);
+					const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
+					this._logService.warn(`Anthropic rate limit (429), backing off before retry ${retryCount + 1}/${MAX_RETRIES}`);
+					await this._byokStorageService.onRateLimitHit?.(maxRpm, AnthropicLMProvider.providerName, blockedUntil);
+					await this._byokStorageService.throttleIfNecessary?.(maxRpm, AnthropicLMProvider.providerName, (waitMs) => {
+						progress.report(new vscode.LanguageModelThinkingPart(`[Rate limit] 429 retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(waitMs / 1000)}s...\n`));
+					});
+					if (token.isCancellationRequested) {
+						return { ttft, ttfte, usage: undefined, contextManagement: undefined };
+					}
+					return this._makeRequest(anthropicClient, progress, params, betas, token, issuedTime, retryCount + 1);
+				}
+				throw new Error(err.message ?? 'Anthropic rate limit exceeded. Please check your API quota.');
+			}
+			throw err;
+		}
 
 		let pendingToolCall: {
 			toolId?: string;
