@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import * as vscode from 'vscode';
 import { LanguageModelChat, type ChatRequest } from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
@@ -65,9 +66,6 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 		}
 		return chatEndpoint;
 	}
-
-	private _cachedCustomEndpoint: IChatEndpoint | undefined;
-	private _customEndpointResolved = false;
 
 	private async _getFirstCustomModel(): Promise<IChatEndpoint | undefined> {
 		if (this._customEndpointResolved) {
@@ -171,11 +169,21 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 	}
 
 	async getAllCompletionModels(forceRefresh?: boolean): Promise<ICompletionModelInformation[]> {
-		return this._modelFetcher.getAllCompletionModels(forceRefresh ?? false);
+		try {
+			return await this._modelFetcher.getAllCompletionModels(forceRefresh ?? false);
+		} catch (e) {
+			this._logService.warn(`Failed to get completion models: ${e}`);
+			return [];
+		}
 	}
 
 	async getAllChatEndpoints(): Promise<IChatEndpoint[]> {
-		const models: IChatModelInformation[] = await this._modelFetcher.getAllChatModels();
-		return models.map(model => this.getOrCreateChatEndpointInstance(model));
+		try {
+			const models: IChatModelInformation[] = await this._modelFetcher.getAllChatModels();
+			return models.map(model => this.getOrCreateChatEndpointInstance(model));
+		} catch (e) {
+			this._logService.warn(`Failed to get all chat models: ${e}`);
+			return [];
+		}
 	}
 }
