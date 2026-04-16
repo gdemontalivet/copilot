@@ -1,27 +1,50 @@
-# GitHub Copilot Chat Extension - Copilot Instructions
+# Copilot Full BYOK - Copilot Instructions
 
 ## Project Overview
 
-This is the **GitHub Copilot Chat** extension for Visual Studio Code - a VS Code extension that provides conversational AI assistance, a coding agent with many tools, inline editing capabilities, and advanced AI-powered features for VS Code.
+This is **Copilot Full BYOK** — a custom fork of the GitHub Copilot Chat extension for Visual Studio Code. It is rebased on upstream `microsoft/vscode` (`extensions/copilot/`) and adds Bring Your Own Key (BYOK) functionality so you can use your own API keys for Gemini, Anthropic (including Vertex), OpenAI, and other providers **without a Copilot subscription**.
+
+### Fork Strategy
+
+This repo tracks the upstream Copilot Chat source from [`microsoft/vscode/extensions/copilot/`](https://github.com/microsoft/vscode). A GitHub Actions workflow (`sync-upstream.yml`) periodically pulls the latest upstream code, applies our patches via `.github/scripts/apply-byok-patches.sh`, bumps the version, and builds a VSIX. Because VS Code 1.116+ ships Copilot Chat as a built-in extension, our VSIX must always have a **higher version** than the built-in to take precedence.
+
+#### Core BYOK Patches (applied on every sync)
+1. **Fake token** (`copilotTokenManager.ts`): Returns a synthetic `CopilotToken` with `individual: true`, bypassing GitHub authentication and subscription checks.
+2. **Union type fix** (`geminiFunctionDeclarationConverter.ts`): `getPrimaryType()` handles JSON Schema union types (`type: ["string", "number"]`) that the upstream Gemini converter rejects.
+3. **Version bump** (`package.json`): Increments patch version so the VSIX overrides the built-in extension.
+4. **Extension rename** (`package.json`): Sets `displayName` to "Copilot Full BYOK".
+
+#### Additional BYOK Customizations (maintained in source)
+- **Model metadata bypass** (`modelMetadataFetcher.ts`): Detects fake token and skips Copilot API calls; adds failure backoff and fires refresh events so BYOK providers can proceed.
+- **Auth change notification** (`authentication.ts`): Fires `fireAuthenticationChange` on successful token set (not just errors) so `ConversationFeature` activates with the fake token.
+- **Endpoint fallback** (`endpointProviderImpl.ts`): `_getFirstCustomModel()` falls back to BYOK models when Copilot-hosted models can't be resolved; caches the result. `getAllChatEndpoints`/`getAllCompletionModels` return `[]` on failure instead of throwing.
+- **Vertex Anthropic provider** (`vertexAnthropicProvider.ts`): Custom provider using Google Cloud Vertex AI to call Anthropic models. Registered in `byokContribution.ts`.
+- **Provider API key fallbacks**: All providers (`anthropic`, `azure`, `ollama`, `customOAI`, `geminiNative`) resolve API keys from `model.configuration?.apiKey`, `(model as any).apiKey`, and `options.modelConfiguration?.apiKey`.
+- **Rate limiting & throttling** (`byokStorageService.ts`, `abstractLanguageModelChatProvider.ts`): Client-side RPM limiting with `ConfigKey.Shared.BYOKMaxRPM`, backoff on 429s, and thinking-section feedback during waits.
+- **Gemini error handling** (`geminiNativeProvider.ts`): Graceful handling of 400/429/503 errors with transparent retry feedback, broader network error handling, and model list caching (24h).
+- **Context window indicator** tunneling from BYOK providers.
+- **`VertexAnthropicModels`** config key in `configurationService.ts`.
 
 ### Key Features
+- **Full BYOK**: Use Gemini, Anthropic, Vertex Anthropic, OpenAI, xAI, Ollama, OpenRouter, Azure, and custom OpenAI-compatible providers with your own API keys
+- **No Copilot Subscription Required**: Fake token bypasses all subscription checks
 - **Chat Interface**: Conversational AI assistance with chat participants, variables, and slash commands
 - **Inline Chat**: AI-powered editing directly in the editor with `Ctrl+I`
 - **Agent Mode**: Multi-step autonomous coding tasks
 - **Edit Mode**: Natural language to code
 - **Inline Suggestions**: Next edit suggestions and inline completions
-- **Language Model Integration**: Support for multiple AI models (GPT-4, Claude, Gemini, etc.)
 - **Context-Aware**: Workspace understanding, semantic search, and code analysis
+- **Upstream Tracking**: Automatically benefits from Microsoft's ongoing Copilot Chat improvements
 
 ### Tech Stack
 - **TypeScript**: Primary language (follows VS Code coding standards)
 - **TSX**: Prompts are built using the @vscode/prompt-tsx library
-- **Node.js**: Runtime for extension host and language server features
+- **Node.js 24+**: Runtime for extension host and language server features
 - **WebAssembly**: For performance-critical parsing and tokenization
 - **VS Code Extension API**: Extensive use of proposed APIs for chat, language models, and editing
 - **ESBuild**: Bundling and compilation
 - **Vitest**: Unit testing framework
-- **Python**: For notebooks integration and ML evaluation scripts
+- **GitHub Actions**: CI/CD for upstream sync (`sync-upstream.yml`) and VSIX builds (`build-vsix.yml`)
 
 ## Validating changes
 
@@ -84,9 +107,9 @@ You MUST check compilation output before running ANY script or declaring work co
 - **`workspaceRecorder/`**: Recording and tracking workspace interactions
 
 **Authentication & Configuration:**
-- **`authentication/`**: GitHub authentication and token management
+- **`authentication/`**: GitHub authentication and token management (uses fake token for BYOK-only mode)
 - **`configuration/`**: Settings and configuration management
-- **`byok/`**: Bring Your Own Key (BYOK) functionality for custom API keys
+- **`byok/`**: Bring Your Own Key (BYOK) functionality for custom API keys — the core of this fork
 
 **AI Integration & Endpoints:**
 - **`endpoint/`**: AI service endpoints and model selection
@@ -271,10 +294,12 @@ The extension uses numerous proposed VS Code APIs for advanced functionality:
 - `aiTextSearchProvider`: AI-powered search capabilities
 
 ### External Integrations
-- **GitHub**: Authentication and API access
-- **Azure**: Cloud services and experimentation
-- **OpenAI**: Language model API
-- **Anthropic**: Claude model integration - See **[src/extension/agents/claude/AGENTS.md](../src/extension/agents/claude/AGENTS.md)** for complete Claude Agent SDK integration documentation including architecture, components, and registries
+- **GitHub**: Authentication and API access (bypassed with fake token in BYOK mode)
+- **Google Gemini**: Native Gemini SDK via API key (primary BYOK provider)
+- **Anthropic**: Direct API and Vertex AI — See **[src/extension/agents/claude/AGENTS.md](../src/extension/agents/claude/AGENTS.md)** for Claude Agent SDK docs
+- **OpenAI / Azure OpenAI**: Language model APIs
+- **Ollama**: Local model inference
+- **OpenRouter / xAI / Custom OAI**: Additional BYOK providers
 - **Telemetry**: Usage analytics and performance monitoring
 
 ## Development Workflow
@@ -283,6 +308,26 @@ The extension uses numerous proposed VS Code APIs for advanced functionality:
 - `npm install`: Install dependencies
 - `npm run compile`: Development build
 - `npm run watch:*`: Various watch modes for development
+
+### CI/CD & Deployment
+
+**GitHub Actions Workflows:**
+- **`build-vsix.yml`**: Builds the VSIX package on push to `main`. Uses Node.js 24.x.
+- **`sync-upstream.yml`**: Periodically syncs with `microsoft/vscode` (sparse checkout of `extensions/copilot/`), applies BYOK patches via `.github/scripts/apply-byok-patches.sh`, and opens a PR.
+
+**BYOK Patch Script** (`.github/scripts/apply-byok-patches.sh`):
+Applies the minimal set of patches that must survive every upstream sync:
+1. Fake token in `copilotTokenManager.ts`
+2. `getPrimaryType` fix in `geminiFunctionDeclarationConverter.ts`
+3. Extension rename + version bump in `package.json`
+
+**Deployment flow:**
+1. Push to `main` (or merge a sync-upstream PR)
+2. GitHub Action builds the VSIX
+3. Download and install the VSIX in VS Code
+4. The higher version number ensures it overrides the built-in Copilot Chat extension
+
+**Important:** After a VS Code update, check if the built-in Copilot version was bumped. If the built-in is now e.g. `0.46.0`, our version must be `0.46.1` or higher.
 
 ### Updating Dependencies
 
@@ -293,9 +338,10 @@ When updating `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/sdk`, you **MUS
 3. Running through the testing checklist for core functionality, tools, hooks, and slash commands
 
 ### Testing
-- `npm run test:unit`: Unit tests
+- `npm run test:unit`: Unit tests (note: tests using `copilot-base` family will fail with the fake token — this is expected)
 - `npm run test:extension`: VS Code integration tests
 - `npm run simulate`: Scenario-based simulation tests
+- **BYOK testing**: Open a project in VS Code, select a BYOK model (e.g. Gemini), and verify chat works. Check the "GitHub Copilot Chat" output channel for errors.
 
 ### Key Entry Points for Edits
 
@@ -318,11 +364,29 @@ When updating `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/sdk`, you **MUS
 
 **Authentication & Configuration:**
 - **Authentication flows**: Modify `src/extension/authentication/` for GitHub integration
+- **Fake token / subscription bypass**: `src/platform/authentication/vscode-node/copilotTokenManager.ts`
+- **Auth change events**: `src/platform/authentication/common/authentication.ts` (fires on token success for BYOK activation)
 - **Settings and config**: Update `src/extension/configuration/` and `src/extension/settingsSchema/`
 - **BYOK features**: Edit `src/extension/byok/` for custom API key functionality
 
-**AI Integration:**
+**AI Integration & BYOK Providers:**
 - **AI endpoints**: Update `src/extension/endpoint/` for model selection and routing
+- **Endpoint fallback to BYOK**: `src/extension/prompt/vscode-node/endpointProviderImpl.ts` (`_getFirstCustomModel` fallback chain)
+- **Model metadata fetch bypass**: `src/platform/endpoint/node/modelMetadataFetcher.ts` (skips API with fake token)
+- **BYOK providers**: `src/extension/byok/vscode-node/` — each file is a provider:
+  - `geminiNativeProvider.ts` — Google Gemini (native SDK, with retry/error handling)
+  - `anthropicProvider.ts` — Anthropic (direct API)
+  - `vertexAnthropicProvider.ts` — Anthropic via Vertex AI (custom)
+  - `azureProvider.ts` — Azure OpenAI
+  - `ollamaProvider.ts` — Ollama (local)
+  - `customOAIProvider.ts` — Any OpenAI-compatible endpoint
+  - `openAIProvider.ts` — OpenAI
+  - `openRouterProvider.ts` — OpenRouter
+  - `xAIProvider.ts` — xAI (Grok)
+- **Provider registration**: `src/extension/byok/vscode-node/byokContribution.ts`
+- **Provider base classes**: `src/extension/byok/vscode-node/abstractLanguageModelChatProvider.ts` (model caching, RPM throttling)
+- **Rate limiting**: `src/extension/byok/vscode-node/byokStorageService.ts` (`throttleIfNecessary`, `onRateLimitHit`)
+- **Gemini schema conversion**: `src/extension/byok/common/geminiFunctionDeclarationConverter.ts` (`getPrimaryType` fix)
 - **Language model tools**: Modify `src/extension/tools/` for AI tool integrations
 - **API abstractions**: Edit `src/extension/api/` for core interfaces
 - **MCP integration**: Update `src/extension/mcp/` for Model Context Protocol features
@@ -342,7 +406,7 @@ When updating `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/sdk`, you **MUS
 - **VS Code integration**: Update contribution files and extension activation code
 - **Configuration**: Modify `package.json` contributions for VS Code integration
 
-This extension is a complex, multi-layered system that provides comprehensive AI assistance within VS Code. Understanding the service architecture, contribution system, and separation between platform and extension layers is crucial for making effective changes.
+This extension is a custom fork of Microsoft's Copilot Chat, maintaining full BYOK capability on top of the upstream codebase. When making changes, be aware of the fork strategy: patches in `.github/scripts/apply-byok-patches.sh` are applied automatically on every upstream sync. Larger customizations (provider files, error handling, rate limiting) live directly in the source and must be manually preserved during rebases. Understanding the service architecture, contribution system, and the BYOK fallback chain (`modelMetadataFetcher` → `endpointProviderImpl` → `_getFirstCustomModel`) is crucial for making effective changes.
 
 ## Best Practices
 - Use services and dependency injection over VS Code extension APIs when possible:
