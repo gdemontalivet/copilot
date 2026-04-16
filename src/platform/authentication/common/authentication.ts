@@ -4,6 +4,13 @@
  *--------------------------------------------------------------------------------------------*/
 import type { AuthenticationGetSessionOptions, AuthenticationGetSessionPresentationOptions, AuthenticationSession } from 'vscode';
 import { createServiceIdentifier } from '../../../util/common/services';
+
+/**
+ * A stricter version of {@link AuthenticationGetSessionPresentationOptions} that requires
+ * a `detail` message explaining why authentication is needed. This forces callers to provide
+ * meaningful context to the user instead of passing a bare `true` or `{}`.
+ */
+export type StrictAuthenticationPresentationOptions = AuthenticationGetSessionPresentationOptions & { detail: string };
 import { Emitter, Event } from '../../../util/vs/base/common/event';
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import { derived } from '../../../util/vs/base/common/observableInternal';
@@ -12,13 +19,6 @@ import { ILogService } from '../../log/common/logService';
 import { CopilotToken } from './copilotToken';
 import { ICopilotTokenManager } from './copilotTokenManager';
 import { ICopilotTokenStore } from './copilotTokenStore';
-
-/**
- * A stricter version of {@link AuthenticationGetSessionPresentationOptions} that requires
- * a `detail` message explaining why authentication is needed. This forces callers to provide
- * meaningful context to the user instead of passing a bare `true` or `{}`.
- */
-export type StrictAuthenticationPresentationOptions = AuthenticationGetSessionPresentationOptions & { detail: string };
 
 // Minimum set of scopes needed for Copilot to work
 export const GITHUB_SCOPE_USER_EMAIL = ['user:email'];
@@ -245,19 +245,12 @@ export abstract class BaseAuthenticationService extends Disposable implements IA
 		return this._tokenStore.copilotToken;
 	}
 	async getCopilotToken(force?: boolean): Promise<CopilotToken> {
-		// this._logService.info(`[STARTUP] BaseAuthenticationService.getCopilotToken called (force=${force})`);
 		try {
 			const token = await this._tokenManager.getCopilotToken(force);
-			// this._logService.info(`[STARTUP] BaseAuthenticationService.getCopilotToken: got token (sku=${token.sku}, username=${token.username})`);
-			const copilotTokenBefore = this._tokenStore.copilotToken;
 			this._tokenStore.copilotToken = token;
 			this._copilotTokenError = undefined;
-			if (copilotTokenBefore?.token !== token.token || copilotTokenBefore?.sku !== token.sku || copilotTokenBefore?.username !== token.username) {
-				this.fireAuthenticationChange('getCopilotToken success');
-			}
 			return token;
 		} catch (afterError) {
-			this._logService.info(`[STARTUP] BaseAuthenticationService.getCopilotToken: error getting token: ${afterError}`);
 			this._tokenStore.copilotToken = undefined;
 			const beforeError = this._copilotTokenError;
 			this._copilotTokenError = afterError;
@@ -288,7 +281,6 @@ export abstract class BaseAuthenticationService extends Disposable implements IA
 	//#endregion
 
 	protected async _handleAuthChangeEvent(): Promise<void> {
-		this._logService.info(`[STARTUP] _handleAuthChangeEvent: starting. anyGitHubSession=${!!this._anyGitHubSession}, copilotToken=${!!this._tokenStore.copilotToken}`);
 		const anyGitHubSessionBefore = this._anyGitHubSession;
 		const permissiveGitHubSessionBefore = this._permissiveGitHubSession;
 		const anyAdoSessionBefore = this._anyAdoSession;
@@ -296,7 +288,6 @@ export abstract class BaseAuthenticationService extends Disposable implements IA
 		const copilotTokenErrorBefore = this._copilotTokenError;
 
 		// Update caches
-		this._logService.info(`[STARTUP] _handleAuthChangeEvent: updating session caches...`);
 		const resolved = await Promise.allSettled([
 			this.getGitHubSession('any', { silent: true }),
 			this.getGitHubSession('permissive', { silent: true }),

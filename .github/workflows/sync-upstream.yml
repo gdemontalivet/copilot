@@ -2,40 +2,146 @@ name: Sync Upstream
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Runs daily at midnight UTC
-  workflow_dispatch: # Allows you to trigger this manually from the Actions tab
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Needed to push changes back to the repository
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Need full history to perform merges
+          fetch-depth: 0
 
       - name: Configure Git
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Sync with Upstream
+      - name: Sync copilot extension from microsoft/vscode
         run: |
-          # Add the official Microsoft repo as upstream
-          git remote add upstream https://github.com/microsoft/vscode-copilot-chat.git
-          
-          # Fetch changes
-          git fetch upstream
-          
-          # Switch to main branch
-          git checkout main
-          
-          # Merge the upstream changes
-          # Note: If there are merge conflicts, this step will fail and you will be notified.
-          git merge upstream/main --no-edit
-          
-          # Push changes back to your fork
-          git push origin main
+          # Sparse-checkout just extensions/copilot/ from the VS Code repo
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/microsoft/vscode.git /tmp/vscode
+          cd /tmp/vscode
+          git sparse-checkout set extensions/copilot
+          cd -
+
+          # Sync upstream files (excluding .git, .github, node_modules)
+          rsync -a --delete \
+            --exclude='node_modules' \
+            /tmp/vscode/extensions/copilot/ ./
+          # Restore our .github directory (rsync --delete may remove it)
+          git checkout -- .github/
+
+      - name: Apply BYOK patches
+        run: |
+          # Patch 1: Fake token to bypass subscription
+          node -e "
+          const fs = require('fs');
+          const f = 'src/platform/authentication/vscode-node/copilotTokenManager.ts';
+          let code = fs.readFileSync(f, 'utf8');
+
+          // Add import for createTestExtendedTokenInfo
+          code = code.replace(
+            \"import { CopilotToken, ExtendedTokenInfo,\",
+            \"import { CopilotToken, createTestExtendedTokenInfo, ExtendedTokenInfo,\"
+          );
+
+          // Replace getCopilotToken method body
+          const original = /async getCopilotToken\(force\?: boolean\): Promise<CopilotToken> \{[\s\S]*?return new CopilotToken\(this\.copilotToken\);\s*\}/;
+          const replacement = \`async getCopilotToken(force?: boolean): Promise<CopilotToken> {
+		const fakeTokenInfo = createTestExtendedTokenInfo({
+			token: 'fake-token',
+			expires_at: 9999999999,
+			refresh_in: 9999999999,
+			sku: 'individual',
+			individual: true,
+			username: 'offline-user',
+			copilot_plan: 'individual',
+		});
+		if (!this.copilotToken) {
+			this.copilotToken = fakeTokenInfo;
+		}
+		return new CopilotToken(fakeTokenInfo);
+	}\`;
+          code = code.replace(original, replacement);
+          fs.writeFileSync(f, code);
+          console.log('Patched: fake token');
+          "
+
+          # Patch 2: getPrimaryType for Gemini union types
+          node -e "
+          const fs = require('fs');
+          const f = 'src/extension/byok/common/geminiFunctionDeclarationConverter.ts';
+          let code = fs.readFileSync(f, 'utf8');
+
+          // Only patch if getPrimaryType doesn't already exist
+          if (!code.includes('getPrimaryType')) {
+            // Widen type field
+            code = code.replace('type?: string;', 'type?: string | string[];');
+
+            // Add getPrimaryType before mapType
+            const helper = \`function getPrimaryType(type?: string | string[]): string | undefined {
+	if (Array.isArray(type)) {
+		return type.find((t) => t !== 'null');
+	}
+	if (typeof type === 'string' && type.includes(',')) {
+		return type.split(',').find((t) => t.trim() !== 'null')?.trim();
+	}
+	return type;
+}
+
+// Map JSON schema types to Gemini Type enum\`;
+            code = code.replace('// Map JSON schema types to Gemini Type enum', helper);
+
+            // Use getPrimaryType in toGeminiFunction
+            code = code.replace(
+              \"const target = schema.type === 'array' && schema.items ? schema.items : schema;\",
+              \"const typeStr = getPrimaryType(schema.type);\\n\\tconst target = typeStr === 'array' && schema.items ? schema.items : schema;\"
+            );
+
+            // Use getPrimaryType in transformProperties
+            code = code.replace(
+              /(const effectiveValue =\\s*\\(value\\.anyOf[^;]+;)\\s*\\n\\s*\\n\\s*(const transformed)/,
+              '\$1\\n\\n\\t\\tconst typeStr = getPrimaryType(effectiveValue.type);\\n\\n\\t\\t\$2'
+            );
+            code = code.replace(/type: effectiveValue\\.type\\s*\\?\\s*mapType\\(effectiveValue\\.type\\)/g, 'type: typeStr\\n\\t\\t\\t\\t? mapType(typeStr)');
+            code = code.replace(/if \\(effectiveValue\\.type === 'object'/g, \"if (typeStr === 'object'\");
+            code = code.replace(/else if \\(effectiveValue\\.type === 'array'/g, \"else if (typeStr === 'array'\");
+            code = code.replace(
+              \"const itemType = effectiveValue.items.type === 'object' ? Type.OBJECT : mapType(effectiveValue.items.type ?? 'object');\",
+              \"const itemTypeStr = getPrimaryType(effectiveValue.items.type) ?? 'object';\\n\\t\\t\\tconst itemType = itemTypeStr === 'object' ? Type.OBJECT : mapType(itemTypeStr);\"
+            );
+
+            fs.writeFileSync(f, code);
+            console.log('Patched: getPrimaryType');
+          } else {
+            console.log('getPrimaryType already present, skipping');
+          }
+          "
+
+      - name: Bump version above built-in
+        run: |
+          node -e "
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const [major, minor, patch] = pkg.version.split('.').map(Number);
+          pkg.version = \`\${major}.\${minor}.\${patch + 1}\`;
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, '\t') + '\n');
+          console.log('Version bumped to: ' + pkg.version);
+          "
+
+      - name: Commit and push if changed
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No upstream changes detected"
+          else
+            git commit -m "Sync upstream copilot extension + apply BYOK patches"
+            git push origin main
+          fi

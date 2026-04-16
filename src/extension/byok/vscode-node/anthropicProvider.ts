@@ -9,15 +9,17 @@ import { CancellationToken, LanguageModelChatInformation, LanguageModelChatMessa
 import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { CustomDataPartMimeTypes } from '../../../platform/endpoint/common/endpointTypes';
+import { modelSupportsToolSearch } from '../../../platform/endpoint/common/chatModelCapabilities';
 import { buildToolInputSchema } from '../../../platform/endpoint/node/messagesApi';
 import { ILogService } from '../../../platform/log/common/logService';
-import { ContextManagementResponse, getContextManagementFromConfig, isAnthropicContextEditingEnabled, isAnthropicMemoryToolEnabled, isAnthropicToolSearchEnabled, TOOL_SEARCH_TOOL_NAME, TOOL_SEARCH_TOOL_TYPE, ToolSearchToolResult, ToolSearchToolSearchResult } from '../../../platform/networking/common/anthropic';
+import { ContextManagementResponse, CUSTOM_TOOL_SEARCH_NAME, getContextManagementFromConfig, isAnthropicContextEditingEnabled, isAnthropicMemoryToolEnabled } from '../../../platform/networking/common/anthropic';
+import { IToolDeferralService } from '../../../platform/networking/common/toolDeferralService';
 import { IResponseDelta, OpenAiFunctionTool } from '../../../platform/networking/common/fetch';
 import { APIUsage } from '../../../platform/networking/common/openai';
-import { IToolDeferralService } from '../../../platform/networking/common/toolDeferralService';
 import { CopilotChatAttr, emitInferenceDetailsEvent, GenAiAttr, GenAiMetrics, GenAiOperationName, type OTelModelOptions, StdAttr, truncateForOTel } from '../../../platform/otel/common/index';
 import { IOTelService, SpanKind, SpanStatusCode } from '../../../platform/otel/common/otelService';
-import { IRequestLogger, retrieveCapturingTokenByCorrelation, runWithCapturingToken } from '../../../platform/requestLogger/node/requestLogger';
+import { IRequestLogger } from '../../../platform/requestLogger/common/requestLogger';
+import { retrieveCapturingTokenByCorrelation, runWithCapturingToken } from '../../../platform/requestLogger/node/requestLogger';
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
 import { ITelemetryService } from '../../../platform/telemetry/common/telemetry';
 import { toErrorMessage } from '../../../util/common/errorMessage';
@@ -25,20 +27,20 @@ import { RecordedProgress } from '../../../util/common/progressRecorder';
 import { generateUuid } from '../../../util/vs/base/common/uuid';
 import { anthropicMessagesToRawMessagesForLogging, apiMessageToAnthropicMessage } from '../common/anthropicMessageConverter';
 import { BYOKKnownModels, BYOKModelCapabilities, LMResponsePart } from '../common/byokProvider';
-import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation, getApproximateTokenCount, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
+import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
 import { byokKnownModelsToAPIInfoWithEffort } from './byokModelInfo';
 import { IBYOKStorageService } from './byokStorageService';
 
 export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 
-	public static readonly providerName: string = 'Anthropic';
+	public static readonly providerName = 'Anthropic';
 
 	constructor(
 		knownModels: BYOKKnownModels | undefined,
 		byokStorageService: IBYOKStorageService,
 		@ILogService logService: ILogService,
 		@IRequestLogger private readonly _requestLogger: IRequestLogger,
-		@IConfigurationService protected readonly _configurationService: IConfigurationService,
+		@IConfigurationService private readonly _configurationService: IConfigurationService,
 		@IExperimentationService private readonly _experimentationService: IExperimentationService,
 		@ITelemetryService private readonly _telemetryService: ITelemetryService,
 		@IOTelService private readonly _otelService: IOTelService,
@@ -89,19 +91,9 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 			}
 			return byokKnownModelsToAPIInfoWithEffort(this._name, modelList);
 		} catch (error) {
-			// If we hit a rate limit or other error, fallback to known models to prevent infinite polling
-			if (this._knownModels) {
-				this._logService.warn(`Error fetching available ${AnthropicLMProvider.providerName} models, falling back to known models. Error: ${error.message ?? error}`);
-				return byokKnownModelsToAPIInfoWithEffort(this._name, this._knownModels);
-			}
-
 			this._logService.error(error, `Error fetching available ${AnthropicLMProvider.providerName} models`);
 			throw new Error(error.message ? error.message : error);
 		}
-	}
-
-	protected createClient(apiKey: string, model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>): Anthropic {
-		return new Anthropic({ apiKey });
 	}
 
 	async provideLanguageModelChatResponse(model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {
@@ -116,22 +108,14 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		// OTel span handle — created outside doRequest, enriched inside with usage data
 		let otelSpan: ReturnType<typeof this._otelService.startSpan> | undefined;
 
-		const reportThrottle = (waitMs: number) => {
-			const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
-			progress.report(new vscode.LanguageModelThinkingPart(`[Rate limit] Waiting ~${Math.ceil(waitMs / 1000)}s (${maxRpm} req/min limit)...\n`));
-		};
-
 		const doRequest = async () => {
-			const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
-			await this._byokStorageService.throttleIfNecessary?.(maxRpm, AnthropicLMProvider.providerName, reportThrottle);
-
 			const issuedTime = Date.now();
 			const apiKey = model.configuration?.apiKey;
 			if (!apiKey) {
 				throw new Error('API key not found for the model');
 			}
 
-			const anthropicClient = this.createClient(apiKey, model);
+			const anthropicClient = new Anthropic({ apiKey });
 
 			// Convert the messages from the API format into messages that we can use against anthropic
 			const { system, messages: convertedMessages } = apiMessageToAnthropicMessage(messages as LanguageModelChatMessage[]);
@@ -163,19 +147,14 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 
 			const memoryToolEnabled = isAnthropicMemoryToolEnabled(model.id, this._configurationService, this._experimentationService);
 
-			const toolSearchEnabled = isAnthropicToolSearchEnabled(model.id.replace(/-/g, '.'), this._configurationService);
+			// Requires the client-side tool_search tool in the request: without it, defer-loaded tools can't be retrieved.
+			// If the user disables tool_search in the tool picker, it won't be present here and tool search is skipped.
+			const toolSearchEnabled = modelSupportsToolSearch(model.id)
+				&& !!options.tools?.some(t => t.name === CUSTOM_TOOL_SEARCH_NAME);
 
 			// Build tools array, handling both standard tools and native Anthropic tools
 			const tools: Anthropic.Beta.BetaToolUnion[] = [];
 
-			// Add tool search tool if enabled (must be first in the array)
-			if (toolSearchEnabled) {
-				tools.push({
-					name: TOOL_SEARCH_TOOL_NAME,
-					type: TOOL_SEARCH_TOOL_TYPE,
-					defer_loading: false
-				} as Anthropic.Beta.BetaToolUnion);
-			}
 			let hasMemoryTool = false;
 			for (const tool of (options.tools ?? [])) {
 				// Handle native Anthropic memory tool (only for models that support it)
@@ -303,12 +282,6 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				const result = await this._makeRequest(anthropicClient, wrappedProgress, params, betas, token, issuedTime);
 				if (result.ttft) {
 					pendingLoggedChatRequest.markTimeToFirstToken(result.ttft);
-				}
-				if (result.usage) {
-					progress.report(new LanguageModelDataPart(
-						new TextEncoder().encode(JSON.stringify(result.usage)),
-						CustomDataPartMimeTypes.TokenUsage
-					));
 				}
 				const responseDeltas: IResponseDelta[] = wrappedProgress.items.map((i): IResponseDelta => {
 					if (i instanceof LanguageModelTextPart) {
@@ -468,14 +441,11 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				});
 			} catch (err) {
 				this._logService.error(`BYOK Anthropic error: ${toErrorMessage(err, true)}`);
-				const isRateLimit = err instanceof Anthropic.RateLimitError;
 				pendingLoggedChatRequest.resolve({
-					type: isRateLimit
-						? ChatFetchResponseType.RateLimited
-						: ChatFetchResponseType.Unknown,
+					type: ChatFetchResponseType.Unknown,
 					requestId,
 					serverRequestId: requestId,
-					reason: toErrorMessage(err)
+					reason: err.message
 				}, wrappedProgress.items.map((i): IResponseDelta => {
 					if (i instanceof LanguageModelTextPart) {
 						return { text: i.value };
@@ -515,21 +485,30 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 					[StdAttr.SERVER_ADDRESS]: 'api.anthropic.com',
 				},
 			});
-			// Opt-in: capture input messages
+			// Opt-in: capture input messages in OTel GenAI format
 			if (this._otelService.config.captureContent) {
 				try {
 					const roleNames: Record<number, string> = { 1: 'user', 2: 'assistant', 3: 'system' };
 					const inputMsgs = messages.map(m => {
 						const msg = m as LanguageModelChatMessage;
 						const role = roleNames[msg.role] ?? String(msg.role);
-						const textParts: string[] = [];
+						const parts: Array<{ type: string; content?: string | unknown; id?: string; name?: string; arguments?: unknown; response?: unknown }> = [];
 						if (Array.isArray(msg.content)) {
 							for (const p of msg.content) {
-								if (p instanceof LanguageModelTextPart) { textParts.push(p.value); }
+								if (p instanceof LanguageModelTextPart) {
+									parts.push({ type: 'text', content: p.value });
+								} else if (p instanceof LanguageModelToolCallPart) {
+									parts.push({ type: 'tool_call', id: p.callId, name: p.name, arguments: p.input });
+								} else if (p instanceof LanguageModelToolResultPart) {
+									const resultText = p.content.map((c: unknown) => c instanceof LanguageModelTextPart ? c.value : '').join('');
+									parts.push({ type: 'tool_call_response', id: p.callId, response: resultText });
+								}
 							}
 						}
-						const content = textParts.length > 0 ? textParts.join('') : '[non-text content]';
-						return { role, parts: [{ type: 'text', content }] };
+						if (parts.length === 0) {
+							parts.push({ type: 'text', content: '[non-text content]' });
+						}
+						return { role, parts };
 					});
 					otelSpan.setAttribute(GenAiAttr.INPUT_MESSAGES, truncateForOTel(JSON.stringify(inputMsgs)));
 				} catch { /* swallow */ }
@@ -556,41 +535,18 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 
 	async provideTokenCount(model: LanguageModelChatInformation, text: string | LanguageModelChatMessage | LanguageModelChatMessage2, token: CancellationToken): Promise<number> {
 		// Simple estimation - actual token count would require Claude's tokenizer
-		return getApproximateTokenCount(text);
+		return Math.ceil(text.toString().length / 4);
 	}
 
-	private async _makeRequest(anthropicClient: Anthropic, progress: RecordedProgress<LMResponsePart>, params: Anthropic.Beta.Messages.MessageCreateParamsStreaming, betas: string[], token: CancellationToken, issuedTime: number, retryCount = 0): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined; contextManagement: ContextManagementResponse | undefined }> {
-		const MAX_RETRIES = 3;
+	private async _makeRequest(anthropicClient: Anthropic, progress: RecordedProgress<LMResponsePart>, params: Anthropic.Beta.Messages.MessageCreateParamsStreaming, betas: string[], token: CancellationToken, issuedTime: number): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined; contextManagement: ContextManagementResponse | undefined }> {
 		const start = Date.now();
 		let ttft: number | undefined;
 		let ttfte: number | undefined;
 
-		let stream: Awaited<ReturnType<typeof anthropicClient.beta.messages.create>>;
-		try {
-			stream = await anthropicClient.beta.messages.create({
-				...params,
-				...(betas.length > 0 && { betas })
-			});
-		} catch (err) {
-			if (err instanceof Anthropic.RateLimitError) {
-				if (retryCount < MAX_RETRIES) {
-					const retryAfterSec = parseInt(err.headers?.['retry-after'] ?? '0', 10);
-					const blockedUntil = Date.now() + (retryAfterSec > 0 ? retryAfterSec * 1000 : 60000);
-					const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
-					this._logService.warn(`Anthropic rate limit (429), backing off before retry ${retryCount + 1}/${MAX_RETRIES}`);
-					await this._byokStorageService.onRateLimitHit?.(maxRpm, AnthropicLMProvider.providerName, blockedUntil);
-					await this._byokStorageService.throttleIfNecessary?.(maxRpm, AnthropicLMProvider.providerName, (waitMs) => {
-						progress.report(new vscode.LanguageModelThinkingPart(`[Rate limit] 429 retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(waitMs / 1000)}s...\n`));
-					});
-					if (token.isCancellationRequested) {
-						return { ttft, ttfte, usage: undefined, contextManagement: undefined };
-					}
-					return this._makeRequest(anthropicClient, progress, params, betas, token, issuedTime, retryCount + 1);
-				}
-				throw new Error(err.message ?? 'Anthropic rate limit exceeded. Please check your API quota.');
-			}
-			throw err;
-		}
+		const stream = await anthropicClient.beta.messages.create({
+			...params,
+			...(betas.length > 0 && { betas })
+		});
 
 		let pendingToolCall: {
 			toolId?: string;
@@ -686,33 +642,6 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 						[new LanguageModelTextPart(searchResults)]
 					));
 					pendingServerToolCall = undefined;
-				} else if ('content_block' in chunk && chunk.content_block.type === 'tool_search_tool_result') {
-					const toolSearchResult = chunk.content_block as unknown as ToolSearchToolResult;
-					if (toolSearchResult.content.type === 'tool_search_tool_search_result') {
-						const searchResult = toolSearchResult.content as ToolSearchToolSearchResult;
-						const toolNames = searchResult.tool_references.map(ref => ref.tool_name);
-
-						this._logService.trace(`Tool search discovered ${toolNames.length} tools: ${toolNames.join(', ')}`);
-
-						let query: string | undefined;
-						if (pendingServerToolCall) {
-							try {
-								const parsed = JSON.parse(pendingServerToolCall.jsonInput || '{}');
-								query = parsed.query;
-							} catch {
-								// Ignore parse errors
-							}
-						}
-
-						progress.report(new LanguageModelToolResultPart(
-							toolSearchResult.tool_use_id,
-							[new LanguageModelTextPart(JSON.stringify({ query, discovered_tools: toolNames }))]
-						));
-						pendingServerToolCall = undefined;
-					} else if (toolSearchResult.content.type === 'tool_search_tool_result_error') {
-						this._logService.warn(`Tool search error: ${toolSearchResult.content.error_code}`);
-						pendingServerToolCall = undefined;
-					}
 				}
 				continue;
 			}

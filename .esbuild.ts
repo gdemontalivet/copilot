@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as watcher from '@parcel/watcher';
 import * as esbuild from 'esbuild';
 import * as fs from 'fs';
 import { copyFile, mkdir, readdir, rename } from 'fs/promises';
@@ -13,7 +12,6 @@ import * as path from 'path';
 const REPO_ROOT = import.meta.dirname;
 const isWatch = process.argv.includes('--watch');
 const isDev = process.argv.includes('--dev');
-const isPreRelease = process.argv.includes('--prerelease');
 const generateSourceMaps = process.argv.includes('--sourcemaps');
 const sourceMapOutDir = './dist-sourcemaps';
 
@@ -324,8 +322,9 @@ async function moveSourceMapsToSeparateDir(): Promise<void> {
 }
 
 async function main() {
-	if (!isDev) {
-		applyPackageJsonPatch(isPreRelease);
+	if (process.env['BUILD_SOURCEVERSION']) {
+		console.log('Running in CI environment, applying package.json patch for correct versioning and pre-release status...');
+		applyPackageJsonPatch();
 	}
 
 	await typeScriptServerPluginPackageJsonInstall();
@@ -373,7 +372,7 @@ async function main() {
 			}, 100);
 		};
 
-
+		const watcher = await import('@parcel/watcher');
 		watcher.subscribe(REPO_ROOT, (err, events) => {
 			for (const event of events) {
 				console.log(`File change detected: ${event.path}`);
@@ -409,28 +408,72 @@ async function main() {
 			esbuild.build(webviewBuildOptions),
 		]);
 
+		// Run postinstall to copy static build assets (wasm, tiktoken, cli) to dist/.
+		// This is needed because in CI, node_modules may be restored from cache,
+		// skipping npm ci and thus the postinstall script.
+		const child_process = await import('child_process');
+		child_process.execFileSync(
+			process.execPath,
+			[
+				path.join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
+				path.join(REPO_ROOT, 'script', 'postinstall.ts'),
+			],
+			{ cwd: REPO_ROOT, stdio: 'inherit' },
+		);
+
 		// Move source maps to separate directory so they're not packaged with the extension
 		await moveSourceMapsToSeparateDir();
 	}
 }
 
-function applyPackageJsonPatch(isPreRelease: boolean) {
-	const packagejsonPath = path.join(import.meta.dirname, './package.json');
-	const json = JSON.parse(fs.readFileSync(packagejsonPath).toString());
+function applyPackageJsonPatch() {
+	const quality = process.env['VSCODE_QUALITY'];
 
-	const newProps: any = {
+	if (!quality) {
+		throw new Error('VSCODE_QUALITY environment variable is not set. This should be set by the build pipeline to ensure correct versioning and pre-release status in package.json.');
+	}
+
+	const packageJsonPath = path.join(import.meta.dirname, './package.json');
+	const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+	let version = packageJson.version;
+	const isPreRelease = quality !== 'stable';
+
+	if (isPreRelease) {
+		const counterStr = process.env['VSCODE_PUBLISH_COUNTER'];
+
+		if (!counterStr) {
+			throw new Error('VSCODE_PUBLISH_COUNTER environment variable is not set. This should be set by the build pipeline to ensure unique versioning for each pre-release build.');
+		}
+
+		if (!/^\d+$/.test(counterStr)) {
+			throw new Error('VSCODE_PUBLISH_COUNTER must be a non-negative integer. This should be set by the build pipeline to ensure unique versioning for each pre-release build.');
+		}
+
+		const counter = Number.parseInt(counterStr, 10);
+
+		if (!Number.isInteger(counter) || counter >= 100) {
+			throw new Error('VSCODE_PUBLISH_COUNTER is out of range. This should be a whole number between 0 and 99 that increments with each build, but resets periodically (e.g. daily) to avoid excessively long version numbers.');
+		}
+
+		const [major, minor] = version.split('.');
+		version = `${major}.${minor}.${getDateBasedPatch(counter)}`;
+	}
+
+	const newProps = {
 		buildType: 'prod',
 		isPreRelease,
+		version
 	};
 
-	const patchedPackageJson = Object.assign(json, newProps);
+	fs.writeFileSync(packageJsonPath, JSON.stringify({ ...packageJson, ...newProps }, null, '\t'));
+}
 
-	// Remove fields which might reveal our development process
-	delete patchedPackageJson['scripts'];
-	delete patchedPackageJson['devDependencies'];
-	delete patchedPackageJson['dependencies'];
-
-	fs.writeFileSync(packagejsonPath, JSON.stringify(patchedPackageJson));
+function getDateBasedPatch(counter: number): string {
+	const now = new Date();
+	const year = now.getFullYear();
+	const month = String(now.getMonth() + 1).padStart(2, '0');
+	const day = String(now.getDate()).padStart(2, '0');
+	return `${year}${month}${day}${String(counter).padStart(2, '0')}`;
 }
 
 main();

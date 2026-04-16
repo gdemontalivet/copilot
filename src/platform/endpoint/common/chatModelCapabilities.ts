@@ -17,7 +17,9 @@ const HIDDEN_MODEL_A_HASHES = [
 
 
 const HIDDEN_MODEL_B_HASHES = [
-	'1f48b3271e760c69ab2b17dcae5f5c661fa5b644c5976a8a99b23e05ae3cb6d6'
+	'1f48b3271e760c69ab2b17dcae5f5c661fa5b644c5976a8a99b23e05ae3cb6d6',
+	'ffc50c70661c227edf8daae6f8dbed2dd0645386c12d43bc7fc44da166e043bd',
+	'257c934076307881132be702a901618969591f0e11e1df51b22b1d4010f0a0d0',
 ];
 
 const VSC_MODEL_HASHES_A = [
@@ -96,7 +98,7 @@ export function isHiddenModelF(model: LanguageModelChat | IChatEndpoint) {
 
 export function isHiddenModelG(model: LanguageModelChat | IChatEndpoint) {
 	const family_hash = getCachedSha256Hash(model.family);
-	return family_hash === '0d90e0e579352b8502fc2a46b40961ee941adc26ce67c2b1438f0e4ea97d932f';
+	return family_hash === '3ae755cc6122a54cc873e3ba2bd8703883b4a711d1af2707ef00f2c2c963ee8d';
 }
 
 export function isHiddenFamilyH(model: LanguageModelChat | IChatEndpoint) {
@@ -378,4 +380,49 @@ export function getVerbosityForModelSync(model: IChatEndpoint): 'low' | 'medium'
 	}
 
 	return undefined;
+}
+
+/**
+ * Returns true if the model supports the tool search tool.
+ * Matches any Claude Sonnet or Opus model with version >= 4.5. The minor
+ * version is bounded to 1–2 digits so date suffixes like `-20250514`
+ * cannot be misread as a minor version.
+ */
+export function modelSupportsToolSearch(modelId: string): boolean {
+	const normalized = modelId.toLowerCase().replace(/\./g, '-');
+	const match = normalized.match(/^claude-(?:sonnet|opus)-(\d+)(?:-(\d{1,2}))?(?:-|$)/);
+	if (!match) {
+		return false;
+	}
+	const major = parseInt(match[1], 10);
+	const minor = match[2] !== undefined ? parseInt(match[2], 10) : 0;
+	return major > 4 || (major === 4 && minor >= 5);
+}
+
+/**
+ * Context editing is supported by:
+ * - Claude Haiku 4.5 (claude-haiku-4-5-* or claude-haiku-4.5-*)
+ * - Claude Sonnet 4.6 (claude-sonnet-4-6-* or claude-sonnet-4.6-*)
+ * - Claude Sonnet 4.5 (claude-sonnet-4-5-* or claude-sonnet-4.5-*)
+ * - Claude Sonnet 4 (claude-sonnet-4-*)
+ * - Claude Opus 4.6 (claude-opus-4-6-* or claude-opus-4.6-*)
+ * - Claude Opus 4.5 (claude-opus-4-5-* or claude-opus-4.5-*)
+ * - Claude Opus 4.1 (claude-opus-4-1-* or claude-opus-4.1-*)
+ * - Claude Opus 4 (claude-opus-4-*)
+ * Provider-agnostic: add additional model prefixes here as other providers adopt context editing.
+ */
+export function modelSupportsContextEditing(modelId: string): boolean {
+	const normalized = modelId.toLowerCase().replace(/\./g, '-');
+	// The 1M context variant doesn't need context editing
+	if (normalized.includes('1m')) {
+		return false;
+	}
+	return normalized.startsWith('claude-haiku-4-5') ||
+		normalized.startsWith('claude-sonnet-4-6') ||
+		normalized.startsWith('claude-sonnet-4-5') ||
+		normalized.startsWith('claude-sonnet-4') ||
+		normalized.startsWith('claude-opus-4-6') ||
+		normalized.startsWith('claude-opus-4-5') ||
+		normalized.startsWith('claude-opus-4-1') ||
+		normalized.startsWith('claude-opus-4');
 }

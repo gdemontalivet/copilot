@@ -17,7 +17,7 @@ import { IEnvService } from '../../env/common/envService';
 import { GitHubOutageStatus, IOctoKitService } from '../../github/common/githubService';
 import { ILogService } from '../../log/common/logService';
 import { getRequest } from '../../networking/common/networking';
-import { IRequestLogger } from '../../requestLogger/node/requestLogger';
+import { IRequestLogger } from '../../requestLogger/common/requestLogger';
 import { IExperimentationService } from '../../telemetry/common/nullExperimentationService';
 import { ChatEndpointFamily, IChatModelInformation, ICompletionModelInformation, IEmbeddingModelInformation, IModelAPIResponse, isChatModelInformation, isCompletionModelInformation, isEmbeddingModelInformation } from '../common/endpointProvider';
 import { ModelAliasRegistry } from '../common/modelAliasRegistry';
@@ -204,23 +204,7 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 
 	private _shouldRefreshModels(): boolean {
 		if (this._familyMap.size === 0) {
-			// If the last fetch failed, apply a backoff to avoid hammering the server
-			if (this._lastFetchError && this._lastFetchTime) {
-				const failureBackoffMs = 60 * 1000; // 1 minute backoff on failure
-				const timeSinceLastFetch = Date.now() - this._lastFetchTime;
-				const shouldRefresh = timeSinceLastFetch > failureBackoffMs;
-				return shouldRefresh;
-			}
-
-			// If we successfully bypassed or completed a fetch recently, don't refresh immediately
-			if (this._lastFetchTime && !this._lastFetchError) {
-				const tenMinutes = 10 * 60 * 1000;
-				if (Date.now() - this._lastFetchTime < tenMinutes) {
-					return false;
-				}
-			}
-
-			// No previous fetch attempt, refresh immediately
+			// Always refresh if we have no models as this means the last fetch failed in some way
 			return true;
 		}
 		const tenMinutes = 10 * 60 * 1000; // 10 minutes in milliseconds
@@ -245,22 +229,9 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 		if (!force && !this._shouldRefreshModels()) {
 			return;
 		}
-		// @ts-expect-error
-		// eslint-disable-next-line @typescript-eslint/no-unused-vars
 		const requestStartTime = Date.now();
 
-		const copilotTokenObj = await this._authService.getCopilotToken();
-		const copilotToken = copilotTokenObj.token;
-
-		if (copilotTokenObj.username === 'offline-user' || copilotToken === 'fake-token') {
-			this._familyMap.clear();
-			this._completionsFamilyMap.clear();
-			this._lastFetchError = undefined;
-			this._lastFetchTime = Date.now();
-			this._onDidModelRefresh.fire();
-			return;
-		}
-
+		const copilotToken = (await this._authService.getCopilotToken()).token;
 		const requestId = generateUuid();
 		const requestMetadata: RequestMetadata = { type: RequestType.Models, isModelLab: this._isModelLab };
 
@@ -273,6 +244,7 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 			});
 
 			this._lastFetchTime = Date.now();
+			this._logService.info(`Fetched model metadata in ${Date.now() - requestStartTime}ms ${requestId}`);
 
 			if (response.status < 200 || response.status >= 300) {
 				// If we're rate limited and have models, we should just return
@@ -306,10 +278,7 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 		} catch (e) {
 			this._logService.error(e, `Failed to fetch models (${requestId})`);
 			this._lastFetchError = e;
-			this._lastFetchTime = Date.now(); // Record time for backoff calculation
-			// Fire refresh event even on failure so downstream consumers (e.g. LanguageModelAccess)
-			// can proceed with empty CAPI models and use custom/BYOK models instead
-			this._onDidModelRefresh.fire();
+			this._lastFetchTime = 0;
 		}
 	}
 

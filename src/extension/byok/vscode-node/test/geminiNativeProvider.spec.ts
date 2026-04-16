@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
 import { NoopOTelService, resolveOTelConfig } from '../../../../platform/otel/common/index';
 import type { CapturingToken } from '../../../../platform/requestLogger/common/capturingToken';
-import type { IRequestLogger } from '../../../../platform/requestLogger/node/requestLogger';
+import type { IRequestLogger } from '../../../../platform/requestLogger/common/requestLogger';
 import { NullTelemetryService } from '../../../../platform/telemetry/common/nullTelemetryService';
 import { TestLogService } from '../../../../platform/testing/common/testLogService';
 import type { IBYOKStorageService } from '../byokStorageService';
@@ -71,7 +71,6 @@ function createStorageService(overrides?: Partial<IBYOKStorageService>): IBYOKSt
 		getStoredModelConfigs: vi.fn().mockResolvedValue({}),
 		saveModelConfig: vi.fn().mockResolvedValue(undefined),
 		removeModelConfig: vi.fn().mockResolvedValue(undefined),
-		throttleIfNecessary: vi.fn().mockResolvedValue(undefined),
 		...overrides,
 	};
 }
@@ -98,91 +97,15 @@ function createRequestLogger(): IRequestLogger {
 	} as unknown as IRequestLogger;
 }
 
-describe('resolveGeminiKnownModelId', () => {
-	it('maps short API id to CDN models/ key', async () => {
-		const { resolveGeminiKnownModelId } = await import('../geminiNativeProvider');
-		const known = {
-			'models/gemini-2.5-flash': {
-				name: 'Gemini 2.5 Flash',
-				maxInputTokens: 1000,
-				maxOutputTokens: 1000,
-				toolCalling: false,
-				vision: false
-			}
-		};
-		expect(resolveGeminiKnownModelId('gemini-2.5-flash', known)).toBe('models/gemini-2.5-flash');
-	});
-
-	it('maps long resource path to models/ key', async () => {
-		const { resolveGeminiKnownModelId } = await import('../geminiNativeProvider');
-		const known = {
-			'models/gemini-3-pro-preview': {
-				name: 'Gemini 3 Pro Preview',
-				maxInputTokens: 1000,
-				maxOutputTokens: 1000,
-				toolCalling: false,
-				vision: false
-			}
-		};
-		expect(resolveGeminiKnownModelId('publishers/google/models/gemini-3-pro-preview', known)).toBe('models/gemini-3-pro-preview');
-	});
-
-	it('returns exact key when API already matches known map', async () => {
-		const { resolveGeminiKnownModelId } = await import('../geminiNativeProvider');
-		const known = {
-			'models/gemini-2.5-pro': {
-				name: 'Gemini 2.5 Pro',
-				maxInputTokens: 1000,
-				maxOutputTokens: 1000,
-				toolCalling: false,
-				vision: false
-			}
-		};
-		expect(resolveGeminiKnownModelId('models/gemini-2.5-pro', known)).toBe('models/gemini-2.5-pro');
-	});
-});
-
 describe('GeminiNativeBYOKLMProvider', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 	});
 
-	it('lists models when API returns short ids and known list uses models/ prefix', async () => {
-		const { GeminiNativeBYOKLMProvider } = await import('../geminiNativeProvider');
-		const genai = await import('@google/genai');
-		const MockGoogleGenAI = genai.GoogleGenAI as unknown as { listModelsResult: AsyncIterable<any> };
-		MockGoogleGenAI.listModelsResult = (async function* () {
-			yield { name: 'gemini-2.5-flash' };
-		})();
-
-		// Avoid constructor migration (needs vscode.commands); API key comes from options.configuration
-		const storage = createStorageService({
-			getAPIKey: vi.fn().mockResolvedValue(undefined),
-		});
-		const knownModels = {
-			'models/gemini-2.5-flash': {
-				name: 'Gemini 2.5 Flash',
-				maxInputTokens: 819600,
-				maxOutputTokens: 65536,
-				toolCalling: true,
-				vision: true
-			}
-		};
-		const configService = { getConfig: vi.fn().mockReturnValue(0) } as any;
-		const provider = new GeminiNativeBYOKLMProvider(knownModels, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })), configService);
-		const tokenSource = new vscode.CancellationTokenSource();
-		const models = await provider.provideLanguageModelChatInformation(
-			{ silent: false, configuration: { apiKey: 'test_key' } },
-			tokenSource.token,
-		);
-		expect(models.map(m => m.id)).toEqual(['models/gemini-2.5-flash']);
-	});
-
 	it.skip('throws a clear error when no API key is configured (no silent return)', async () => {
 		const { GeminiNativeBYOKLMProvider } = await import('../geminiNativeProvider');
 		const storage = createStorageService({ getAPIKey: vi.fn().mockResolvedValue(undefined) });
-		const configService = { getConfig: vi.fn().mockReturnValue(0) } as any;
-		const provider = new GeminiNativeBYOKLMProvider(undefined, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })), configService);
+		const provider = new GeminiNativeBYOKLMProvider(undefined, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })));
 
 		const model: vscode.LanguageModelChatInformation = {
 			id: 'gemini-2.0-flash',
@@ -312,8 +235,7 @@ describe('GeminiNativeBYOKLMProvider', () => {
 
 		mockHandleAPIKeyUpdate.mockResolvedValue({ apiKey: undefined, deleted: false, cancelled: true });
 
-		const configService = { getConfig: vi.fn().mockReturnValue(0) } as any;
-		const provider = new GeminiNativeBYOKLMProvider(undefined, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })), configService);
+		const provider = new GeminiNativeBYOKLMProvider(undefined, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })));
 		const tokenSource = new vscode.CancellationTokenSource();
 		const models = await provider.provideLanguageModelChatInformation({ silent: false }, tokenSource.token);
 
@@ -359,8 +281,7 @@ describe('GeminiNativeBYOKLMProvider', () => {
 			}
 		};
 
-		const configService = { getConfig: vi.fn().mockReturnValue(0) } as any;
-		const provider = new GeminiNativeBYOKLMProvider(knownModels, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })), configService);
+		const provider = new GeminiNativeBYOKLMProvider(knownModels, storage, new TestLogService(), createRequestLogger(), new NullTelemetryService(), new NoopOTelService(resolveOTelConfig({ env: {}, extensionVersion: '1.0.0', sessionId: 'test' })));
 		const tokenSource = new vscode.CancellationTokenSource();
 		const models = await provider.provideLanguageModelChatInformation({ silent: false }, tokenSource.token);
 

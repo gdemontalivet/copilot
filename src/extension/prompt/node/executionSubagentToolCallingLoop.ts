@@ -15,7 +15,7 @@ import { IFileSystemService } from '../../../platform/filesystem/common/fileSyst
 import { IGitService } from '../../../platform/git/common/gitService';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IOTelService } from '../../../platform/otel/common/otelService';
-import { IRequestLogger } from '../../../platform/requestLogger/node/requestLogger';
+import { IRequestLogger } from '../../../platform/requestLogger/common/requestLogger';
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
 import { ITelemetryService } from '../../../platform/telemetry/common/telemetry';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
@@ -80,7 +80,7 @@ export class ExecutionSubagentToolCallingLoop extends ToolCallingLoop<IExecution
 	 * Get the endpoint to use for the execution subagent
 	 */
 	private async getEndpoint() {
-		const modelName = this._configurationService.getConfig(ConfigKey.Advanced.ExecutionSubagentModel) as ChatEndpointFamily;
+		const modelName = this._configurationService.getExperimentBasedConfig(ConfigKey.Advanced.ExecutionSubagentModel, this._experimentationService) as ChatEndpointFamily;
 		if (modelName) {
 			try {
 				let endpoint = await this.endpointProvider.getChatEndpoint(modelName);
@@ -120,20 +120,22 @@ export class ExecutionSubagentToolCallingLoop extends ToolCallingLoop<IExecution
 
 		const allowedExecutionTools = new Set([
 			ToolName.CoreRunInTerminal,
+			ToolName.CoreGetTerminalOutput,
+			ToolName.CoreSendToTerminal,
+			ToolName.CoreKillTerminal,
 		]);
 
 		return allTools.filter(tool => allowedExecutionTools.has(tool.name as ToolName));
 	}
 
-	protected async fetch({ messages, finishedCb, requestOptions, enableThinking, reasoningEffort }: ToolCallingLoopFetchOptions, token: CancellationToken): Promise<ChatResponse> {
+	protected async fetch({ messages, finishedCb, requestOptions, modelCapabilities }: ToolCallingLoopFetchOptions, token: CancellationToken): Promise<ChatResponse> {
 		const endpoint = await this.getEndpoint();
 		return endpoint.makeChatRequest2({
 			debugName: ExecutionSubagentToolCallingLoop.ID,
 			messages,
 			finishedCb,
 			location: this.options.location,
-			enableThinking,
-			reasoningEffort,
+			modelCapabilities: { ...modelCapabilities, reasoningEffort: undefined },
 			requestOptions: {
 				...(requestOptions ?? {}),
 				temperature: 0

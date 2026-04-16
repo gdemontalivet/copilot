@@ -14,6 +14,7 @@ import { ILogService } from '../../log/common/logService';
 import { IFetcherService } from '../../networking/common/fetcherService';
 import { ITelemetryService } from '../../telemetry/common/telemetry';
 import { CopilotToken, createTestExtendedTokenInfo, ExtendedTokenInfo, TokenErrorNotificationId, TokenInfoOrError } from '../common/copilotToken';
+import { nowSeconds } from '../common/copilotTokenManager';
 import { BaseCopilotTokenManager } from '../node/copilotTokenManager';
 import { getAnyAuthSession } from './session';
 
@@ -53,9 +54,6 @@ export class VSCodeCopilotTokenManager extends BaseCopilotTokenManager {
 			username: 'offline-user',
 			copilot_plan: 'individual',
 		});
-		// Set on base class to trigger onDidCopilotTokenRefresh event.
-		// Only set if not already set to avoid infinite loops (the event handler
-		// eventually calls getCopilotToken again via BaseAuthenticationService).
 		if (!this.copilotToken) {
 			this.copilotToken = fakeTokenInfo;
 		}
@@ -98,10 +96,7 @@ export class VSCodeCopilotTokenManager extends BaseCopilotTokenManager {
 		}
 	}
 
-	// eslint-disable-next-line @typescript-eslint/no-unused-vars -- Original auth flow bypassed for offline/custom-model mode
-	// @ts-expect-error
-	// eslint-disable-next-line @typescript-eslint/no-unused-vars
-	private async _unused_authShowWarnings(): Promise<ExtendedTokenInfo> {
+	private async _authShowWarnings(): Promise<ExtendedTokenInfo> {
 		const tokenResult = await this._taskSingler.getOrCreate('auth', () => this._auth());
 		this.sendTokenResultErrorTelemetry(tokenResult);
 

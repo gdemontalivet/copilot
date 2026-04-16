@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { ProvideLanguageModelChatResponseOptions } from 'vscode';
 import { Config, ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { EndpointEditToolName, ModelSupportedEndpoint } from '../../../platform/endpoint/common/endpointProvider';
 import { IVSCodeExtensionContext } from '../../../platform/extContext/common/extensionContext';
@@ -130,7 +129,7 @@ export abstract class AbstractCustomOAIBYOKModelProvider extends AbstractOpenAIC
 		return models;
 	}
 
-	protected override async createOpenAIEndPoint(model: OpenAICompatibleLanguageModelChatInformation<CustomOAIModelProviderConfig>, options?: ProvideLanguageModelChatResponseOptions): Promise<OpenAIEndpoint> {
+	protected override async createOpenAIEndPoint(model: OpenAICompatibleLanguageModelChatInformation<CustomOAIModelProviderConfig>): Promise<OpenAIEndpoint> {
 		const url = this.resolveUrl(model.id, model.url);
 		const modelConfiguration = model.configuration?.models?.find(m => m.id === model.id);
 		const modelCapabilities = {
@@ -152,8 +151,7 @@ export abstract class AbstractCustomOAIBYOKModelProvider extends AbstractOpenAIC
 				ModelSupportedEndpoint.Responses
 			];
 		}
-		const resolvedApiKey = model.configuration?.apiKey ?? (model as any).apiKey ?? options?.modelConfiguration?.apiKey ?? '';
-		return this._instantiationService.createInstance(OpenAIEndpoint, modelInfo, resolvedApiKey, url);
+		return this._instantiationService.createInstance(OpenAIEndpoint, modelInfo, model.configuration?.apiKey ?? '', url);
 	}
 
 	protected getModelsBaseUrl(configuration: CustomOAIModelProviderConfig | undefined): string | undefined {

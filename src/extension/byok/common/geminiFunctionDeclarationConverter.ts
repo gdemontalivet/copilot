@@ -80,10 +80,10 @@ function transformProperties(props: Record<string, ToolJsonSchema>): Record<stri
 		const effectiveValue =
 			(value.anyOf?.[0] || value.oneOf?.[0] || value.allOf?.[0] || value) as ToolJsonSchema;
 
+
 		const typeStr = getPrimaryType(effectiveValue.type);
 
 		const transformed: any = {
-			// If type is undefined, throw an error to avoid incorrect assumptions
 			type: typeStr
 				? mapType(typeStr)
 				: Type.OBJECT

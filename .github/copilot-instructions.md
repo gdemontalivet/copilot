@@ -281,15 +281,8 @@ The extension uses numerous proposed VS Code APIs for advanced functionality:
 
 ### Setup and Build
 - `npm install`: Install dependencies
+- `npm run compile`: Development build
 - `npm run watch:*`: Various watch modes for development
-- **Manual Compilation**: The `package.json` gets its `scripts`, `devDependencies`, and `dependencies` stripped out by a patching step in `.esbuild.ts`. Because `npm run compile` or `npm run build` will fail with "Missing script", you must compile the project directly using Node 22's experimental TypeScript support:
-  ```bash
-  node --experimental-strip-types .esbuild.ts --dev
-  ```
-- **Packaging / VSIX Generation**: The build script must be run before packaging to build all TS files into the `dist/` directory. `yarn` isn't available in this stripped down environment, so you must pass the `--no-dependencies` flag to `vsce package`:
-  ```bash
-  node --experimental-strip-types .esbuild.ts && npx vsce package --no-dependencies
-  ```
 
 ### Updating Dependencies
 
@@ -351,16 +344,6 @@ When updating `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/sdk`, you **MUS
 
 This extension is a complex, multi-layered system that provides comprehensive AI assistance within VS Code. Understanding the service architecture, contribution system, and separation between platform and extension layers is crucial for making effective changes.
 
-## Developer Rules & Learnings
-
-### BYOK (Bring Your Own Key) & Offline Mode
-- When testing the extension without a Copilot license, the system generates a fake offline token (`username: 'offline-user'`, `token: 'fake-token'`).
-- **CAPI Model Fetching**: `ModelMetadataFetcher._fetchModels` must intercept this fake token and skip hitting the CAPI models endpoint. Failure to do so will result in a `400 Bad Request: Authorization header is badly formatted` error and crash the startup flow.
-- **Authentication Event Firing**: In `BaseAuthenticationService.getCopilotToken()`, it's critical to manually trigger `fireAuthenticationChange('getCopilotToken success')` when the token is successfully acquired and differs from the previous one. If this event is not fired, `ConversationFeature` will stay stuck waiting for the token, resulting in the UI hanging with the message: `"Chat took too long to get ready. Please ensure you are signed in to GitHub..."`
-- `LanguageModelAccess` provides the CAPI models to VS Code's Language Model API.
-- `BYOKContrib` is responsible for registering custom (BYOK) providers like Anthropic and Gemini.
-- If `LanguageModelAccess` yields 0 endpoints, BYOK models can still be used seamlessly as long as the providers register correctly and the authentication loop resolves successfully.
-
 ## Best Practices
 - Use services and dependency injection over VS Code extension APIs when possible:
   - Use `IFileSystemService` instead of Node's `fs` or `vscode.workspace.fs`
@@ -368,5 +351,3 @@ This extension is a complex, multi-layered system that provides comprehensive AI
   - Look for existing `I*Service` interfaces before reaching for raw APIs
   - **Why**: Enables unit testing without VS Code host, supports simulation tests, provides cross-platform abstractions (Node vs web), and adds features like caching and size limits
 - Always use the URI type instead of using string file paths. There are many helpers available for working with URIs.
-## Important Gotchas
-- **Adding new Configuration/NLS keys:** To prevent upstream merge conflicts when updating from the official Microsoft repository, **do not** add custom keys directly to `package.nls.json`. Instead, add your custom translation keys and strings to `my-package.nls.json`. The build process (via `script/merge-nls.js`) will automatically merge them into `package.nls.json` at compile and package time. `package.nls.json` is gitignored and generated automatically from `package.nls.upstream.json` and `my-package.nls.json`.

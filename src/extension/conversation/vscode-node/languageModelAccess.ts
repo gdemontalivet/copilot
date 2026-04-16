@@ -11,7 +11,6 @@ import { CopilotToken } from '../../../platform/authentication/common/copilotTok
 import { IBlockedExtensionService } from '../../../platform/chat/common/blockedExtensionService';
 import { ChatFetchResponseType, ChatLocation, getErrorDetailsFromChatFetchError } from '../../../platform/chat/common/commonTypes';
 import { getTextPart } from '../../../platform/chat/common/globalStringUtils';
-import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { EmbeddingType, getWellKnownEmbeddingTypeInfo, IEmbeddingsComputer } from '../../../platform/embeddings/common/embeddingsComputer';
 import { IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
 import { CustomDataPartMimeTypes } from '../../../platform/endpoint/common/endpointTypes';
@@ -23,7 +22,6 @@ import { IEnvService, isScenarioAutomation } from '../../../platform/env/common/
 import { IVSCodeExtensionContext } from '../../../platform/extContext/common/extensionContext';
 import { IOctoKitService } from '../../../platform/github/common/githubService';
 import { ILogService } from '../../../platform/log/common/logService';
-import { isAnthropicToolSearchEnabled } from '../../../platform/networking/common/anthropic';
 import { FinishedCallback, OpenAiFunctionTool, OptionalChatRequestParams } from '../../../platform/networking/common/fetch';
 import { IChatEndpoint, IEndpoint } from '../../../platform/networking/common/networking';
 import { IOTelService, type OTelModelOptions } from '../../../platform/otel/common/otelService';
@@ -45,12 +43,18 @@ import { isImageDataPart } from '../common/languageModelChatMessageHelpers';
 import { LanguageModelAccessPrompt } from './languageModelAccessPrompt';
 
 /**
+ * Markers in the autoModelHint experiment variable that indicate the auto model
+ * is routing to an experimental or evaluation model.
+ */
+const experimentalAutoModelHintMarkers = ['minimax', 'mp3yn0h7', 'yaqq2gxh'];
+
+/**
  * Builds a configurationSchema for the model picker based on the endpoint's supported capabilities.
  * Models that support reasoning_effort get a "Thinking Effort" dropdown in the model picker UI.
  */
 function buildConfigurationSchema(endpoint: IChatEndpoint): { configurationSchema?: vscode.LanguageModelConfigurationSchema } {
 	const effortLevels = endpoint.supportsReasoningEffort;
-	if (!effortLevels || effortLevels.length === 0) {
+	if (!effortLevels || effortLevels.length <= 1) {
 		return {};
 	}
 
@@ -59,14 +63,17 @@ function buildConfigurationSchema(endpoint: IChatEndpoint): { configurationSchem
 		return {};
 	}
 
-	// Only enable effort picker for Claude and GPT models
 	const family = endpoint.family.toLowerCase();
-	if (!family.startsWith('claude') && !family.startsWith('gpt-')) {
+	if (family.startsWith('gemini')) {
 		return {};
 	}
 
-	const preferred = family.startsWith('claude') ? 'high' : 'medium';
-	const defaultEffort = effortLevels.includes(preferred) ? preferred : undefined;
+	let defaultEffort: string | undefined;
+	if (family.startsWith('claude')) {
+		defaultEffort = effortLevels.includes('high') ? 'high' : undefined;
+	} else if (family.startsWith('gpt-')) {
+		defaultEffort = effortLevels.includes('medium') ? 'medium' : undefined;
+	}
 
 	return {
 		configurationSchema: {
@@ -236,38 +243,18 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 		}
 
 		const models: vscode.LanguageModelChatInformation[] = [];
-		let allEndpoints: IChatEndpoint[];
-		try {
-			allEndpoints = await this._endpointProvider.getAllChatEndpoints();
-		} catch (e) {
-			this._logService.warn(`[STARTUP] [LanguageModelAccess] Failed to get chat endpoints: ${e}`);
-			allEndpoints = [];
-		}
+		const allEndpoints = await this._endpointProvider.getAllChatEndpoints();
 		const chatEndpoints = allEndpoints.filter(e => e.showInModelPicker || e.model === 'gpt-4o-mini');
-		let autoEndpoint: IChatEndpoint | undefined;
-		if (allEndpoints.length > 0) {
-			try {
-				autoEndpoint = await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);
-				chatEndpoints.push(autoEndpoint);
-			} catch (e) {
-				this._logService.warn(`[LanguageModelAccess] Failed to resolve auto mode endpoint: ${e}`);
-			}
-		}
-		if (chatEndpoints.length === 0) {
-			// No CAPI models available - return empty so BYOK models can be used directly
-			this._logService.info('[LanguageModelAccess] No Copilot models available. BYOK/custom models can still be used.');
-			this._currentModels = [];
-			this._chatEndpoints = [];
-			return [];
-		}
+		const autoEndpoint = await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);
+		chatEndpoints.push(autoEndpoint);
 		let defaultChatEndpoint: IChatEndpoint;
 		const defaultExpModel = this._expService.getTreatmentVariable<string>('chat.defaultLanguageModel')?.replace('copilot/', '');
 		if (this._authenticationService.copilotToken?.isNoAuthUser || !defaultExpModel || defaultExpModel === AutoChatEndpoint.pseudoModelId) {
 			// No auth, no experiment, and exp that sets auto to default all get default model
-			defaultChatEndpoint = autoEndpoint ?? chatEndpoints[0];
+			defaultChatEndpoint = autoEndpoint;
 		} else {
 			// Find exp default
-			defaultChatEndpoint = chatEndpoints.find(e => e.model === defaultExpModel) || (autoEndpoint ?? chatEndpoints[0]);
+			defaultChatEndpoint = chatEndpoints.find(e => e.model === defaultExpModel) || autoEndpoint;
 		}
 
 		const seenFamilies = new Set<string>();
@@ -283,12 +270,13 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 			if (endpoint.degradationReason) {
 				modelTooltip = endpoint.degradationReason;
 			} else if (endpoint instanceof AutoChatEndpoint) {
-				if (this._authenticationService.copilotToken?.isNoAuthUser || (endpoint.discountRange.low === 0 && endpoint.discountRange.high === 0)) {
-					modelTooltip = vscode.l10n.t('Auto selects the best model for your request based on capacity and performance.');
-				} else if (endpoint.discountRange.low === endpoint.discountRange.high) {
-					modelTooltip = vscode.l10n.t('Auto selects the best model for your request based on capacity and performance. Auto is given a {0}% discount.', endpoint.discountRange.low * 100);
-				} else {
-					modelTooltip = vscode.l10n.t('Auto selects the best model for your request based on capacity and performance. Auto is given a {0}% to {1}% discount.', endpoint.discountRange.low * 100, endpoint.discountRange.high * 100);
+				modelTooltip = vscode.l10n.t('Auto selects the best model for your request based on capacity and performance.');
+				const plan = this._authenticationService.copilotToken?.copilotPlan;
+				const isOrgManaged = plan === 'business' || plan === 'enterprise';
+				const autoModeHint = this._expService.getTreatmentVariable<string>('copilotchat.autoModelHint');
+				const showExperimentalHint = !isOrgManaged && !!autoModeHint && experimentalAutoModelHintMarkers.some(marker => autoModeHint.includes(marker));
+				if (showExperimentalHint) {
+					modelTooltip = `${modelTooltip} ${vscode.l10n.t('This model may be experimental or in evaluation.')}`;
 				}
 			} else {
 				modelTooltip = getModelCapabilitiesDescription(endpoint);
@@ -310,15 +298,6 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 			const baseCount = await this._promptBaseCountCache.getBaseCount(endpoint);
 			const multiplier = endpoint.multiplier !== undefined ? `${endpoint.multiplier}x` : undefined;
 			let modelDetail: string | undefined;
-
-			// Append rate info to tooltip for all non-Auto models with a multiplier
-			if (endpoint.multiplier !== undefined && !(endpoint instanceof AutoChatEndpoint)) {
-				if (modelTooltip) {
-					modelTooltip = vscode.l10n.t('{0} Rate is counted at {1}x.', modelTooltip, endpoint.multiplier);
-				} else {
-					modelTooltip = vscode.l10n.t('Rate is counted at {0}x.', endpoint.multiplier);
-				}
-			}
 
 			if (endpoint instanceof AutoChatEndpoint) {
 				if (endpoint.discountRange.high === endpoint.discountRange.low && endpoint.discountRange.low !== 0) {
@@ -460,7 +439,7 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 			const copilotToken = await this._authenticationService.getCopilotToken();
 			return copilotToken;
 		} catch (e) {
-			this._logService.warn(`[STARTUP] [LanguageModelAccess] LanguageModel/Embeddings are not available without auth token: ${e}`);
+			this._logService.warn('[LanguageModelAccess] LanguageModel/Embeddings are not available without auth token');
 			this._logService.error(e);
 			return undefined;
 		}
@@ -514,7 +493,6 @@ export class CopilotLanguageModelWrapper extends Disposable {
 		@ILogService private readonly _logService: ILogService,
 		@IAuthenticationService private readonly _authenticationService: IAuthenticationService,
 		@IEnvService private readonly _envService: IEnvService,
-		@IConfigurationService private readonly _configurationService: IConfigurationService,
 		@IOTelService private readonly _otelService: IOTelService,
 		@IOctoKitService private readonly _octoKitService: IOctoKitService,
 	) {
@@ -580,7 +558,7 @@ export class CopilotLanguageModelWrapper extends Disposable {
 			throw new Error('Message exceeds token limit.');
 		}
 
-		if (_options.tools && _options.tools.length > 128 && !isAnthropicToolSearchEnabled(_endpoint, this._configurationService)) {
+		if (_options.tools && _options.tools.length > 128 && !_endpoint.supportsToolSearch) {
 			throw new Error('Cannot have more than 128 tools per request.');
 		}
 
@@ -646,7 +624,9 @@ export class CopilotLanguageModelWrapper extends Disposable {
 			requestOptions: options,
 			userInitiatedRequest: !!extensionId,
 			telemetryProperties,
-			reasoningEffort: typeof _options.modelConfiguration?.reasoningEffort === 'string' ? _options.modelConfiguration.reasoningEffort : undefined,
+			modelCapabilities: {
+				reasoningEffort: typeof _options.modelConfiguration?.reasoningEffort === 'string' ? _options.modelConfiguration.reasoningEffort : undefined,
+			},
 		}, token);
 
 		// Run request within the parent OTel context (no extra span) so chat spans in chatMLFetcher inherit the agent trace
