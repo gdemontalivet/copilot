@@ -67,12 +67,14 @@ if (!code.includes("getPrimaryType")) {
 }
 '
 
-# Patch 3: Bump version
+# Patch 3: Rename extension and bump version
 node -e '
 const fs = require("fs");
 const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+pkg.displayName = "Copilot Full BYOK";
+pkg.description = "AI chat features powered by Copilot — Full Bring Your Own Key edition";
 const parts = pkg.version.split(".").map(Number);
 pkg.version = parts[0] + "." + parts[1] + "." + (parts[2] + 1);
 fs.writeFileSync("package.json", JSON.stringify(pkg, null, "\t") + "\n");
-console.log("Version bumped to: " + pkg.version);
+console.log("Renamed to: " + pkg.displayName + ", version: " + pkg.version);
 '
