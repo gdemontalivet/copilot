@@ -4,7 +4,7 @@ import { IConfigurationService } from '../../../platform/configuration/common/co
 import { ILogService } from '../../../platform/log/common/logService';
 import { IToolDeferralService } from '../../../platform/networking/common/toolDeferralService';
 import { IOTelService } from '../../../platform/otel/common/otelService';
-import { IRequestLogger } from '../../../platform/requestLogger/node/requestLogger';
+import { IRequestLogger } from '../../../platform/requestLogger/common/requestLogger';
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
 import { ITelemetryService } from '../../../platform/telemetry/common/telemetry';
 import { BYOKKnownModels, byokKnownModelToAPIInfo } from '../common/byokProvider';
