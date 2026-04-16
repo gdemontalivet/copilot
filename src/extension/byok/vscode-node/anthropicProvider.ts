@@ -33,14 +33,14 @@ import { IBYOKStorageService } from './byokStorageService';
 
 export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 
-	public static readonly providerName = 'Anthropic';
+	public static readonly providerName: string = 'Anthropic';
 
 	constructor(
 		knownModels: BYOKKnownModels | undefined,
 		byokStorageService: IBYOKStorageService,
 		@ILogService logService: ILogService,
 		@IRequestLogger private readonly _requestLogger: IRequestLogger,
-		@IConfigurationService private readonly _configurationService: IConfigurationService,
+		@IConfigurationService protected readonly _configurationService: IConfigurationService,
 		@IExperimentationService private readonly _experimentationService: IExperimentationService,
 		@ITelemetryService private readonly _telemetryService: ITelemetryService,
 		@IOTelService private readonly _otelService: IOTelService,
@@ -102,6 +102,10 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		}
 	}
 
+	protected createClient(apiKey: string, model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>): Anthropic {
+		return new Anthropic({ apiKey });
+	}
+
 	async provideLanguageModelChatResponse(model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {
 		// Restore CapturingToken context if correlation ID was passed through modelOptions.
 		// This handles the case where AsyncLocalStorage context was lost crossing VS Code IPC.
@@ -129,7 +133,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				throw new Error('API key not found for the model');
 			}
 
-			const anthropicClient = new Anthropic({ apiKey });
+			const anthropicClient = this.createClient(apiKey, model);
 
 			// Convert the messages from the API format into messages that we can use against anthropic
 			const { system, messages: convertedMessages } = apiMessageToAnthropicMessage(messages as LanguageModelChatMessage[]);

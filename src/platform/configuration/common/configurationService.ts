@@ -871,6 +871,8 @@ export namespace ConfigKey {
 		export const DebugSimulateWebSocketResponse = defineTeamInternalSetting<string>('chat.advanced.debug.simulateWebSocketResponse', ConfigType.Simple, '');
 	}
 
+	export const VertexAnthropicModels = defineSetting<Record<string, { name: string; projectId: string; locationId: string; maxInputTokens?: number; maxOutputTokens?: number; }>>('chat.vertexAnthropicModels', ConfigType.Simple, {});
+
 	/**
 	 * Deprecated settings that are no longer in use.
 	 */

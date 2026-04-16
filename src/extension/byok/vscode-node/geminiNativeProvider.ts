@@ -148,7 +148,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 			await this._byokStorageService.throttleIfNecessary?.(maxRpm, GeminiNativeBYOKLMProvider.providerName, reportThrottle);
 
 			const issuedTime = Date.now();
-			const apiKey = model.configuration?.apiKey;
+			const apiKey = model.configuration?.apiKey ?? options.modelConfiguration?.apiKey;
 			if (!apiKey) {
 				throw new Error('API key not found for the model');
 			}
