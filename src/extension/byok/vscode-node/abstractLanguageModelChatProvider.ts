@@ -3,8 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { CancellationToken, commands, EventEmitter, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatProvider, LanguageModelResponsePart2, LanguageModelThinkingPart, PrepareLanguageModelChatModelOptions, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
-import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
+import { CancellationToken, commands, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelChatProvider, LanguageModelResponsePart2, PrepareLanguageModelChatModelOptions, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
+import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { IChatModelInformation, ModelSupportedEndpoint } from '../../../platform/endpoint/common/endpointProvider';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
@@ -25,9 +25,6 @@ export interface ExtendedLanguageModelChatInformation<C extends LanguageModelCha
 }
 
 export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelChatConfiguration = LanguageModelChatConfiguration, T extends ExtendedLanguageModelChatInformation<C> = ExtendedLanguageModelChatInformation<C>> implements LanguageModelChatProvider<T> {
-
-	protected readonly _onDidChangeLanguageModelChatInformation = new EventEmitter<void>();
-	public readonly onDidChangeLanguageModelChatInformation = this._onDidChangeLanguageModelChatInformation.event;
 
 	constructor(
 		protected readonly _id: string,
@@ -53,36 +50,13 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 		await commands.executeCommand('lm.migrateLanguageModelsProviderGroup', { vendor: this._id, name, ...configuration });
 	}
 
-	private _modelsCache = new Map<string, { models: T[]; timestamp: number }>();
-	private readonly CACHE_DURATION_MS = 1000 * 60 * 60 * 24; // 24 hours
-
 	async provideLanguageModelChatInformation({ silent, configuration }: PrepareLanguageModelChatModelOptions, token: CancellationToken): Promise<T[]> {
 		let apiKey: string | undefined = (configuration as C)?.apiKey;
 		if (!apiKey) {
 			apiKey = await this.configureDefaultGroupWithApiKeyOnly();
 		}
 
-		const cacheKey = JSON.stringify({ apiKey, configuration });
-		const cached = this._modelsCache.get(cacheKey);
-		if (cached && (Date.now() - cached.timestamp) < this.CACHE_DURATION_MS) {
-			return cached.models.map(model => ({
-				...model,
-				apiKey,
-				configuration
-			}));
-		}
-
 		const models = await this.getAllModels(silent, apiKey, configuration as C);
-
-		// If models changed, fire the event
-		if (!cached || JSON.stringify(cached.models) !== JSON.stringify(models)) {
-			this._modelsCache.set(cacheKey, { models, timestamp: Date.now() });
-			this._onDidChangeLanguageModelChatInformation.fire();
-		} else {
-			// Update timestamp even if models didn't change
-			this._modelsCache.set(cacheKey, { models, timestamp: Date.now() });
-		}
-
 		return models.map(model => ({
 			...model,
 			apiKey,
@@ -118,11 +92,6 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 	}
 
 	async provideLanguageModelChatResponse(model: OpenAICompatibleLanguageModelChatInformation<T>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {
-		const maxRpm = this._configurationService.getConfig(ConfigKey.Shared.BYOKMaxRPM);
-		await this._byokStorageService.throttleIfNecessary?.(maxRpm, this._name, (waitMs) => {
-			progress.report(new LanguageModelThinkingPart(`[Rate limit] Waiting ~${Math.ceil(waitMs / 1000)}s (${maxRpm} req/min limit)...\n`));
-		});
-
 		const openAIChatEndpoint = await this.createOpenAIEndPoint(model);
 		return this._lmWrapper.provideLanguageModelResponse(openAIChatEndpoint, messages, options, options.requestInitiator, progress, token);
 	}
@@ -184,11 +153,7 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 				modelList[model.id] = modelCapabilities;
 			}
 			return modelList;
-		} catch (error) {			// If we hit a rate limit or other error, fallback to known models to prevent infinite polling
-			if (this._knownModels) {
-				this._logService.warn(`Error fetching models from ${endpoint}, falling back to known models. Error: ${error instanceof Error ? error.message : error}`);
-				return this._knownModels;
-			}
+		} catch (error) {
 			this._logService.error(error, `Error fetching available OpenRouter models`);
 			throw error;
 		}
@@ -216,34 +181,4 @@ export abstract class AbstractOpenAICompatibleLMProvider<T extends LanguageModel
 		return `${modelsBaseUrl}/models`;
 	}
 
-}
-export function getApproximateTokenCount(text: string | LanguageModelChatMessage | LanguageModelChatMessage2): number {
-	if (!text) {
-		return 0;
-	}
-	let textStr = '';
-	if (typeof text === 'string') {
-		textStr = text;
-	} else if (typeof (text as unknown as { content: unknown }).content === 'string') {
-		textStr = (text as unknown as { content: string }).content;
-	} else if (Array.isArray((text as LanguageModelChatMessage).content)) {
-		textStr = ((text as LanguageModelChatMessage).content as unknown as Array<string | { value?: string; name?: string; input?: unknown; callId?: string; content?: unknown }>).map(part => {
-			if (typeof part === 'string') {
-				return part;
-			} else if (part && typeof part === 'object') {
-				if (typeof part.value === 'string') {
-					return part.value;
-				} else if (part.name && part.input) {
-					return part.name + JSON.stringify(part.input);
-				} else if (part.callId && part.content) {
-					return part.callId + JSON.stringify(part.content);
-				}
-				return JSON.stringify(part);
-			}
-			return String(part);
-		}).join(' ');
-	} else {
-		textStr = JSON.stringify(text);
-	}
-	return Math.ceil(textStr.length / 4);
 }

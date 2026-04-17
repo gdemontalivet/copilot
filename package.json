@@ -23,7 +23,7 @@
 	"icon": "assets/copilot.png",
 	"pricing": "Trial",
 	"engines": {
-		"vscode": "^1.116.0",
+		"vscode": "^1.117.0",
 		"npm": ">=9.0.0",
 		"node": ">=22.14.0"
 	},
@@ -1056,7 +1056,7 @@
 				"toolReferenceName": "switchAgent",
 				"displayName": "%copilot.tools.switchAgent.name%",
 				"userDescription": "%copilot.tools.switchAgent.description%",
-				"modelDescription": "Switch to the Plan agent to align on approach before implementing. Plan will explore the codebase, gathers context, clarifies requirements with the user, and creates an actionable implementation plan.\n\nSWITCH TO PLAN when ANY of these apply:\n1. Adding new functionality - where should it go? What patterns to follow?\n2. Multiple valid approaches exist - choosing between technologies, patterns, or strategies\n3. Modifying existing behavior - unclear what should change or what side effects exist\n4. Architectural decisions required - choosing between design patterns or integration approaches\n5. Changes span multiple files - refactoring, migrations, or cross-cutting concerns\n6. Requirements are underspecified - need to explore before understanding scope\n\nEXAMPLES:\n\u2713 Switch to Plan:\n- \"Add authentication to the app\" \u2192 architectural decisions needed (session vs JWT, middleware)\n- \"Refactor this data flow\" \u2192 must understand component dependencies first\n- \"Migrate from X to Y\" \u2192 requires understanding current structure\n\n\u2717 Do NOT switch to Plan:\n- User attached a detailed spec, plan, or requirements doc \u2192 context already provided\n- You already started editing files in this conversation \u2192 too late to switch\n- Single obvious change like fixing a typo or renaming \u2192 just do it\n- User gave explicit step-by-step instructions \u2192 follow them directly",
+				"modelDescription": "Switch to the Plan agent to align on approach before implementing. Plan will explore the codebase, gathers context, clarifies requirements with the user, and creates an actionable implementation plan.\n\nSWITCH TO PLAN when ANY of these apply:\n1. Adding new functionality - where should it go? What patterns to follow?\n2. Multiple valid approaches exist - choosing between technologies, patterns, or strategies\n3. Modifying existing behavior - unclear what should change or what side effects exist\n4. Architectural decisions required - choosing between design patterns or integration approaches\n5. Changes span multiple files - refactoring, migrations, or cross-cutting concerns\n6. Requirements are underspecified - need to explore before understanding scope\n\nEXAMPLES:\n✓ Switch to Plan:\n- \"Add authentication to the app\" → architectural decisions needed (session vs JWT, middleware)\n- \"Refactor this data flow\" → must understand component dependencies first\n- \"Migrate from X to Y\" → requires understanding current structure\n\n✗ Do NOT switch to Plan:\n- User attached a detailed spec, plan, or requirements doc → context already provided\n- You already started editing files in this conversation → too late to switch\n- Single obvious change like fixing a typo or renaming → just do it\n- User gave explicit step-by-step instructions → follow them directly",
 				"when": "config.github.copilot.chat.switchAgent.enabled",
 				"icon": "$(arrow-swap)",
 				"inputSchema": {
@@ -1081,7 +1081,7 @@
 				"toolReferenceName": "memory",
 				"userDescription": "Manage persistent memory across conversations",
 				"when": "config.github.copilot.chat.tools.memory.enabled",
-				"modelDescription": "Manage a persistent memory system with three scopes for storing notes and information across conversations.\n\nMemory is organized under /memories/ with three tiers:\n- `/memories/` \u2014 User memory: persistent notes that survive across all workspaces and conversations. Store preferences, patterns, and general insights here.\n- `/memories/session/` \u2014 Session memory: notes scoped to the current conversation. Store task-specific context and in-progress notes here. Cleared after the conversation ends.\n- `/memories/repo/` \u2014 Repository memory: repository-scoped facts stored via Copilot. Only the `create` command is supported for this path.\n\nIMPORTANT: Before creating new memory files, first view the /memories/ directory to understand what already exists. This helps avoid duplicates and maintain organized notes.\n\nCommands:\n- `view`: View contents of a file or list directory contents. Can be used on files or directories (e.g., \"/memories/\" to see all top-level items).\n- `create`: Create a new file at the specified path with the given content. Fails if the file already exists.\n- `str_replace`: Replace an exact string in a file with a new string. The old_str must appear exactly once in the file.\n- `insert`: Insert text at a specific line number in a file. Line 0 inserts at the beginning.\n- `delete`: Delete a file or directory (and all its contents).\n- `rename`: Rename or move a file or directory from path to new_path. Cannot rename across scopes.",
+				"modelDescription": "Manage a persistent memory system with three scopes for storing notes and information across conversations.\n\nMemory is organized under /memories/ with three tiers:\n- `/memories/` — User memory: persistent notes that survive across all workspaces and conversations. Store preferences, patterns, and general insights here.\n- `/memories/session/` — Session memory: notes scoped to the current conversation. Store task-specific context and in-progress notes here. Cleared after the conversation ends.\n- `/memories/repo/` — Repository memory: repository-scoped facts stored via Copilot. Only the `create` command is supported for this path.\n\nIMPORTANT: Before creating new memory files, first view the /memories/ directory to understand what already exists. This helps avoid duplicates and maintain organized notes.\n\nCommands:\n- `view`: View contents of a file or list directory contents. Can be used on files or directories (e.g., \"/memories/\" to see all top-level items).\n- `create`: Create a new file at the specified path with the given content. Fails if the file already exists.\n- `str_replace`: Replace an exact string in a file with a new string. The old_str must appear exactly once in the file.\n- `insert`: Insert text at a specific line number in a file. Line 0 inserts at the beginning.\n- `delete`: Delete a file or directory (and all its contents).\n- `rename`: Rename or move a file or directory from path to new_path. Cannot rename across scopes.",
 				"inputSchema": {
 					"type": "object",
 					"properties": {
@@ -1174,6 +1174,32 @@
 				"legacyToolReferenceFullNames": [
 					"editFiles"
 				]
+			},
+			{
+				"name": "copilot_sessionStoreSql",
+				"displayName": "Session Store SQL",
+				"toolReferenceName": "sessionStoreSql",
+				"userDescription": "Query your Copilot session history using SQL",
+				"modelDescription": "Execute read-only SQL queries against the global session store containing history from ALL past coding sessions. Use this proactively when the user asks about:\n- What they've worked on recently or in the past\n- Prior approaches to similar problems\n- Project history and file changes\n- Sessions linked to PRs, issues, or commits\n- Temporal queries ('what was I doing yesterday?')\n\nSupports SQLite SQL including JOINs, FTS5 MATCH queries, aggregations, and subqueries.\n\n**Only one query per call — do not combine multiple statements with semicolons.**\n\nSchema:\n- sessions — id, cwd, repository, branch, summary, created_at, updated_at\n- turns — session_id, turn_index, user_message, assistant_response, timestamp\n- session_files — session_id, file_path, tool_name (edit/create), turn_index\n- session_refs — session_id, ref_type (commit/pr/issue), ref_value, turn_index\n- search_index — FTS5 virtual table (content, session_id, source_type). Use WHERE search_index MATCH 'query' for full-text search.",
+				"tags": [],
+				"canBeReferencedInPrompt": false,
+				"inputSchema": {
+					"type": "object",
+					"properties": {
+						"query": {
+							"type": "string",
+							"description": "A single read-only SQL query to execute. Supports SELECT, WITH, JOINs, aggregations, and FTS5 MATCH. Only one statement per call — do not combine multiple queries with semicolons."
+						},
+						"description": {
+							"type": "string",
+							"description": "A 2-5 word summary of what this query does (e.g. 'Recent sessions overview', 'Find PR sessions')."
+						}
+					},
+					"required": [
+						"query",
+						"description"
+					]
+				}
 			}
 		],
 		"languageModelToolSets": [
@@ -1486,6 +1512,21 @@
 					{
 						"name": "compact",
 						"description": "%copilot.agent.compact.description%"
+					},
+					{
+						"name": "chronicle",
+						"description": "%copilot.chronicle.description%",
+						"when": "github.copilot.sessionSearch.enabled"
+					},
+					{
+						"name": "chronicle:standup",
+						"description": "%copilot.chronicle.standup.description%",
+						"when": "github.copilot.sessionSearch.enabled"
+					},
+					{
+						"name": "chronicle:tips",
+						"description": "%copilot.chronicle.tips.description%",
+						"when": "github.copilot.sessionSearch.enabled"
 					},
 					{
 						"name": "explain",
@@ -2903,18 +2944,18 @@
 						"enumDescriptions": [
 							"Use VS Code's configured display language",
 							"English",
-							"fran\u00e7ais",
+							"français",
 							"italiano",
 							"Deutsch",
-							"espa\u00f1ol",
-							"\u0440\u0443\u0441\u0441\u043a\u0438\u0439",
-							"\u4e2d\u6587(\u7b80\u4f53)",
-							"\u4e2d\u6587(\u7e41\u9ad4)",
-							"\u65e5\u672c\u8a9e",
-							"\ud55c\uad6d\uc5b4",
-							"\u010de\u0161tina",
-							"portugu\u00eas",
-							"T\u00fcrk\u00e7e",
+							"español",
+							"русский",
+							"中文(简体)",
+							"中文(繁體)",
+							"日本語",
+							"한국어",
+							"čeština",
+							"português",
+							"Türkçe",
 							"polski"
 						],
 						"default": "auto",
@@ -6130,57 +6171,98 @@
 		"chatPromptFiles": [
 			{
 				"path": "./assets/prompts/plan.prompt.md",
-				"when": "chatSessionType == local"
+				"when": "chatSessionType == local",
+				"sessionTypes": [
+					"local"
+				]
 			}
 		],
 		"chatSkills": [
 			{
 				"path": "./assets/prompts/skills/project-setup-info-local/SKILL.md",
-				"when": "chatSessionType == local && config.github.copilot.chat.projectSetupInfoSkill.enabled && !config.github.copilot.chat.newWorkspace.useContext7"
+				"when": "chatSessionType == local && config.github.copilot.chat.projectSetupInfoSkill.enabled && !config.github.copilot.chat.newWorkspace.useContext7",
+				"sessionTypes": [
+					"local"
+				]
 			},
 			{
 				"path": "./assets/prompts/skills/project-setup-info-context7/SKILL.md",
-				"when": "chatSessionType == local && config.github.copilot.chat.projectSetupInfoSkill.enabled && config.github.copilot.chat.newWorkspace.useContext7"
+				"when": "chatSessionType == local && config.github.copilot.chat.projectSetupInfoSkill.enabled && config.github.copilot.chat.newWorkspace.useContext7",
+				"sessionTypes": [
+					"local"
+				]
 			},
 			{
 				"path": "./assets/prompts/skills/install-vscode-extension/SKILL.md",
-				"when": "chatSessionType == local && config.github.copilot.chat.installExtensionSkill.enabled && config.github.copilot.chat.newWorkspaceCreation.enabled"
+				"when": "chatSessionType == local && config.github.copilot.chat.installExtensionSkill.enabled && config.github.copilot.chat.newWorkspaceCreation.enabled",
+				"sessionTypes": [
+					"local"
+				]
 			},
 			{
 				"path": "./assets/prompts/skills/get-search-view-results/SKILL.md",
-				"when": "chatSessionType == local && config.github.copilot.chat.getSearchViewResultsSkill.enabled"
+				"when": "chatSessionType == local && config.github.copilot.chat.getSearchViewResultsSkill.enabled",
+				"sessionTypes": [
+					"local"
+				]
 			},
 			{
 				"path": "./assets/prompts/skills/troubleshoot/SKILL.md",
-				"when": "chatSessionType == local || chatSessionType == copilotcli"
+				"when": "chatSessionType == local || chatSessionType == copilotcli",
+				"sessionTypes": [
+					"local",
+					"copilotcli"
+				]
 			},
 			{
 				"path": "./assets/prompts/skills/agent-customization/SKILL.md",
-				"when": "chatSessionType == local || chatSessionType == copilotcli"
+				"when": "chatSessionType == local || chatSessionType == copilotcli",
+				"sessionTypes": [
+					"local",
+					"copilotcli"
+				]
 			},
 			{
 				"path": "./assets/prompts/skills/init/SKILL.md",
-				"when": "chatSessionType == local"
+				"when": "chatSessionType == local",
+				"sessionTypes": [
+					"local"
+				]
 			},
 			{
 				"path": "./assets/prompts/skills/create-prompt/SKILL.md",
-				"when": "chatSessionType == local"
+				"when": "chatSessionType == local",
+				"sessionTypes": [
+					"local"
+				]
 			},
 			{
 				"path": "./assets/prompts/skills/create-instructions/SKILL.md",
-				"when": "chatSessionType == local"
+				"when": "chatSessionType == local",
+				"sessionTypes": [
+					"local"
+				]
 			},
 			{
 				"path": "./assets/prompts/skills/create-skill/SKILL.md",
-				"when": "chatSessionType == local"
+				"when": "chatSessionType == local",
+				"sessionTypes": [
+					"local"
+				]
 			},
 			{
 				"path": "./assets/prompts/skills/create-agent/SKILL.md",
-				"when": "chatSessionType == local"
+				"when": "chatSessionType == local",
+				"sessionTypes": [
+					"local"
+				]
 			},
 			{
 				"path": "./assets/prompts/skills/create-hook/SKILL.md",
-				"when": "chatSessionType == local"
+				"when": "chatSessionType == local",
+				"sessionTypes": [
+					"local"
+				]
 			}
 		],
 		"terminal": {

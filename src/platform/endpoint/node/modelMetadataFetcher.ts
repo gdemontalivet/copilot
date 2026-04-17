@@ -204,16 +204,7 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 
 	private _shouldRefreshModels(): boolean {
 		if (this._familyMap.size === 0) {
-			if (this._lastFetchError && this._lastFetchTime) {
-				const failureBackoffMs = 60 * 1000;
-				return Date.now() - this._lastFetchTime > failureBackoffMs;
-			}
-			if (this._lastFetchTime && !this._lastFetchError) {
-				const tenMinutes = 10 * 60 * 1000;
-				if (Date.now() - this._lastFetchTime < tenMinutes) {
-					return false;
-				}
-			}
+			// Always refresh if we have no models as this means the last fetch failed in some way
 			return true;
 		}
 		const tenMinutes = 10 * 60 * 1000; // 10 minutes in milliseconds
@@ -240,17 +231,7 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 		}
 		const requestStartTime = Date.now();
 
-		const copilotTokenObj = await this._authService.getCopilotToken();
-		const copilotToken = copilotTokenObj.token;
-
-		if (copilotTokenObj.username === 'offline-user' || copilotToken === 'fake-token') {
-			this._familyMap.clear();
-			this._completionsFamilyMap.clear();
-			this._lastFetchError = undefined;
-			this._lastFetchTime = Date.now();
-			this._onDidModelRefresh.fire();
-			return;
-		}
+		const copilotToken = (await this._authService.getCopilotToken()).token;
 		const requestId = generateUuid();
 		const requestMetadata: RequestMetadata = { type: RequestType.Models, isModelLab: this._isModelLab };
 
@@ -263,6 +244,7 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 			});
 
 			this._lastFetchTime = Date.now();
+			this._logService.info(`Fetched model metadata in ${Date.now() - requestStartTime}ms ${requestId}`);
 
 			if (response.status < 200 || response.status >= 300) {
 				// If we're rate limited and have models, we should just return
@@ -296,8 +278,7 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 		} catch (e) {
 			this._logService.error(e, `Failed to fetch models (${requestId})`);
 			this._lastFetchError = e;
-			this._lastFetchTime = Date.now();
-			this._onDidModelRefresh.fire();
+			this._lastFetchTime = 0;
 		}
 	}
 

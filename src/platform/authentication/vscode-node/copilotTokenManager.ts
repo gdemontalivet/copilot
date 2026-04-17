@@ -46,13 +46,13 @@ export class VSCodeCopilotTokenManager extends BaseCopilotTokenManager {
 
 	async getCopilotToken(force?: boolean): Promise<CopilotToken> {
 		const fakeTokenInfo = createTestExtendedTokenInfo({
-			token: 'fake-token',
+			token: "fake-token",
 			expires_at: 9999999999,
 			refresh_in: 9999999999,
-			sku: 'individual',
+			sku: "individual",
 			individual: true,
-			username: 'offline-user',
-			copilot_plan: 'individual',
+			username: "offline-user",
+			copilot_plan: "individual",
 		});
 		if (!this.copilotToken) {
 			this.copilotToken = fakeTokenInfo;

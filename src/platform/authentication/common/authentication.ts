@@ -247,12 +247,8 @@ export abstract class BaseAuthenticationService extends Disposable implements IA
 	async getCopilotToken(force?: boolean): Promise<CopilotToken> {
 		try {
 			const token = await this._tokenManager.getCopilotToken(force);
-			const copilotTokenBefore = this._tokenStore.copilotToken;
 			this._tokenStore.copilotToken = token;
 			this._copilotTokenError = undefined;
-			if (copilotTokenBefore?.token !== token.token || copilotTokenBefore?.sku !== token.sku || copilotTokenBefore?.username !== token.username) {
-				this.fireAuthenticationChange('getCopilotToken success');
-			}
 			return token;
 		} catch (afterError) {
 			this._tokenStore.copilotToken = undefined;

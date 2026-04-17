@@ -9,7 +9,6 @@ export namespace CustomDataPartMimeTypes {
 	export const ThinkingData = 'thinking';
 	export const ContextManagement = 'context_management';
 	export const PhaseData = 'phase_data';
-	export const TokenUsage = 'token_usage';
 }
 
 export const CacheType = 'ephemeral';
