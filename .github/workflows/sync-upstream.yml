@@ -31,8 +31,9 @@ jobs:
           cd -
           rsync -a --delete \
             --exclude='node_modules' \
+            --exclude='.git' \
+            --exclude='.github' \
             /tmp/vscode/extensions/copilot/ ./
-          git checkout -- .github/
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

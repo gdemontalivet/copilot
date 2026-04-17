@@ -377,6 +377,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 			} catch (err) {
 				this._logService.error(`BYOK GeminiNative error: ${toErrorMessage(err, true)}`);
 				const isRateLimit = (err as any)?.status === 429 || ((err as Error)?.message?.toLowerCase().includes('rate limit'));
+				const reason = token.isCancellationRequested ? 'cancelled' : toErrorMessage(err);
 				pendingLoggedChatRequest.resolve({
 					type: token.isCancellationRequested
 						? ChatFetchResponseType.Canceled
@@ -385,7 +386,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 							: ChatFetchResponseType.Unknown,
 					requestId,
 					serverRequestId: requestId,
-					reason: token.isCancellationRequested ? 'cancelled' : toErrorMessage(err)
+					reason,
 				}, wrappedProgress.items.map((i): IResponseDelta => {
 					return {
 						text: i instanceof LanguageModelTextPart ? i.value : '',
@@ -396,7 +397,8 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 						}] : undefined,
 					};
 				}));
-				throw err;
+				const userMessage = err instanceof Error ? err.message : String(err);
+				throw new Error(userMessage);
 			} finally {
 				cancelSub.dispose();
 			}
@@ -466,14 +468,24 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 	}
 
 	private async _makeRequest(client: GoogleGenAI, progress: Progress<LMResponsePart>, params: GenerateContentParameters, token: CancellationToken, issuedTime: number, retryCount = 0): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined }> {
-		const MAX_RETRIES = 3;
+		const MAX_RETRIES = 6;
+		const CONNECT_TIMEOUT_MS = 120_000;
 		const start = Date.now();
 		let ttft: number | undefined;
 		let ttfte: number | undefined;
 		let usage: APIUsage | undefined;
 
 		try {
-			const stream = await client.models.generateContentStream(params);
+			let connectTimer: ReturnType<typeof setTimeout> | undefined;
+			const stream = await Promise.race([
+				client.models.generateContentStream(params),
+				new Promise<never>((_, reject) => {
+					connectTimer = setTimeout(
+						() => reject(new TypeError('Gemini API request timed out waiting for initial response')),
+						CONNECT_TIMEOUT_MS
+					);
+				})
+			]).finally(() => clearTimeout(connectTimer));
 
 			let pendingThinkingSignature: string | undefined;
 
@@ -589,8 +601,8 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				return { ttft, ttfte, usage };
 			}
 			if (isTransientNetworkError(error) && retryCount < MAX_RETRIES) {
-				const delay = Math.min(2000 * Math.pow(2, retryCount), 16000);
-				this._logService.warn(`Gemini network error, retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES}): ${toErrorMessage(error, true)}`);
+				const delay = Math.min(5000 * Math.pow(2, retryCount), 60_000);
+				this._logService.warn(`Gemini network error, retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES}): ${toErrorMessage(error)}`);
 				progress.report(new LanguageModelThinkingPart(`[Network error] Retry ${retryCount + 1}/${MAX_RETRIES}: reconnecting in ~${Math.ceil(delay / 1000)}s...\n`));
 				await new Promise(resolve => setTimeout(resolve, delay));
 				if (token.isCancellationRequested) {
@@ -609,7 +621,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 							progress.report(new LanguageModelThinkingPart(`[Rate limit] 429 retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(waitMs / 1000)}s...\n`));
 						});
 					} else {
-						const delay = Math.min(2000 * Math.pow(2, retryCount), 16000);
+						const delay = Math.min(5000 * Math.pow(2, retryCount), 60_000);
 						progress.report(new LanguageModelThinkingPart(`[Service unavailable] 503 retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(delay / 1000)}s...\n`));
 						await new Promise(resolve => setTimeout(resolve, delay));
 					}
@@ -641,7 +653,8 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				);
 			}
 			this._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);
-			throw error;
+			const cleanMsg = error instanceof Error ? error.message : String(error);
+			throw new Error(cleanMsg, { cause: error });
 		}
 	}
 }
