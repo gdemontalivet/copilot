@@ -48,7 +48,7 @@ import { IBuildPromptResult, IIntent, IIntentInvocation } from '../../prompt/nod
 import { AgentPrompt, AgentPromptProps } from '../../prompts/node/agent/agentPrompt';
 import { BackgroundSummarizationState, BackgroundSummarizer, IBackgroundSummarizationResult, shouldKickOffBackgroundSummarization } from '../../prompts/node/agent/backgroundSummarizer';
 import { AgentPromptCustomizations, PromptRegistry } from '../../prompts/node/agent/promptRegistry';
-import { extractInlineSummary, InlineSummarizationUserMessage, SummarizedConversationHistory, SummarizedConversationHistoryMetadata, SummarizedConversationHistoryPropsBuilder, appendTranscriptHintToSummary } from '../../prompts/node/agent/summarizedConversationHistory';
+import { extractInlineSummary, InlineSummarizationUserMessage, SummarizedConversationHistory, SummarizedConversationHistoryMetadata, SummarizedConversationHistoryPropsBuilder, appendTranscriptHintToSummary, computeSummarizationRoundCounts } from '../../prompts/node/agent/summarizedConversationHistory';
 import { PromptRenderer, renderPromptElement } from '../../prompts/node/base/promptRenderer';
 import { ICodeMapperService } from '../../prompts/node/codeMapper/codeMapperService';
 import { EditCodePrompt2 } from '../../prompts/node/panel/editCodePrompt2';
@@ -882,7 +882,7 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation implements I
 
 					// Send summarizedConversationHistory telemetry for parity
 					// with the standard ConversationHistorySummarizer path.
-					const numRoundsInHistory = history.reduce((sum, t) => sum + t.rounds.length, 0);
+					const { numRounds, numRoundsSinceLastSummarization } = computeSummarizationRoundCounts(history, rounds);
 					const numRoundsInCurrentTurn = rounds.length;
 					const lastUsedTool = rounds.at(-1)?.toolCalls?.at(-1)?.name
 						?? history.at(-1)?.rounds.at(-1)?.toolCalls?.at(-1)?.name ?? 'none';
@@ -916,7 +916,7 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation implements I
 						lastUsedTool,
 						requestId: response.requestId,
 					}, {
-						numRounds: numRoundsInHistory + numRoundsInCurrentTurn,
+						numRounds,
 						turnIndex: history.length,
 						curTurnRoundIndex: numRoundsInCurrentTurn,
 						isDuringToolCalling: numRoundsInCurrentTurn > 0 ? 1 : 0,
@@ -935,8 +935,8 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation implements I
 						durationMs: Date.now() - bgStartTime,
 						model: this.endpoint.model,
 						summarizationMode: 'inline',
-						numRounds: undefined,
-						numRoundsSinceLastSummarization: undefined,
+						numRounds,
+						numRoundsSinceLastSummarization,
 					};
 				} else {
 					// Standard mode: use triggerSummarize which makes a separate

@@ -571,7 +571,7 @@ class ConversationHistorySummarizer {
 		}));
 
 		const summary = await summaryPromise;
-		const { numRounds, numRoundsSinceLastSummarization } = this.computeRoundCounts();
+		const { numRounds, numRoundsSinceLastSummarization } = computeSummarizationRoundCounts(this.props.promptContext.history, this.props.promptContext.toolCallRounds);
 		return {
 			summary: this.appendTranscriptHint(summary.result.value),
 			toolCallRoundId: propsInfo.summarizedToolCallRoundId,
@@ -800,30 +800,6 @@ class ConversationHistorySummarizer {
 		return response;
 	}
 
-	private computeRoundCounts(): { numRounds: number; numRoundsSinceLastSummarization: number } {
-		const numRoundsInHistory = this.props.promptContext.history
-			.map(turn => turn.rounds.length)
-			.reduce((a, b) => a + b, 0);
-		const numRoundsInCurrentTurn = this.props.promptContext.toolCallRounds?.length ?? 0;
-		const numRounds = numRoundsInHistory + numRoundsInCurrentTurn;
-
-		const reversedCurrentRounds = [...(this.props.promptContext.toolCallRounds ?? [])].reverse();
-		let numRoundsSinceLastSummarization = reversedCurrentRounds.findIndex(round => round.summary) ?? -1;
-		if (numRoundsSinceLastSummarization === -1) {
-			let count = numRoundsInCurrentTurn;
-			outer: for (const turn of Iterable.reverse(Array.from(this.props.promptContext.history))) {
-				for (const round of Iterable.reverse(Array.from(turn.rounds ?? []))) {
-					if (round.summary) {
-						numRoundsSinceLastSummarization = count;
-						break outer;
-					}
-					count++;
-				}
-			}
-		}
-		return { numRounds, numRoundsSinceLastSummarization };
-	}
-
 	/**
 	 * Send telemetry for conversation summarization.
 	 * @param outcome High-level result of the summarization (for example, 'success', 'too_large', or the ChatFetchResponseType value)
@@ -835,7 +811,7 @@ class ConversationHistorySummarizer {
 	 * @param detailedOutcome Optional detailed reason for non-success outcomes (for example, error or cancellation reason)
 	 */
 	private sendSummarizationTelemetry(outcome: string, requestId: string, model: string, mode: SummaryMode, elapsedTime: number, usage: APIUsage | undefined, detailedOutcome?: string): void {
-		const { numRounds, numRoundsSinceLastSummarization } = this.computeRoundCounts();
+		const { numRounds, numRoundsSinceLastSummarization } = computeSummarizationRoundCounts(this.props.promptContext.history, this.props.promptContext.toolCallRounds);
 
 		const turnIndex = this.props.promptContext.history.length;
 		const curTurnRoundIndex = this.props.promptContext.toolCallRounds?.length ?? 0;
@@ -945,6 +921,31 @@ export function appendTranscriptHintToSummary(summary: string, sessionId: string
 	}
 	out += `\nExample usage: ${ToolName.ReadFile}(filePath: "${transcriptPath}")`;
 	return out;
+}
+
+export function computeSummarizationRoundCounts(
+	history: IBuildPromptContext['history'],
+	currentRounds: readonly IToolCallRound[] | undefined,
+): { numRounds: number; numRoundsSinceLastSummarization: number } {
+	const numRoundsInHistory = history.reduce((sum, turn) => sum + turn.rounds.length, 0);
+	const numRoundsInCurrentTurn = currentRounds?.length ?? 0;
+	const numRounds = numRoundsInHistory + numRoundsInCurrentTurn;
+
+	const reversedCurrentRounds = [...(currentRounds ?? [])].reverse();
+	let numRoundsSinceLastSummarization = reversedCurrentRounds.findIndex(round => round.summary);
+	if (numRoundsSinceLastSummarization === -1) {
+		let count = numRoundsInCurrentTurn;
+		outer: for (const turn of Iterable.reverse(Array.from(history))) {
+			for (const round of Iterable.reverse(Array.from(turn.rounds ?? []))) {
+				if (round.summary) {
+					numRoundsSinceLastSummarization = count;
+					break outer;
+				}
+				count++;
+			}
+		}
+	}
+	return { numRounds, numRoundsSinceLastSummarization };
 }
 
 /**
