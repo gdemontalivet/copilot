@@ -46,7 +46,7 @@ import { IDefaultIntentRequestHandlerOptions } from '../../prompt/node/defaultIn
 import { IDocumentContext } from '../../prompt/node/documentContext';
 import { IBuildPromptResult, IIntent, IIntentInvocation } from '../../prompt/node/intents';
 import { AgentPrompt, AgentPromptProps } from '../../prompts/node/agent/agentPrompt';
-import { BackgroundSummarizationState, BackgroundSummarizer, IBackgroundSummarizationResult, shouldKickOffBackgroundSummarization } from '../../prompts/node/agent/backgroundSummarizer';
+import { BackgroundSummarizationState, BackgroundSummarizer, CompactionTier, getCompactionTier, IBackgroundSummarizationResult } from '../../prompts/node/agent/backgroundSummarizer';
 import { AgentPromptCustomizations, PromptRegistry } from '../../prompts/node/agent/promptRegistry';
 import { extractInlineSummary, InlineSummarizationUserMessage, SummarizedConversationHistory, SummarizedConversationHistoryMetadata, SummarizedConversationHistoryPropsBuilder, appendTranscriptHintToSummary, computeSummarizationRoundCounts } from '../../prompts/node/agent/summarizedConversationHistory';
 import { PromptRenderer, renderPromptElement } from '../../prompts/node/base/promptRenderer';
@@ -361,12 +361,6 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation implements I
 	/** Cached model capabilities from the most recent main agent render, reused by the background summarizer. */
 	private _lastModelCapabilities: { enableThinking: boolean; reasoningEffort: string | undefined; enableToolSearch: boolean; enableContextEditing: boolean } | undefined;
 
-	/**
-	 * RNG used to jitter the inline-summarization trigger threshold around 0.80.
-	 * Tests may overwrite this directly (e.g. `(invocation as any)._thresholdRng = () => 0.5`).
-	 */
-	private _thresholdRng: () => number = Math.random;
-
 	constructor(
 		intent: IIntent,
 		location: ChatLocation,
@@ -668,13 +662,15 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation implements I
 			));
 		}
 
-		// Post-render: kick off background compaction if idle and over the
-		// threshold. For the inline-summarization path we care about prompt
-		// cache parity with the main agent fetch — so we gate kick-off on a
-		// completed tool call (cache has been warmed) and jitter the threshold
-		// around 0.80 to avoid firing at the same exact boundary every time.
-		// The non-inline path forks its own prompt and sees no cache benefit,
-		// so it keeps the simple >= 0.80 behavior.
+		// Post-render: tiered compaction based on context usage ratio.
+		//
+		//   Tier 0 (< 70%): no action
+		//   Tier 1 (>= 70%): start background compaction
+		//   Tier 2 (>= 80%): urgent background compaction + warning
+		//   Tier 3 (>= 90%): synchronous compaction — block before next LLM call
+		//
+		// For the inline-summarization path prompt-cache parity matters, so with
+		// a cold cache only tier 3 fires. With a warm cache the full tiers apply.
 		if (summarizationEnabled && backgroundSummarizer && !didSummarizeThisIteration) {
 			const postRenderRatio = baseBudget > 0
 				? (result.tokenCount + toolTokens) / baseBudget
@@ -685,9 +681,27 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation implements I
 
 			const cacheWarm = (promptContext.toolCallRounds?.length ?? 0) > 0;
 
-			const kickOff = shouldKickOffBackgroundSummarization(postRenderRatio, useInlineSummarization, cacheWarm, this._thresholdRng);
+			const tier: CompactionTier = getCompactionTier(postRenderRatio, useInlineSummarization, cacheWarm);
 
-			if (kickOff && idleOrFailed) {
+			if (tier >= 3) {
+				// Tier 3: synchronous compaction — compact now to prevent 400 errors
+				this.logService.warn(`[AutoCompact] Tier 3: estimate ratio ${(postRenderRatio * 100).toFixed(1)}% >= 90% — triggering synchronous compaction`);
+				progress.report(new ChatResponseProgressPart2(
+					l10n.t('Compacting conversation (context at {0}%)...', Math.round(postRenderRatio * 100)),
+					async () => l10n.t('Compacted conversation'),
+				));
+				if (!promptContext.toolCallResults) {
+					promptContext = { ...promptContext, toolCallResults: {} };
+				}
+				result = await renderWithSummarization(`tier3 sync compaction (ratio=${postRenderRatio.toFixed(3)})`);
+				this._lastRenderTokenCount = result.tokenCount;
+				didSummarizeThisIteration = true;
+			} else if (tier >= 1 && idleOrFailed) {
+				if (tier >= 2) {
+					this.logService.warn(`[AutoCompact] Tier 2: estimate ratio ${(postRenderRatio * 100).toFixed(1)}% >= 80% — starting urgent background compaction`);
+				} else {
+					this.logService.info(`[AutoCompact] Tier 1: estimate ratio ${(postRenderRatio * 100).toFixed(1)}% >= 70% — starting background compaction`);
+				}
 				if (useInlineSummarization) {
 					// Compute and cache model capabilities from the current render's
 					// messages. These must match the main agent fetch for cache parity.

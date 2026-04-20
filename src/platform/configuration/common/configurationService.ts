@@ -607,6 +607,7 @@ export namespace ConfigKey {
 		export const AgentTemperature = defineAndMigrateSetting<number | undefined>('chat.advanced.agent.temperature', 'chat.agent.temperature', undefined);
 		export const EnableUserPreferences = defineAndMigrateSetting<boolean>('chat.advanced.enableUserPreferences', 'chat.enableUserPreferences', false);
 		export const SummarizeAgentConversationHistoryThreshold = defineAndMigrateSetting<number | undefined>('chat.advanced.summarizeAgentConversationHistoryThreshold', 'chat.summarizeAgentConversationHistoryThreshold', undefined);
+		export const AutoCompactEstimateThreshold = defineSetting<number | undefined>('chat.advanced.autoCompactEstimateThreshold', ConfigType.Simple, undefined);
 		export const AgentHistorySummarizationMode = defineAndMigrateSetting<string | undefined>('chat.advanced.agentHistorySummarizationMode', 'chat.agentHistorySummarizationMode', undefined);
 		export const UseResponsesApiTruncation = defineAndMigrateSetting<boolean | undefined>('chat.advanced.useResponsesApiTruncation', 'chat.useResponsesApiTruncation', false);
 		export const OmitBaseAgentInstructions = defineAndMigrateSetting<boolean>('chat.advanced.omitBaseAgentInstructions', 'chat.omitBaseAgentInstructions', false);

@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { describe, expect, test } from 'vitest';
-import { BackgroundSummarizationState, BackgroundSummarizationThresholds, BackgroundSummarizer, IBackgroundSummarizationResult, shouldKickOffBackgroundSummarization } from '../backgroundSummarizer';
+import { BackgroundSummarizationState, BackgroundSummarizationThresholds, BackgroundSummarizer, CompactionTier, getCompactionTier, getConfirmedCompactionTier, IBackgroundSummarizationResult, shouldKickOffBackgroundSummarization } from '../backgroundSummarizer';
 
 describe('BackgroundSummarizer', () => {
 
@@ -254,65 +254,96 @@ describe('BackgroundSummarizer', () => {
 	});
 });
 
-const { base, warmJitterMin, warmJitterSpan, emergency } = BackgroundSummarizationThresholds;
+const t = BackgroundSummarizationThresholds;
 
-// rng that always returns 0.5 -> threshold sits exactly at the center of the
-// jitter range. With [0.78, 0.82) that's 0.80.
-const midRng = () => 0.5;
-// rng that forces the maximum of the jitter range.
-const maxRng = () => 1 - Number.EPSILON;
-// rng that should never be called on cold/non-inline branches.
 const unusedRng = () => {
 	throw new Error('rng should not be consumed');
 };
 
-describe('shouldKickOffBackgroundSummarization', () => {
+describe('getCompactionTier', () => {
+	describe('non-inline path', () => {
+		test('returns tier 0 below tier1Estimate', () => {
+			expect(getCompactionTier(0.69, false, false)).toBe(0);
+			expect(getCompactionTier(0.69, false, true)).toBe(0);
+		});
+
+		test('returns tier 1 at tier1Estimate', () => {
+			expect(getCompactionTier(t.tier1Estimate, false, false)).toBe(1);
+			expect(getCompactionTier(0.75, false, true)).toBe(1);
+		});
+
+		test('returns tier 2 at tier2Estimate', () => {
+			expect(getCompactionTier(t.tier2Estimate, false, false)).toBe(2);
+			expect(getCompactionTier(0.85, false, true)).toBe(2);
+		});
+
+		test('returns tier 3 at tier3Estimate', () => {
+			expect(getCompactionTier(t.tier3Estimate, false, false)).toBe(3);
+			expect(getCompactionTier(0.95, false, true)).toBe(3);
+		});
+	});
+
 	describe('inline + cold cache', () => {
-		test('defers kick-off below the emergency threshold', () => {
-			// Cold turn sitting in the old 0.80 trigger band — must not fire.
-			expect(shouldKickOffBackgroundSummarization(0.85, true, false, unusedRng)).toBe(false);
+		test('returns tier 0 below tier3Estimate', () => {
+			expect(getCompactionTier(0.85, true, false)).toBe(0);
+			expect(getCompactionTier(t.tier2Estimate, true, false)).toBe(0);
 		});
 
-		test('kicks off at the emergency threshold', () => {
-			expect(shouldKickOffBackgroundSummarization(emergency, true, false, unusedRng)).toBe(true);
-			expect(shouldKickOffBackgroundSummarization(0.91, true, false, unusedRng)).toBe(true);
-		});
-
-		test('does not consume the rng on the cold branch', () => {
-			// The unusedRng would throw if consumed — asserting no throw is the check.
-			expect(() => shouldKickOffBackgroundSummarization(0.85, true, false, unusedRng)).not.toThrow();
-			expect(() => shouldKickOffBackgroundSummarization(0.91, true, false, unusedRng)).not.toThrow();
+		test('returns tier 3 at tier3Estimate', () => {
+			expect(getCompactionTier(t.tier3Estimate, true, false)).toBe(3);
+			expect(getCompactionTier(0.95, true, false)).toBe(3);
 		});
 	});
 
 	describe('inline + warm cache', () => {
-		test('kicks off at the jittered midpoint (0.80) when ratio meets it', () => {
-			expect(shouldKickOffBackgroundSummarization(0.80, true, true, midRng)).toBe(true);
-			expect(shouldKickOffBackgroundSummarization(0.81, true, true, midRng)).toBe(true);
+		test('returns tier 0 below tier1Estimate', () => {
+			expect(getCompactionTier(0.69, true, true)).toBe(0);
 		});
 
-		test('defers when ratio is under the jittered threshold', () => {
-			// midRng -> 0.80; 0.77 is below the entire jitter window.
-			expect(shouldKickOffBackgroundSummarization(0.77, true, true, midRng)).toBe(false);
-			// Also below the minimum of the window regardless of rng.
-			expect(shouldKickOffBackgroundSummarization(warmJitterMin - 0.0001, true, true, () => 0)).toBe(false);
+		test('returns tier 1 at tier1Estimate', () => {
+			expect(getCompactionTier(t.tier1Estimate, true, true)).toBe(1);
 		});
 
-		test('respects the top of the jitter range', () => {
-			// With maxRng, threshold approaches warmJitterMin + warmJitterSpan = 0.82.
-			// 0.81 lands below it, so we defer.
-			expect(shouldKickOffBackgroundSummarization(0.81, true, true, maxRng)).toBe(false);
-			// 0.82 meets it.
-			expect(shouldKickOffBackgroundSummarization(warmJitterMin + warmJitterSpan, true, true, maxRng)).toBe(true);
+		test('returns tier 2 at tier2Estimate', () => {
+			expect(getCompactionTier(t.tier2Estimate, true, true)).toBe(2);
+		});
+
+		test('returns tier 3 at tier3Estimate', () => {
+			expect(getCompactionTier(t.tier3Estimate, true, true)).toBe(3);
 		});
 	});
+});
 
-	describe('non-inline path', () => {
-		test('uses the fixed base threshold and ignores cache warmth', () => {
-			// Warm, cold — both behave the same on non-inline.
-			expect(shouldKickOffBackgroundSummarization(base, false, false, unusedRng)).toBe(true);
-			expect(shouldKickOffBackgroundSummarization(base, false, true, unusedRng)).toBe(true);
-			expect(shouldKickOffBackgroundSummarization(base - 0.0001, false, true, unusedRng)).toBe(false);
-		});
+describe('getConfirmedCompactionTier', () => {
+	test('returns tier 0 below tier1Confirmed', () => {
+		expect(getConfirmedCompactionTier(0.64)).toBe(0);
+	});
+
+	test('returns tier 1 at tier1Confirmed', () => {
+		expect(getConfirmedCompactionTier(t.tier1Confirmed)).toBe(1);
+		expect(getConfirmedCompactionTier(0.70)).toBe(1);
+	});
+
+	test('returns tier 2 at tier2Confirmed', () => {
+		expect(getConfirmedCompactionTier(t.tier2Confirmed)).toBe(2);
+		expect(getConfirmedCompactionTier(0.80)).toBe(2);
+	});
+
+	test('returns tier 3 at tier3Confirmed', () => {
+		expect(getConfirmedCompactionTier(t.tier3Confirmed)).toBe(3);
+		expect(getConfirmedCompactionTier(0.95)).toBe(3);
+	});
+});
+
+describe('shouldKickOffBackgroundSummarization (legacy wrapper)', () => {
+	test('returns true when getCompactionTier >= 1', () => {
+		expect(shouldKickOffBackgroundSummarization(t.tier1Estimate, false, false, unusedRng)).toBe(true);
+		expect(shouldKickOffBackgroundSummarization(t.tier2Estimate, false, false, unusedRng)).toBe(true);
+		expect(shouldKickOffBackgroundSummarization(t.tier3Estimate, false, false, unusedRng)).toBe(true);
+	});
+
+	test('returns false when getCompactionTier is 0', () => {
+		expect(shouldKickOffBackgroundSummarization(0.69, false, false, unusedRng)).toBe(false);
+		expect(shouldKickOffBackgroundSummarization(0.85, true, false, unusedRng)).toBe(false);
 	});
 });

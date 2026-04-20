@@ -40,41 +40,85 @@ export interface IBackgroundSummarizationResult {
 }
 
 /**
- * Thresholds used by {@link shouldKickOffBackgroundSummarization}. Exported so
- * tests can reference the same numbers without repeating them.
+ * Compaction urgency tier returned by {@link getCompactionTier}.
+ *
+ * - 0: no action needed
+ * - 1: start background compaction (low urgency)
+ * - 2: urgent background compaction + warning
+ * - 3: synchronous compaction — block before next LLM call
+ */
+export type CompactionTier = 0 | 1 | 2 | 3;
+
+/**
+ * Thresholds used by {@link getCompactionTier}. Exported so tests can
+ * reference the same numbers without repeating them.
+ *
+ * Estimate thresholds trigger an API verification (countTokens). The
+ * confirmed thresholds gate the actual compaction action after the API
+ * returns the true token count.
  */
 export const BackgroundSummarizationThresholds = {
-	/** Trigger ratio for the non-inline path (no prompt-cache benefit). */
-	base: 0.80,
-	/** Minimum of the jittered warm-cache range for the inline path. */
-	warmJitterMin: 0.78,
-	/** Width of the jittered warm-cache range; together with `warmJitterMin` yields [0.78, 0.82). */
-	warmJitterSpan: 0.04,
-	/**
-	 * Cold-cache emergency ratio for the inline path. Above this we kick off
-	 * even without a warmed cache to avoid forcing a foreground sync compaction
-	 * on the next render. Tuned low enough that long-running sessions stay
-	 * ahead of the budget without relying on foreground compaction.
-	 */
-	emergency: 0.90,
+	/** Estimate ratio that triggers Tier 1 (background compaction check). */
+	tier1Estimate: 0.70,
+	/** Estimate ratio that triggers Tier 2 (urgent background compaction check). */
+	tier2Estimate: 0.80,
+	/** Estimate ratio that triggers Tier 3 (synchronous compaction check). */
+	tier3Estimate: 0.90,
+	/** API-confirmed ratio for Tier 1 action (start background compaction). */
+	tier1Confirmed: 0.65,
+	/** API-confirmed ratio for Tier 2 action (urgent background compaction). */
+	tier2Confirmed: 0.75,
+	/** API-confirmed ratio for Tier 3 action (synchronous compaction). */
+	tier3Confirmed: 0.85,
 } as const;
 
 /**
- * Decide whether to kick off post-render background compaction.
+ * Determine which compaction tier the current context ratio falls into.
  *
- * For the inline-summarization path prompt-cache parity matters, so we:
- *   - require a completed tool call in this turn ("warm" cache) before
- *     firing at the normal, jittered ~0.80 threshold;
- *   - allow an emergency kick-off at >= 0.90 even with a cold cache to
- *     avoid forcing a foreground sync compaction on the next render.
+ * For the inline-summarization path, prompt-cache parity matters. With a
+ * cold cache we require a higher estimate (tier3Estimate) to avoid wasting
+ * a compaction pass. With a warm cache we use the full tiered thresholds.
  *
- * The jitter range straddles the historical 0.80 threshold (not "lower the
- * bar") — the goal is to avoid always firing at the exact same boundary,
- * not to kick off systematically earlier.
- *
- * The non-inline path forks its own prompt (no cache benefit) and keeps the
- * simple >= 0.80 behavior. `rng` is only consumed on the warm-cache inline
- * branch, which keeps deterministic tests straightforward.
+ * The non-inline path has no cache benefit and uses the simple tiered
+ * thresholds directly.
+ */
+export function getCompactionTier(
+	postRenderRatio: number,
+	useInlineSummarization: boolean,
+	cacheWarm: boolean,
+): CompactionTier {
+	const t = BackgroundSummarizationThresholds;
+	if (!useInlineSummarization) {
+		if (postRenderRatio >= t.tier3Estimate) { return 3; }
+		if (postRenderRatio >= t.tier2Estimate) { return 2; }
+		if (postRenderRatio >= t.tier1Estimate) { return 1; }
+		return 0;
+	}
+	if (!cacheWarm) {
+		return postRenderRatio >= t.tier3Estimate ? 3 : 0;
+	}
+	if (postRenderRatio >= t.tier3Estimate) { return 3; }
+	if (postRenderRatio >= t.tier2Estimate) { return 2; }
+	if (postRenderRatio >= t.tier1Estimate) { return 1; }
+	return 0;
+}
+
+/**
+ * After an API countTokens verification, re-evaluate the tier based on
+ * the true (API-confirmed) ratio. Returns the action tier to execute.
+ */
+export function getConfirmedCompactionTier(trueRatio: number): CompactionTier {
+	const t = BackgroundSummarizationThresholds;
+	if (trueRatio >= t.tier3Confirmed) { return 3; }
+	if (trueRatio >= t.tier2Confirmed) { return 2; }
+	if (trueRatio >= t.tier1Confirmed) { return 1; }
+	return 0;
+}
+
+/**
+ * Legacy wrapper — returns true when the estimate tier is >= 1.
+ * Kept for backward compatibility with callers that only need a boolean.
+ * @deprecated Use {@link getCompactionTier} for tiered compaction.
  */
 export function shouldKickOffBackgroundSummarization(
 	postRenderRatio: number,
@@ -82,15 +126,7 @@ export function shouldKickOffBackgroundSummarization(
 	cacheWarm: boolean,
 	rng: () => number,
 ): boolean {
-	const t = BackgroundSummarizationThresholds;
-	if (!useInlineSummarization) {
-		return postRenderRatio >= t.base;
-	}
-	if (!cacheWarm) {
-		return postRenderRatio >= t.emergency;
-	}
-	const jittered = t.warmJitterMin + rng() * t.warmJitterSpan;
-	return postRenderRatio >= jittered;
+	return getCompactionTier(postRenderRatio, useInlineSummarization, cacheWarm) >= 1;
 }
 
 /**

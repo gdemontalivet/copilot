@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { ApiError, GenerateContentParameters, GoogleGenAI, Tool, Type } from '@google/genai';
+import { ApiError, Content, GenerateContentParameters, GoogleGenAI, Tool, Type } from '@google/genai';
 import { CancellationToken, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelResponsePart2, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
 import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';
 import { ILogService } from '../../../platform/log/common/logService';
@@ -23,9 +23,126 @@ import { apiMessageToGeminiMessage, geminiMessagesToRawMessagesForLogging } from
 import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
 import { IBYOKStorageService } from './byokStorageService';
 
+/**
+ * Self-calibrating token estimator for Gemini BYOK.
+ *
+ * The base `getApproximateTokenCount` helper uses a naive `chars/4` heuristic, which
+ * significantly under-counts symbol-dense payloads (code, JSON tool outputs, base64
+ * inline images). That mismatch lets prompt-tsx believe we are well under the model's
+ * context budget while Gemini has actually passed its limit, producing the 400
+ * "input token count exceeds …" error before auto-compact gets a chance to kick in.
+ *
+ * This calibrator observes the real `usageMetadata.promptTokenCount` returned by
+ * Gemini for each successful request, compares it to what the base estimator would
+ * have predicted for the same payload, and maintains an exponential moving average
+ * of the ratio per model. `provideTokenCount` then multiplies the raw estimate by
+ * that factor, making prompt-tsx's budget math — and by extension the built-in
+ * auto-compact threshold — track the true token count.
+ */
+class GeminiTokenCalibrator {
+	private static readonly INITIAL_FACTOR = 1.0;
+	private static readonly MIN_FACTOR = 0.9;
+	private static readonly MAX_FACTOR = 3.0;
+	private static readonly FAST_ALPHA = 0.5;
+	private static readonly SLOW_ALPHA = 0.25;
+	private static readonly FAST_SAMPLES = 5;
+
+	private readonly _factors = new Map<string, { factor: number; samples: number }>();
+
+	constructor(private readonly _logService: ILogService) { }
+
+	getFactor(modelId: string): number {
+		return this._factors.get(modelId)?.factor ?? GeminiTokenCalibrator.INITIAL_FACTOR;
+	}
+
+	calibrate(modelId: string, rawEstimate: number, actualPromptTokens: number): void {
+		if (!Number.isFinite(rawEstimate) || rawEstimate <= 0) { return; }
+		if (!Number.isFinite(actualPromptTokens) || actualPromptTokens <= 0) { return; }
+
+		const sample = this._clamp(actualPromptTokens / rawEstimate);
+		const current = this._factors.get(modelId);
+		if (!current) {
+			this._factors.set(modelId, { factor: sample, samples: 1 });
+			this._logService.trace(`[GeminiCalibrator] ${modelId}: initial factor=${sample.toFixed(3)} (est=${rawEstimate}, actual=${actualPromptTokens})`);
+			return;
+		}
+
+		const alpha = current.samples < GeminiTokenCalibrator.FAST_SAMPLES
+			? GeminiTokenCalibrator.FAST_ALPHA
+			: GeminiTokenCalibrator.SLOW_ALPHA;
+		const nextFactor = this._clamp(current.factor * (1 - alpha) + sample * alpha);
+		this._factors.set(modelId, { factor: nextFactor, samples: current.samples + 1 });
+		this._logService.trace(`[GeminiCalibrator] ${modelId}: factor=${nextFactor.toFixed(3)} (sample=${sample.toFixed(3)}, samples=${current.samples + 1}, est=${rawEstimate}, actual=${actualPromptTokens})`);
+	}
+
+	private _clamp(value: number): number {
+		return Math.max(GeminiTokenCalibrator.MIN_FACTOR, Math.min(GeminiTokenCalibrator.MAX_FACTOR, value));
+	}
+}
+
+/**
+ * Estimate (uncalibrated) the token count of a Gemini request payload using the
+ * same base heuristic as `provideTokenCount`. Used only to feed the calibrator so
+ * that sample ratios are comparable to what `provideTokenCount` returns for
+ * prompt-tsx. Pragmatically stringifies parts/tools — exact fidelity with
+ * per-message counts is not required because both sides use the same rule.
+ */
+export function estimateGeminiPayloadRawTokens(params: GenerateContentParameters): number {
+	let total = 0;
+	const sys = params.config?.systemInstruction;
+	if (sys) {
+		total += getApproximateTokenCount(typeof sys === 'string' ? sys : JSON.stringify(sys));
+	}
+	const contents = params.contents;
+	if (Array.isArray(contents)) {
+		for (const c of contents as Array<{ parts?: unknown[] }>) {
+			const parts = c?.parts;
+			if (Array.isArray(parts)) {
+				for (const p of parts) {
+					total += getApproximateTokenCount(typeof p === 'string' ? p : JSON.stringify(p));
+				}
+			}
+		}
+	} else if (typeof contents === 'string') {
+		total += getApproximateTokenCount(contents);
+	}
+	const tools = params.config?.tools;
+	if (tools) {
+		total += getApproximateTokenCount(JSON.stringify(tools));
+	}
+	return Math.max(1, total);
+}
+
+export function resolveGeminiKnownModelId(apiResourceName: string, knownModels: BYOKKnownModels | undefined): string | undefined {
+	if (!knownModels) {
+		return undefined;
+	}
+	const trimmed = apiResourceName.trim();
+	if (!trimmed) {
+		return undefined;
+	}
+	if (knownModels[trimmed]) {
+		return trimmed;
+	}
+	const shortId = trimmed.includes('/') ? trimmed.slice(trimmed.lastIndexOf('/') + 1) : trimmed;
+	if (!shortId) {
+		return undefined;
+	}
+	const modelsPrefixed = `models/${shortId}`;
+	if (knownModels[modelsPrefixed]) {
+		return modelsPrefixed;
+	}
+	if (knownModels[shortId]) {
+		return shortId;
+	}
+	return undefined;
+}
+
 export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvider {
 
 	public static readonly providerName = 'Gemini';
+
+	private readonly _tokenCalibrator: GeminiTokenCalibrator;
 
 	constructor(
 		knownModels: BYOKKnownModels | undefined,
@@ -36,6 +153,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 		@IOTelService private readonly _otelService: IOTelService,
 	) {
 		super(GeminiNativeBYOKLMProvider.providerName.toLowerCase(), GeminiNativeBYOKLMProvider.providerName, knownModels, byokStorageService, logService);
+		this._tokenCalibrator = new GeminiTokenCalibrator(logService);
 	}
 
 	protected async getAllModels(silent: boolean, apiKey: string | undefined): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
@@ -171,6 +289,23 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				const result = await this._makeRequest(client, wrappedProgress, params, token, issuedTime);
 				if (result.ttft) {
 					pendingLoggedChatRequest.markTimeToFirstToken(result.ttft);
+				}
+				if (result.usage) {
+					progress.report(new LanguageModelDataPart(
+						new TextEncoder().encode(JSON.stringify(result.usage)),
+						CustomDataPartMimeTypes.TokenUsage
+					));
+				}
+				// Feed the self-calibrating estimator with the ground-truth prompt token
+				// count returned by Gemini so future `provideTokenCount` calls become more
+				// accurate and auto-compact triggers before we blow the context window.
+				if (result.usage && typeof result.usage.prompt_tokens === 'number' && result.usage.prompt_tokens > 0) {
+					try {
+						const rawEstimate = estimateGeminiPayloadRawTokens(params);
+						this._tokenCalibrator.calibrate(model.id, rawEstimate, result.usage.prompt_tokens);
+					} catch (calibrationError) {
+						this._logService.trace(`Gemini token calibration skipped: ${toErrorMessage(calibrationError)}`);
+					}
 				}
 				pendingLoggedChatRequest.resolve({
 					type: ChatFetchResponseType.Success,
@@ -390,8 +525,51 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 	}
 
 	async provideTokenCount(model: LanguageModelChatInformation, text: string | LanguageModelChatMessage | LanguageModelChatMessage2, token: CancellationToken): Promise<number> {
-		// Simple estimation for approximate token count - actual token count would require Gemini's tokenizer
-		return Math.ceil(text.toString().length / 4);
+		// Base estimator is `chars/4`. Multiply by the per-model calibration factor
+		// learned from prior `usageMetadata.promptTokenCount` responses so prompt-tsx's
+		// context budget tracks Gemini's actual tokenizer instead of undercounting and
+		// triggering 400 "input token count exceeds" before auto-compact can fire.
+		const raw = getApproximateTokenCount(text);
+		const factor = this._tokenCalibrator.getFactor(model.id);
+		return Math.ceil(raw * factor);
+	}
+
+	/**
+	 * Call Gemini's countTokens API to get the exact token count for a payload.
+	 * Used by the tiered auto-compact system to verify estimates before deciding
+	 * whether to trigger compaction. Also feeds the calibrator with ground truth.
+	 *
+	 * Returns `undefined` if the API call fails (caller should fall back to estimate).
+	 */
+	async countTokensViaAPI(
+		apiKey: string,
+		modelId: string,
+		contents: Content[],
+		systemInstruction?: Content,
+		tools?: Tool[],
+	): Promise<number | undefined> {
+		try {
+			const client = new GoogleGenAI({ apiKey });
+			const response = await client.models.countTokens({
+				model: modelId,
+				contents,
+			});
+			const totalTokens = response.totalTokens;
+			if (typeof totalTokens === 'number' && totalTokens > 0) {
+				// Feed calibrator with ground truth from countTokens API
+				const rawEstimate = estimateGeminiPayloadRawTokens({
+					model: modelId,
+					contents,
+					config: { systemInstruction, tools },
+				} as GenerateContentParameters);
+				this._tokenCalibrator.calibrate(modelId, rawEstimate, totalTokens);
+				this._logService.debug(`[AutoCompact] countTokens API: ${totalTokens} tokens for ${modelId}`);
+			}
+			return totalTokens ?? undefined;
+		} catch (e) {
+			this._logService.warn(`[AutoCompact] countTokens API failed: ${toErrorMessage(e)}`);
+			return undefined;
+		}
 	}
 
 	private async _makeRequest(client: GoogleGenAI, progress: Progress<LMResponsePart>, params: GenerateContentParameters, token: CancellationToken, issuedTime: number): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined }> {
