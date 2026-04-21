@@ -168,6 +168,15 @@ When running in fully offline BYOK mode the fake Copilot token 401s against
 
 **Fix:** Patches 1 and 5 add short-circuits for `copilotToken === 'fake-token'`.
 
+**Subtle perf trap** (fixed in Patch 5): the short-circuit must NOT fire
+`_onDidModelRefresh`. In BYOK-only mode `_familyMap` stays empty, so
+`_shouldRefreshModels()` returns `true` on every call. If the bypass fires
+the refresh event, `languageModelAccess`'s listener re-queries models →
+re-enters `_fetchModels` → fires the event again. Cheap per-iteration but
+cumulatively slows VS Code. Patch 5 also sets a `_fakeTokenShortCircuited`
+flag so subsequent calls return immediately without even awaiting
+`getCopilotToken()`.
+
 ### Internal model family lookups throwing in BYOK-only mode
 
 Several code paths hard-code an internal Copilot model family and call

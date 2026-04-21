@@ -210,40 +210,105 @@ PATCH4_EOF
 # Patch 5: Fake-token bypass + 1-min backoff in modelMetadataFetcher.ts
 # Avoids 401 spam and hot-loop retries against the Copilot API when running
 # in BYOK-only mode with the fake offline token.
+#
+# IMPORTANT: the bypass must NOT fire `_onDidModelRefresh` and must remember
+# that it already short-circuited. Otherwise `_shouldRefreshModels()` returns
+# `true` on every call (because `_familyMap.size === 0` in BYOK-only mode)
+# and the event triggers a feedback loop with `languageModelAccess`'s model
+# change listener — cheap per-call but cumulatively slows VS Code.
 node << 'PATCH5_EOF'
 const fs = require("fs");
 const f = "src/platform/endpoint/node/modelMetadataFetcher.ts";
 let code = fs.readFileSync(f, "utf8");
 
-if (code.includes("BYOK CUSTOM PATCH: fake-token bypass")) {
+if (code.includes("BYOK CUSTOM PATCH: fake-token early-out")) {
   console.log("modelMetadataFetcher bypass already present, skipping");
   process.exit(0);
 }
 
-// Step 1: inject fake-token bypass after `const copilotToken = (await this._authService.getCopilotToken()).token;`
+// Step 1: add the short-circuit flag as a new class field.
+const fieldAnchor = "private _lastFetchError: any;";
+if (!code.includes(fieldAnchor)) {
+  console.warn("WARN: _lastFetchError anchor not found — skipping modelMetadataFetcher patch");
+  process.exit(0);
+}
+code = code.replace(
+  fieldAnchor,
+  `${fieldAnchor}
+	// BYOK CUSTOM PATCH: remember that we've already short-circuited on the fake token,
+	// so subsequent calls don't re-await \`getCopilotToken()\` or re-enter the bypass.
+	private _fakeTokenShortCircuited: boolean = false;`
+);
+
+// Step 2: reset the flag on auth change so a transition from fake → real token re-evaluates.
+const authChangeAnchor = `this._authService.onDidAuthenticationChange(() => {
+			// Auth changed so next fetch should be forced to get a new list
+			this._familyMap.clear();
+			this._completionsFamilyMap.clear();
+			this._lastFetchTime = 0;`;
+if (code.includes(authChangeAnchor)) {
+  code = code.replace(
+    authChangeAnchor,
+    `${authChangeAnchor}
+			// BYOK CUSTOM PATCH: auth changed, so let the next fetch re-evaluate
+			// whether we're still on the fake token.
+			this._fakeTokenShortCircuited = false;`
+  );
+}
+
+// Step 3: inject the early-out at the top of `_fetchModels` BEFORE _shouldRefreshModels
+// (which would otherwise return true because _familyMap is empty).
+const fetchAnchor = "private async _fetchModels(force?: boolean): Promise<void> {\n\t\tif (!force && !this._shouldRefreshModels()) {";
+if (!code.includes(fetchAnchor)) {
+  console.warn("WARN: _fetchModels anchor not found — skipping modelMetadataFetcher patch");
+  process.exit(0);
+}
+code = code.replace(
+  fetchAnchor,
+  `private async _fetchModels(force?: boolean): Promise<void> {
+		// ─── BYOK CUSTOM PATCH: fake-token early-out ─────────────────────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Once we've confirmed we're running with the offline fake token there
+		// is nothing to refresh here — \`_familyMap\` stays empty by design, so
+		// \`_shouldRefreshModels()\` below would otherwise return \`true\` on every
+		// call, re-awaiting \`getCopilotToken()\` and re-firing the refresh event
+		// (which triggers a feedback loop with \`languageModelAccess\`'s model
+		// change listener). Skip the whole body on subsequent calls.
+		if (this._fakeTokenShortCircuited) {
+			return;
+		}
+		// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────
+		if (!force && !this._shouldRefreshModels()) {`
+);
+
+// Step 4: inject the fake-token bypass after `const copilotToken = (await this._authService.getCopilotToken()).token;`
+//         (flag set + NO event fire).
 const tokenAnchor = "const copilotToken = (await this._authService.getCopilotToken()).token;";
 if (!code.includes(tokenAnchor)) {
   console.warn("WARN: copilotToken anchor not found — skipping modelMetadataFetcher patch");
   process.exit(0);
 }
-
-const bypass = `${tokenAnchor}
+code = code.replace(
+  tokenAnchor,
+  `${tokenAnchor}
 
 		// ─── BYOK CUSTOM PATCH: fake-token bypass ─────────────────────
 		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-		// Skip API call when using a fake/offline token (BYOK-only mode).
+		// Skip the API call when using a fake/offline token (BYOK-only mode).
 		// The fake token will always 401 against the Copilot API, so avoid
-		// the network round-trip and error log spam.
+		// the network round-trip and error log spam. Crucially, do NOT fire
+		// \`_onDidModelRefresh\` — nothing was actually refreshed, and firing
+		// triggers \`languageModelAccess\` to re-query models, which re-enters
+		// this function and firehoses a feedback loop.
 		if (copilotToken === 'fake-token') {
+			this._fakeTokenShortCircuited = true;
 			this._lastFetchTime = Date.now();
-			this._onDidModelRefresh.fire();
 			return;
 		}
-		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────`;
+		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────`
+);
 
-code = code.replace(tokenAnchor, bypass);
-
-// Step 2: 1-min backoff instead of hot-loop retry on failure
+// Step 5: 1-min backoff instead of hot-loop retry on failure.
 const retryAnchor = "this._lastFetchError = e;\n\t\t\tthis._lastFetchTime = 0;";
 if (code.includes(retryAnchor)) {
   code = code.replace(
@@ -253,7 +318,7 @@ if (code.includes(retryAnchor)) {
 }
 
 fs.writeFileSync(f, code);
-console.log("Patched: modelMetadataFetcher fake-token bypass");
+console.log("Patched: modelMetadataFetcher fake-token bypass (no event fire + early-out)");
 PATCH5_EOF
 
 # Patch 6: Wire tiered compaction into agentIntent.ts
