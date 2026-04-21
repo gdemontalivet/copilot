@@ -206,19 +206,59 @@ export const TieredCompactionThresholds = {
 } as const;
 
 /**
+ * Adaptive compaction thresholds for large-context models.
+ *
+ * Claude Opus 4.6 / 4.7 and Sonnet 4.6 on Vertex AI ship with a native 1M
+ * context window at flat per-token pricing. Applying the default percentage
+ * thresholds (0.70 / 0.80 / 0.90) would mean tier-1 compaction doesn't fire
+ * until ~700K tokens — an individual turn ~5x larger (and ~5x more expensive
+ * per call) than the same workflow on a 200K model. Cap the absolute token
+ * budget before compaction at roughly the 200K mark so per-call cost tracks
+ * the smaller-context baseline, while still leaving the 1M window available
+ * as a safety net for the rare turn that genuinely needs it.
+ *
+ * Only kicks in for models with `modelMaxPromptTokens > 300_000` so the
+ * default behaviour is untouched for everything else (Gemini, OpenAI,
+ * 200K Claude models).
+ */
+const LARGE_CONTEXT_THRESHOLD_TOKENS = 300_000;
+const LARGE_CONTEXT_TIER1_ABSOLUTE = 180_000;
+const LARGE_CONTEXT_TIER2_ABSOLUTE = 200_000;
+const LARGE_CONTEXT_TIER3_ABSOLUTE = 220_000;
+export function resolveCompactionThresholds(modelMaxPromptTokens?: number): typeof TieredCompactionThresholds {
+	if (!modelMaxPromptTokens || modelMaxPromptTokens <= LARGE_CONTEXT_THRESHOLD_TOKENS) {
+		return TieredCompactionThresholds;
+	}
+	const max = modelMaxPromptTokens;
+	return {
+		tier1Estimate: LARGE_CONTEXT_TIER1_ABSOLUTE / max,
+		tier2Estimate: LARGE_CONTEXT_TIER2_ABSOLUTE / max,
+		tier3Estimate: LARGE_CONTEXT_TIER3_ABSOLUTE / max,
+		tier1Confirmed: (LARGE_CONTEXT_TIER1_ABSOLUTE * 0.93) / max,
+		tier2Confirmed: (LARGE_CONTEXT_TIER2_ABSOLUTE * 0.93) / max,
+		tier3Confirmed: (LARGE_CONTEXT_TIER3_ABSOLUTE * 0.93) / max,
+	} as const;
+}
+
+/**
  * Map a post-render context ratio to a compaction tier.
  *
  * Inline path (cache parity matters): cold cache only triggers tier 3, warm
  * cache uses the full tiered ladder.
  *
  * Non-inline path (no cache benefit): full tiered ladder regardless.
+ *
+ * `modelMaxPromptTokens` is optional for backwards compat with the existing
+ * test suite; when provided and >300K, switches to absolute-token thresholds
+ * so large-context models don't pay 5x per turn just because the cap is 5x.
  */
 export function getCompactionTier(
 	postRenderRatio: number,
 	useInlineSummarization: boolean,
 	cacheWarm: boolean,
+	modelMaxPromptTokens?: number,
 ): CompactionTier {
-	const t = TieredCompactionThresholds;
+	const t = resolveCompactionThresholds(modelMaxPromptTokens);
 	if (!useInlineSummarization) {
 		if (postRenderRatio >= t.tier3Estimate) { return 3; }
 		if (postRenderRatio >= t.tier2Estimate) { return 2; }
@@ -238,8 +278,8 @@ export function getCompactionTier(
  * Map an API-confirmed ratio (from Gemini countTokens) to a compaction tier.
  * Reserved for future use once the countTokens gate is wired in.
  */
-export function getConfirmedCompactionTier(trueRatio: number): CompactionTier {
-	const t = TieredCompactionThresholds;
+export function getConfirmedCompactionTier(trueRatio: number, modelMaxPromptTokens?: number): CompactionTier {
+	const t = resolveCompactionThresholds(modelMaxPromptTokens);
 	if (trueRatio >= t.tier3Confirmed) { return 3; }
 	if (trueRatio >= t.tier2Confirmed) { return 2; }
 	if (trueRatio >= t.tier1Confirmed) { return 1; }

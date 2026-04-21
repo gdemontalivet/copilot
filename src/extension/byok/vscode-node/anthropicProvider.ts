@@ -380,6 +380,32 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				? rawEffort as 'low' | 'medium' | 'high' | 'max'
 				: undefined;
 
+			// ─── BYOK CUSTOM PATCH: always cache system prompt + tools ────────────────
+			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			// Upstream `addCacheBreakpoints` only reserves leftover cache slots for
+			// the system message after tool-result breakpoints have been allocated,
+			// so in multi-tool-call turns the system prompt (often the largest
+			// stable prefix, 10K+ tokens with workspace rules + agent prompt) never
+			// gets marked and every turn re-bills it at full rate. The `tools`
+			// array is similarly stable across the agent loop but upstream never
+			// caches it at all for BYOK.
+			//
+			// Anthropic prompt caching: writes cost 1.25x, reads cost 0.1x. Break-
+			// even after 2 turns. Multi-turn agentic loops save ~70% on the shared
+			// prefix. Setting cache_control is idempotent — if the converter
+			// already marked it we leave it alone.
+			// https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+			if (system.text && system.text.length > 0 && !system.cache_control) {
+				system.cache_control = { type: 'ephemeral' };
+			}
+			if (tools.length > 0) {
+				const lastTool = tools[tools.length - 1] as Anthropic.Beta.BetaToolUnion & { cache_control?: { type: 'ephemeral' } };
+				if (!lastTool.cache_control) {
+					lastTool.cache_control = { type: 'ephemeral' };
+				}
+			}
+			// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────
+
 			const params: Anthropic.Beta.Messages.MessageCreateParamsStreaming = {
 				model: model.id,
 				messages: convertedMessages,

@@ -159,19 +159,59 @@ export const TieredCompactionThresholds = {
 } as const;
 
 /**
+ * Adaptive compaction thresholds for large-context models.
+ *
+ * Claude Opus 4.6 / 4.7 and Sonnet 4.6 on Vertex AI ship with a native 1M
+ * context window at flat per-token pricing. Applying the default percentage
+ * thresholds (0.70 / 0.80 / 0.90) would mean tier-1 compaction doesn't fire
+ * until ~700K tokens — an individual turn ~5x larger (and ~5x more expensive
+ * per call) than the same workflow on a 200K model. Cap the absolute token
+ * budget before compaction at roughly the 200K mark so per-call cost tracks
+ * the smaller-context baseline, while still leaving the 1M window available
+ * as a safety net for the rare turn that genuinely needs it.
+ *
+ * Only kicks in for models with \`modelMaxPromptTokens > 300_000\` so the
+ * default behaviour is untouched for everything else (Gemini, OpenAI,
+ * 200K Claude models).
+ */
+const LARGE_CONTEXT_THRESHOLD_TOKENS = 300_000;
+const LARGE_CONTEXT_TIER1_ABSOLUTE = 180_000;
+const LARGE_CONTEXT_TIER2_ABSOLUTE = 200_000;
+const LARGE_CONTEXT_TIER3_ABSOLUTE = 220_000;
+export function resolveCompactionThresholds(modelMaxPromptTokens?: number): typeof TieredCompactionThresholds {
+	if (!modelMaxPromptTokens || modelMaxPromptTokens <= LARGE_CONTEXT_THRESHOLD_TOKENS) {
+		return TieredCompactionThresholds;
+	}
+	const max = modelMaxPromptTokens;
+	return {
+		tier1Estimate: LARGE_CONTEXT_TIER1_ABSOLUTE / max,
+		tier2Estimate: LARGE_CONTEXT_TIER2_ABSOLUTE / max,
+		tier3Estimate: LARGE_CONTEXT_TIER3_ABSOLUTE / max,
+		tier1Confirmed: (LARGE_CONTEXT_TIER1_ABSOLUTE * 0.93) / max,
+		tier2Confirmed: (LARGE_CONTEXT_TIER2_ABSOLUTE * 0.93) / max,
+		tier3Confirmed: (LARGE_CONTEXT_TIER3_ABSOLUTE * 0.93) / max,
+	} as const;
+}
+
+/**
  * Map a post-render context ratio to a compaction tier.
  *
  * Inline path (cache parity matters): cold cache only triggers tier 3, warm
  * cache uses the full tiered ladder.
  *
  * Non-inline path (no cache benefit): full tiered ladder regardless.
+ *
+ * \`modelMaxPromptTokens\` is optional for backwards compat with the existing
+ * test suite; when provided and >300K, switches to absolute-token thresholds
+ * so large-context models don't pay 5x per turn just because the cap is 5x.
  */
 export function getCompactionTier(
 	postRenderRatio: number,
 	useInlineSummarization: boolean,
 	cacheWarm: boolean,
+	modelMaxPromptTokens?: number,
 ): CompactionTier {
-	const t = TieredCompactionThresholds;
+	const t = resolveCompactionThresholds(modelMaxPromptTokens);
 	if (!useInlineSummarization) {
 		if (postRenderRatio >= t.tier3Estimate) { return 3; }
 		if (postRenderRatio >= t.tier2Estimate) { return 2; }
@@ -191,8 +231,8 @@ export function getCompactionTier(
  * Map an API-confirmed ratio (from Gemini countTokens) to a compaction tier.
  * Reserved for future use once the countTokens gate is wired in.
  */
-export function getConfirmedCompactionTier(trueRatio: number): CompactionTier {
-	const t = TieredCompactionThresholds;
+export function getConfirmedCompactionTier(trueRatio: number, modelMaxPromptTokens?: number): CompactionTier {
+	const t = resolveCompactionThresholds(modelMaxPromptTokens);
 	if (trueRatio >= t.tier3Confirmed) { return 3; }
 	if (trueRatio >= t.tier2Confirmed) { return 2; }
 	if (trueRatio >= t.tier1Confirmed) { return 1; }
@@ -363,7 +403,7 @@ const tier3Block = `// ─── BYOK CUSTOM PATCH: Tier 3 synchronous compactio
 			// 1M input-token cap. Mirrors the proven BudgetExceededError flow
 			// (wait -> apply -> re-render) but triggered proactively on
 			// estimate rather than reactively on a 400 error.
-			const __byokTier = getCompactionTier(postRenderRatio, useInlineSummarization, cacheWarm);
+			const __byokTier = getCompactionTier(postRenderRatio, useInlineSummarization, cacheWarm, this.endpoint.modelMaxPromptTokens);
 			if (__byokTier >= 3) {
 				this.logService.warn(\`[AutoCompact] tier 3 — ratio \${(postRenderRatio * 100).toFixed(1)}% — blocking on compaction\`);
 				if (idleOrFailed) {
@@ -1408,3 +1448,227 @@ code = code.replace(anchor, replacement);
 fs.writeFileSync(f, code);
 console.log("Patched: [BYOK TokenBudget] per-request info log");
 PATCH22_EOF
+
+# Patch 23: Adaptive compaction thresholds for large-context models.
+#
+# After Patch 19 bumped Claude Opus 4.6 / 4.7 / Sonnet 4.6 to their real 1M
+# Vertex context window, Patches 4/6's percentage thresholds (0.70 / 0.80 /
+# 0.90) started firing tier-1 compaction at ~700K real tokens instead of
+# ~140K. Per-call cost scales linearly with prompt size at flat Vertex
+# pricing, so that's a ~5x cost regression for the exact same workflow
+# ("keep chatting until auto-compact saves us").
+#
+# Switch large-context models (> 300K cap) to absolute-token targets
+# (180K / 200K / 220K). 200K and smaller models keep the original
+# percentage ladder unchanged. The full 1M window stays available as a
+# safety net — this only changes when compaction fires, not whether the
+# window is reachable.
+#
+# This patch is a *migration* for workspaces that already applied the
+# original Patch 4 / Patch 6 content. Fresh upstream syncs get the new
+# content directly from Patch 4 / Patch 6 above; Patch 23 then detects the
+# new sentinel and skips.
+node << 'PATCH23_EOF'
+const fs = require("fs");
+
+// --- backgroundSummarizer.ts: inject resolveCompactionThresholds + update signatures
+{
+  const f = "src/extension/prompts/node/agent/backgroundSummarizer.ts";
+  let code = fs.readFileSync(f, "utf8");
+
+  if (code.includes("resolveCompactionThresholds")) {
+    console.log("adaptive compaction thresholds (backgroundSummarizer) already present, skipping");
+  } else {
+    const oldBlock = `/**
+ * Map a post-render context ratio to a compaction tier.
+ *
+ * Inline path (cache parity matters): cold cache only triggers tier 3, warm
+ * cache uses the full tiered ladder.
+ *
+ * Non-inline path (no cache benefit): full tiered ladder regardless.
+ */
+export function getCompactionTier(
+	postRenderRatio: number,
+	useInlineSummarization: boolean,
+	cacheWarm: boolean,
+): CompactionTier {
+	const t = TieredCompactionThresholds;
+	if (!useInlineSummarization) {
+		if (postRenderRatio >= t.tier3Estimate) { return 3; }
+		if (postRenderRatio >= t.tier2Estimate) { return 2; }
+		if (postRenderRatio >= t.tier1Estimate) { return 1; }
+		return 0;
+	}
+	if (!cacheWarm) {
+		return postRenderRatio >= t.tier3Estimate ? 3 : 0;
+	}
+	if (postRenderRatio >= t.tier3Estimate) { return 3; }
+	if (postRenderRatio >= t.tier2Estimate) { return 2; }
+	if (postRenderRatio >= t.tier1Estimate) { return 1; }
+	return 0;
+}
+
+/**
+ * Map an API-confirmed ratio (from Gemini countTokens) to a compaction tier.
+ * Reserved for future use once the countTokens gate is wired in.
+ */
+export function getConfirmedCompactionTier(trueRatio: number): CompactionTier {
+	const t = TieredCompactionThresholds;
+	if (trueRatio >= t.tier3Confirmed) { return 3; }
+	if (trueRatio >= t.tier2Confirmed) { return 2; }
+	if (trueRatio >= t.tier1Confirmed) { return 1; }
+	return 0;
+}`;
+
+    const newBlock = `/**
+ * Adaptive compaction thresholds for large-context models.
+ *
+ * Claude Opus 4.6 / 4.7 and Sonnet 4.6 on Vertex AI ship with a native 1M
+ * context window at flat per-token pricing. Applying the default percentage
+ * thresholds (0.70 / 0.80 / 0.90) would mean tier-1 compaction doesn't fire
+ * until ~700K tokens — an individual turn ~5x larger (and ~5x more expensive
+ * per call) than the same workflow on a 200K model. Cap the absolute token
+ * budget before compaction at roughly the 200K mark so per-call cost tracks
+ * the smaller-context baseline, while still leaving the 1M window available
+ * as a safety net for the rare turn that genuinely needs it.
+ *
+ * Only kicks in for models with \`modelMaxPromptTokens > 300_000\` so the
+ * default behaviour is untouched for everything else (Gemini, OpenAI,
+ * 200K Claude models).
+ */
+const LARGE_CONTEXT_THRESHOLD_TOKENS = 300_000;
+const LARGE_CONTEXT_TIER1_ABSOLUTE = 180_000;
+const LARGE_CONTEXT_TIER2_ABSOLUTE = 200_000;
+const LARGE_CONTEXT_TIER3_ABSOLUTE = 220_000;
+export function resolveCompactionThresholds(modelMaxPromptTokens?: number): typeof TieredCompactionThresholds {
+	if (!modelMaxPromptTokens || modelMaxPromptTokens <= LARGE_CONTEXT_THRESHOLD_TOKENS) {
+		return TieredCompactionThresholds;
+	}
+	const max = modelMaxPromptTokens;
+	return {
+		tier1Estimate: LARGE_CONTEXT_TIER1_ABSOLUTE / max,
+		tier2Estimate: LARGE_CONTEXT_TIER2_ABSOLUTE / max,
+		tier3Estimate: LARGE_CONTEXT_TIER3_ABSOLUTE / max,
+		tier1Confirmed: (LARGE_CONTEXT_TIER1_ABSOLUTE * 0.93) / max,
+		tier2Confirmed: (LARGE_CONTEXT_TIER2_ABSOLUTE * 0.93) / max,
+		tier3Confirmed: (LARGE_CONTEXT_TIER3_ABSOLUTE * 0.93) / max,
+	} as const;
+}
+
+/**
+ * Map a post-render context ratio to a compaction tier.
+ *
+ * Inline path (cache parity matters): cold cache only triggers tier 3, warm
+ * cache uses the full tiered ladder.
+ *
+ * Non-inline path (no cache benefit): full tiered ladder regardless.
+ *
+ * \`modelMaxPromptTokens\` is optional for backwards compat with the existing
+ * test suite; when provided and >300K, switches to absolute-token thresholds
+ * so large-context models don't pay 5x per turn just because the cap is 5x.
+ */
+export function getCompactionTier(
+	postRenderRatio: number,
+	useInlineSummarization: boolean,
+	cacheWarm: boolean,
+	modelMaxPromptTokens?: number,
+): CompactionTier {
+	const t = resolveCompactionThresholds(modelMaxPromptTokens);
+	if (!useInlineSummarization) {
+		if (postRenderRatio >= t.tier3Estimate) { return 3; }
+		if (postRenderRatio >= t.tier2Estimate) { return 2; }
+		if (postRenderRatio >= t.tier1Estimate) { return 1; }
+		return 0;
+	}
+	if (!cacheWarm) {
+		return postRenderRatio >= t.tier3Estimate ? 3 : 0;
+	}
+	if (postRenderRatio >= t.tier3Estimate) { return 3; }
+	if (postRenderRatio >= t.tier2Estimate) { return 2; }
+	if (postRenderRatio >= t.tier1Estimate) { return 1; }
+	return 0;
+}
+
+/**
+ * Map an API-confirmed ratio (from Gemini countTokens) to a compaction tier.
+ * Reserved for future use once the countTokens gate is wired in.
+ */
+export function getConfirmedCompactionTier(trueRatio: number, modelMaxPromptTokens?: number): CompactionTier {
+	const t = resolveCompactionThresholds(modelMaxPromptTokens);
+	if (trueRatio >= t.tier3Confirmed) { return 3; }
+	if (trueRatio >= t.tier2Confirmed) { return 2; }
+	if (trueRatio >= t.tier1Confirmed) { return 1; }
+	return 0;
+}`;
+
+    if (!code.includes(oldBlock)) {
+      console.warn("WARN: backgroundSummarizer old-block anchor not found — skipping patch 23 (summarizer)");
+    } else {
+      code = code.replace(oldBlock, newBlock);
+      fs.writeFileSync(f, code);
+      console.log("Patched: adaptive compaction thresholds (backgroundSummarizer)");
+    }
+  }
+}
+
+// --- agentIntent.ts: thread modelMaxPromptTokens into the getCompactionTier call
+{
+  const f = "src/extension/intents/node/agentIntent.ts";
+  let code = fs.readFileSync(f, "utf8");
+
+  const oldCall = "const __byokTier = getCompactionTier(postRenderRatio, useInlineSummarization, cacheWarm);";
+  const newCall = "const __byokTier = getCompactionTier(postRenderRatio, useInlineSummarization, cacheWarm, this.endpoint.modelMaxPromptTokens);";
+
+  if (code.includes(newCall)) {
+    console.log("adaptive compaction thresholds (agentIntent call) already present, skipping");
+  } else if (!code.includes(oldCall)) {
+    console.warn("WARN: agentIntent getCompactionTier call anchor not found — skipping patch 23 (agentIntent)");
+  } else {
+    code = code.replace(oldCall, newCall);
+    fs.writeFileSync(f, code);
+    console.log("Patched: adaptive compaction thresholds (agentIntent call site)");
+  }
+}
+PATCH23_EOF
+
+# Patch 24: Always cache system prompt + tools for Anthropic/Vertex BYOK.
+#
+# Upstream's `addCacheBreakpoints` (agentIntent.ts → cacheBreakpoints.ts)
+# distributes 4 Anthropic cache breakpoints across the conversation,
+# prioritising tool-result messages and the current user message. The
+# system message only gets a breakpoint from the *leftover* budget, which
+# in multi-tool turns is often zero — so the largest stable prefix in the
+# prompt (system + workspace rules + agent prompt template, commonly
+# 10-15K tokens on Opus) re-bills at the full 1x rate every turn. The
+# `tools` array is similarly stable across the agent loop but upstream
+# never caches it for BYOK at all.
+#
+# Mark both unconditionally at the BYOK layer. Anthropic prompt caching:
+# writes cost 1.25x, reads cost 0.1x — break-even after 2 turns, and
+# multi-turn agentic loops (the dominant BYOK workload) save ~70% on the
+# shared prefix. Setting cache_control is idempotent wrt upstream: if the
+# converter already marked the block we skip.
+#
+# Ref: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+node << 'PATCH24_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/anthropicProvider.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: always cache system prompt + tools")) {
+  console.log("BYOK always-cache prompt already present, skipping");
+  process.exit(0);
+}
+
+const anchor = `\t\t\tconst params: Anthropic.Beta.Messages.MessageCreateParamsStreaming = {\n\t\t\t\tmodel: model.id,\n\t\t\t\tmessages: convertedMessages,\n\t\t\t\tmax_tokens: model.maxOutputTokens,\n\t\t\t\tstream: true,\n\t\t\t\tsystem: [system],\n\t\t\t\ttools: tools.length > 0 ? tools : undefined,`;
+
+const replacement = `\t\t\t// ─── BYOK CUSTOM PATCH: always cache system prompt + tools ────────────────\n\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t\t// Upstream \`addCacheBreakpoints\` only reserves leftover cache slots for\n\t\t\t// the system message after tool-result breakpoints have been allocated,\n\t\t\t// so in multi-tool-call turns the system prompt (often the largest\n\t\t\t// stable prefix, 10K+ tokens with workspace rules + agent prompt) never\n\t\t\t// gets marked and every turn re-bills it at full rate. The \`tools\`\n\t\t\t// array is similarly stable across the agent loop but upstream never\n\t\t\t// caches it at all for BYOK.\n\t\t\t//\n\t\t\t// Anthropic prompt caching: writes cost 1.25x, reads cost 0.1x. Break-\n\t\t\t// even after 2 turns. Multi-turn agentic loops save ~70% on the shared\n\t\t\t// prefix. Setting cache_control is idempotent \u2014 if the converter\n\t\t\t// already marked it we leave it alone.\n\t\t\t// https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching\n\t\t\tif (system.text && system.text.length > 0 && !system.cache_control) {\n\t\t\t\tsystem.cache_control = { type: 'ephemeral' };\n\t\t\t}\n\t\t\tif (tools.length > 0) {\n\t\t\t\tconst lastTool = tools[tools.length - 1] as Anthropic.Beta.BetaToolUnion & { cache_control?: { type: 'ephemeral' } };\n\t\t\t\tif (!lastTool.cache_control) {\n\t\t\t\t\tlastTool.cache_control = { type: 'ephemeral' };\n\t\t\t\t}\n\t\t\t}\n\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n\t\t\tconst params: Anthropic.Beta.Messages.MessageCreateParamsStreaming = {\n\t\t\t\tmodel: model.id,\n\t\t\t\tmessages: convertedMessages,\n\t\t\t\tmax_tokens: model.maxOutputTokens,\n\t\t\t\tstream: true,\n\t\t\t\tsystem: [system],\n\t\t\t\ttools: tools.length > 0 ? tools : undefined,`;
+
+if (!code.includes(anchor)) {
+  console.warn("WARN: params-block anchor not found — skipping patch 24");
+  process.exit(0);
+}
+code = code.replace(anchor, replacement);
+fs.writeFileSync(f, code);
+console.log("Patched: always cache system prompt + tools for Anthropic/Vertex BYOK");
+PATCH24_EOF

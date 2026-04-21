@@ -691,7 +691,7 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation implements I
 			// 1M input-token cap. Mirrors the proven BudgetExceededError flow
 			// (wait -> apply -> re-render) but triggered proactively on
 			// estimate rather than reactively on a 400 error.
-			const __byokTier = getCompactionTier(postRenderRatio, useInlineSummarization, cacheWarm);
+			const __byokTier = getCompactionTier(postRenderRatio, useInlineSummarization, cacheWarm, this.endpoint.modelMaxPromptTokens);
 			if (__byokTier >= 3) {
 				this.logService.warn(`[AutoCompact] tier 3 — ratio ${(postRenderRatio * 100).toFixed(1)}% — blocking on compaction`);
 				if (idleOrFailed) {
