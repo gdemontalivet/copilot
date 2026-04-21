@@ -292,35 +292,3 @@ describe('GeminiNativeBYOKLMProvider', () => {
 		expect(mockHandleAPIKeyUpdate).toHaveBeenCalled();
 	});
 });
-
-describe('estimateGeminiPayloadRawTokens', () => {
-	it('sums text parts and tools as chars/4', async () => {
-		const { estimateGeminiPayloadRawTokens } = await import('../geminiNativeProvider');
-		const params: any = {
-			model: 'm',
-			contents: [
-				{ role: 'user', parts: [{ text: 'a'.repeat(40) }] },
-				{ role: 'model', parts: [{ text: 'b'.repeat(80) }] },
-			],
-			config: {
-				systemInstruction: 'c'.repeat(16),
-				tools: [{ functionDeclarations: [{ name: 'foo' }] }],
-			},
-		};
-		const total = estimateGeminiPayloadRawTokens(params);
-		// 40->10 + 80->20 (parts are JSON.stringified so roughly ~4 extra chars each ⇒ ~11 + ~21)
-		// + 16->4 system + ~tools chars/4. Assert it's at least the text contributions.
-		expect(total).toBeGreaterThanOrEqual(10 + 20 + 4);
-	});
-
-	it('falls back gracefully on empty payload', async () => {
-		const { estimateGeminiPayloadRawTokens } = await import('../geminiNativeProvider');
-		expect(estimateGeminiPayloadRawTokens({ model: 'm', contents: [] } as any)).toBe(1);
-	});
-
-	it('handles string contents', async () => {
-		const { estimateGeminiPayloadRawTokens } = await import('../geminiNativeProvider');
-		const total = estimateGeminiPayloadRawTokens({ model: 'm', contents: 'x'.repeat(20) } as any);
-		expect(total).toBe(5);
-	});
-});

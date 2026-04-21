@@ -2,7 +2,7 @@
 	"name": "copilot-chat",
 	"displayName": "Copilot Full BYOK",
 	"description": "AI chat features powered by Copilot — Full Bring Your Own Key edition",
-	"version": "0.45.1",
+	"version": "0.46.1",
 	"build": "1",
 	"internalAIKey": "1058ec22-3c95-4951-8443-f26c1f325911",
 	"completionsCoreVersion": "1.378.1799",
@@ -23,7 +23,7 @@
 	"icon": "assets/copilot.png",
 	"pricing": "Trial",
 	"engines": {
-		"vscode": "^1.116.0",
+		"vscode": "^1.118.0",
 		"npm": ">=9.0.0",
 		"node": ">=22.14.0"
 	},
@@ -3968,15 +3968,6 @@
 			{
 				"id": "advanced",
 				"properties": {
-					"github.copilot.chat.sessionSearch.cloudSync.enabled": {
-						"type": "boolean",
-						"default": false,
-						"markdownDescription": "%github.copilot.config.sessionSearch.cloudSync.enabled%",
-						"tags": [
-							"advanced",
-							"onExp"
-						]
-					},
 					"github.copilot.chat.reasoningEffortOverride": {
 						"type": [
 							"string",
@@ -6417,7 +6408,7 @@
 		"zod": "3.25.76"
 	},
 	"dependencies": {
-		"@anthropic-ai/claude-agent-sdk": "0.2.98",
+		"@anthropic-ai/claude-agent-sdk": "0.2.112",
 		"@anthropic-ai/sdk": "^0.82.0",
 		"@github/blackbird-external-ingest-utils": "^0.3.0",
 		"@github/copilot": "^1.0.28",
