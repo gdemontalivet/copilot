@@ -473,7 +473,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				? rawEffort as 'low' | 'medium' | 'high' | 'max'
 				: undefined;
 
-			// ─── BYOK CUSTOM PATCH: always cache system prompt + tools ────────────────
+			// ─── BYOK CUSTOM PATCH: always cache system prompt + tools ────────────────────────
 			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
 			// Upstream `addCacheBreakpoints` only reserves leftover cache slots for
 			// the system message after tool-result breakpoints have been allocated,
@@ -483,10 +483,18 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 			// array is similarly stable across the agent loop but upstream never
 			// caches it at all for BYOK.
 			//
+			// Anthropic enforces a hard cap of 4 cache_control breakpoints across
+			// system + tools + messages. Upstream can already place up to 4 on
+			// message content blocks, so unconditionally adding ours overflows to
+			// 5-6 and the API rejects the request with invalid_request_error.
+			// Priority: system > lastTool > recent message breakpoints. Strip
+			// message breakpoints from oldest to newest (later breakpoints subsume
+			// earlier ones anyway, so evicting the oldest costs nothing) until we
+			// fit under the cap.
+			//
 			// Anthropic prompt caching: writes cost 1.25x, reads cost 0.1x. Break-
 			// even after 2 turns. Multi-turn agentic loops save ~70% on the shared
-			// prefix. Setting cache_control is idempotent — if the converter
-			// already marked it we leave it alone.
+			// prefix.
 			// https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 			if (system.text && system.text.length > 0 && !system.cache_control) {
 				system.cache_control = { type: 'ephemeral' };
@@ -496,6 +504,35 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				if (!lastTool.cache_control) {
 					lastTool.cache_control = { type: 'ephemeral' };
 				}
+			}
+			const MAX_CACHE_BREAKPOINTS = 4;
+			type MaybeCacheBlock = { cache_control?: unknown };
+			const locateMessageBreakpoints = (): Array<{ block: MaybeCacheBlock }> => {
+				const found: Array<{ block: MaybeCacheBlock }> = [];
+				for (const msg of convertedMessages) {
+					if (!Array.isArray(msg.content)) { continue; }
+					for (const block of msg.content as MaybeCacheBlock[]) {
+						if (block && block.cache_control) {
+							found.push({ block });
+						}
+					}
+				}
+				return found;
+			};
+			const countBreakpoints = (messageBreakpoints: Array<{ block: MaybeCacheBlock }>): number => {
+				let total = messageBreakpoints.length;
+				if ((system as MaybeCacheBlock).cache_control) { total++; }
+				for (const tool of tools as MaybeCacheBlock[]) {
+					if (tool.cache_control) { total++; }
+				}
+				return total;
+			};
+			let messageBreakpoints = locateMessageBreakpoints();
+			let total = countBreakpoints(messageBreakpoints);
+			while (total > MAX_CACHE_BREAKPOINTS && messageBreakpoints.length > 0) {
+				const oldest = messageBreakpoints.shift()!;
+				delete oldest.block.cache_control;
+				total = countBreakpoints(messageBreakpoints);
 			}
 			// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────
 

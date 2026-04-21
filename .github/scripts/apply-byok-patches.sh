@@ -1655,22 +1655,38 @@ const fs = require("fs");
 const f = "src/extension/byok/vscode-node/anthropicProvider.ts";
 let code = fs.readFileSync(f, "utf8");
 
-if (code.includes("BYOK CUSTOM PATCH: always cache system prompt + tools")) {
-  console.log("BYOK always-cache prompt already present, skipping");
+// New sentinel: presence of the budget-enforcement logic distinguishes the
+// current version from the pre-budget one (which could push the total above
+// Anthropic's 4-breakpoint cap and crash the request with
+// invalid_request_error).
+const NEW_SENTINEL = "MAX_CACHE_BREAKPOINTS";
+if (code.includes(NEW_SENTINEL)) {
+  console.log("BYOK always-cache prompt (with budget enforcement) already present, skipping");
   process.exit(0);
+}
+
+// Upgrade path: an earlier revision of this patch unconditionally added
+// cache_control to system + lastTool without enforcing the 4-breakpoint
+// cap. Strip that old block out before reinstalling so the anchor below
+// matches cleanly. The regex spans the full patch header through the END
+// marker; anchored to \t\t\t to avoid matching other BYOK patch blocks.
+const oldPatchRegex = /\t{3}\/\/ \u2500{3} BYOK CUSTOM PATCH: always cache system prompt \+ tools [\s\S]*?\t{3}\/\/ \u2500{3} END BYOK CUSTOM PATCH \u2500+\n\n/;
+if (oldPatchRegex.test(code)) {
+  code = code.replace(oldPatchRegex, "");
+  console.log("Removed pre-budget Patch 24 block \u2014 will reinstall with budget enforcement");
 }
 
 const anchor = `\t\t\tconst params: Anthropic.Beta.Messages.MessageCreateParamsStreaming = {\n\t\t\t\tmodel: model.id,\n\t\t\t\tmessages: convertedMessages,\n\t\t\t\tmax_tokens: model.maxOutputTokens,\n\t\t\t\tstream: true,\n\t\t\t\tsystem: [system],\n\t\t\t\ttools: tools.length > 0 ? tools : undefined,`;
 
-const replacement = `\t\t\t// ─── BYOK CUSTOM PATCH: always cache system prompt + tools ────────────────\n\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t\t// Upstream \`addCacheBreakpoints\` only reserves leftover cache slots for\n\t\t\t// the system message after tool-result breakpoints have been allocated,\n\t\t\t// so in multi-tool-call turns the system prompt (often the largest\n\t\t\t// stable prefix, 10K+ tokens with workspace rules + agent prompt) never\n\t\t\t// gets marked and every turn re-bills it at full rate. The \`tools\`\n\t\t\t// array is similarly stable across the agent loop but upstream never\n\t\t\t// caches it at all for BYOK.\n\t\t\t//\n\t\t\t// Anthropic prompt caching: writes cost 1.25x, reads cost 0.1x. Break-\n\t\t\t// even after 2 turns. Multi-turn agentic loops save ~70% on the shared\n\t\t\t// prefix. Setting cache_control is idempotent \u2014 if the converter\n\t\t\t// already marked it we leave it alone.\n\t\t\t// https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching\n\t\t\tif (system.text && system.text.length > 0 && !system.cache_control) {\n\t\t\t\tsystem.cache_control = { type: 'ephemeral' };\n\t\t\t}\n\t\t\tif (tools.length > 0) {\n\t\t\t\tconst lastTool = tools[tools.length - 1] as Anthropic.Beta.BetaToolUnion & { cache_control?: { type: 'ephemeral' } };\n\t\t\t\tif (!lastTool.cache_control) {\n\t\t\t\t\tlastTool.cache_control = { type: 'ephemeral' };\n\t\t\t\t}\n\t\t\t}\n\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n\t\t\tconst params: Anthropic.Beta.Messages.MessageCreateParamsStreaming = {\n\t\t\t\tmodel: model.id,\n\t\t\t\tmessages: convertedMessages,\n\t\t\t\tmax_tokens: model.maxOutputTokens,\n\t\t\t\tstream: true,\n\t\t\t\tsystem: [system],\n\t\t\t\ttools: tools.length > 0 ? tools : undefined,`;
+const replacement = `\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: always cache system prompt + tools \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t\t// Upstream \`addCacheBreakpoints\` only reserves leftover cache slots for\n\t\t\t// the system message after tool-result breakpoints have been allocated,\n\t\t\t// so in multi-tool-call turns the system prompt (often the largest\n\t\t\t// stable prefix, 10K+ tokens with workspace rules + agent prompt) never\n\t\t\t// gets marked and every turn re-bills it at full rate. The \`tools\`\n\t\t\t// array is similarly stable across the agent loop but upstream never\n\t\t\t// caches it at all for BYOK.\n\t\t\t//\n\t\t\t// Anthropic enforces a hard cap of 4 cache_control breakpoints across\n\t\t\t// system + tools + messages. Upstream can already place up to 4 on\n\t\t\t// message content blocks, so unconditionally adding ours overflows to\n\t\t\t// 5-6 and the API rejects the request with invalid_request_error.\n\t\t\t// Priority: system > lastTool > recent message breakpoints. Strip\n\t\t\t// message breakpoints from oldest to newest (later breakpoints subsume\n\t\t\t// earlier ones anyway, so evicting the oldest costs nothing) until we\n\t\t\t// fit under the cap.\n\t\t\t//\n\t\t\t// Anthropic prompt caching: writes cost 1.25x, reads cost 0.1x. Break-\n\t\t\t// even after 2 turns. Multi-turn agentic loops save ~70% on the shared\n\t\t\t// prefix.\n\t\t\t// https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching\n\t\t\tif (system.text && system.text.length > 0 && !system.cache_control) {\n\t\t\t\tsystem.cache_control = { type: 'ephemeral' };\n\t\t\t}\n\t\t\tif (tools.length > 0) {\n\t\t\t\tconst lastTool = tools[tools.length - 1] as Anthropic.Beta.BetaToolUnion & { cache_control?: { type: 'ephemeral' } };\n\t\t\t\tif (!lastTool.cache_control) {\n\t\t\t\t\tlastTool.cache_control = { type: 'ephemeral' };\n\t\t\t\t}\n\t\t\t}\n\t\t\tconst MAX_CACHE_BREAKPOINTS = 4;\n\t\t\ttype MaybeCacheBlock = { cache_control?: unknown };\n\t\t\tconst locateMessageBreakpoints = (): Array<{ block: MaybeCacheBlock }> => {\n\t\t\t\tconst found: Array<{ block: MaybeCacheBlock }> = [];\n\t\t\t\tfor (const msg of convertedMessages) {\n\t\t\t\t\tif (!Array.isArray(msg.content)) { continue; }\n\t\t\t\t\tfor (const block of msg.content as MaybeCacheBlock[]) {\n\t\t\t\t\t\tif (block && block.cache_control) {\n\t\t\t\t\t\t\tfound.push({ block });\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\treturn found;\n\t\t\t};\n\t\t\tconst countBreakpoints = (messageBreakpoints: Array<{ block: MaybeCacheBlock }>): number => {\n\t\t\t\tlet total = messageBreakpoints.length;\n\t\t\t\tif ((system as MaybeCacheBlock).cache_control) { total++; }\n\t\t\t\tfor (const tool of tools as MaybeCacheBlock[]) {\n\t\t\t\t\tif (tool.cache_control) { total++; }\n\t\t\t\t}\n\t\t\t\treturn total;\n\t\t\t};\n\t\t\tlet messageBreakpoints = locateMessageBreakpoints();\n\t\t\tlet total = countBreakpoints(messageBreakpoints);\n\t\t\twhile (total > MAX_CACHE_BREAKPOINTS && messageBreakpoints.length > 0) {\n\t\t\t\tconst oldest = messageBreakpoints.shift()!;\n\t\t\t\tdelete oldest.block.cache_control;\n\t\t\t\ttotal = countBreakpoints(messageBreakpoints);\n\t\t\t}\n\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n\t\t\tconst params: Anthropic.Beta.Messages.MessageCreateParamsStreaming = {\n\t\t\t\tmodel: model.id,\n\t\t\t\tmessages: convertedMessages,\n\t\t\t\tmax_tokens: model.maxOutputTokens,\n\t\t\t\tstream: true,\n\t\t\t\tsystem: [system],\n\t\t\t\ttools: tools.length > 0 ? tools : undefined,`;
 
 if (!code.includes(anchor)) {
-  console.warn("WARN: params-block anchor not found — skipping patch 24");
+  console.warn("WARN: params-block anchor not found \u2014 skipping patch 24");
   process.exit(0);
 }
 code = code.replace(anchor, replacement);
 fs.writeFileSync(f, code);
-console.log("Patched: always cache system prompt + tools for Anthropic/Vertex BYOK");
+console.log("Patched: always cache system prompt + tools for Anthropic/Vertex BYOK (with 4-breakpoint budget)");
 PATCH24_EOF
 
 # Patch 25: Anthropic retry + readable-error resilience.
