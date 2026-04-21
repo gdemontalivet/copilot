@@ -5,7 +5,8 @@
 
 import { MessageParam, TextBlockParam } from '@anthropic-ai/sdk/resources';
 import { expect, suite, test } from 'vitest';
-import { anthropicMessagesToRawMessages } from '../anthropicMessageConverter';
+import { anthropicMessagesToRawMessages, apiMessageToAnthropicMessage, sanitizeAnthropicToolId } from '../anthropicMessageConverter';
+import { LanguageModelChatMessage, LanguageModelToolCallPart, LanguageModelToolResultPart } from '../../../../vscodeTypes';
 
 suite('anthropicMessagesToRawMessages', function () {
 
@@ -218,5 +219,73 @@ suite('anthropicMessagesToRawMessages', function () {
 		const result = anthropicMessagesToRawMessages(messages, system);
 
 		expect(result).toMatchSnapshot();
+	});
+});
+
+suite('sanitizeAnthropicToolId', function () {
+
+	test('passes already-valid ids through unchanged', function () {
+		expect(sanitizeAnthropicToolId('toolu_01ABC')).toBe('toolu_01ABC');
+		expect(sanitizeAnthropicToolId('call_abc-123_XYZ')).toBe('call_abc-123_XYZ');
+		expect(sanitizeAnthropicToolId('a')).toBe('a');
+	});
+
+	test('rewrites gemini-style dotted ids deterministically', function () {
+		const a = sanitizeAnthropicToolId('function_call_abc.123.456');
+		const b = sanitizeAnthropicToolId('function_call_abc.123.456');
+		expect(a).toBe(b);
+		expect(a).toMatch(/^[a-zA-Z0-9_-]+$/);
+		expect(a).not.toBe('function_call_abc.123.456');
+	});
+
+	test('distinguishes ids that differ only in invalid chars', function () {
+		// Two Gemini ids that would otherwise collapse to the same underscore
+		// form ('a_b') must remain distinguishable after sanitization.
+		const a = sanitizeAnthropicToolId('a.b');
+		const b = sanitizeAnthropicToolId('a/b');
+		const c = sanitizeAnthropicToolId('a_b');
+		expect(a).not.toBe(b);
+		expect(a).not.toBe(c);
+		expect(b).not.toBe(c);
+		expect(a).toMatch(/^[a-zA-Z0-9_-]+$/);
+		expect(b).toMatch(/^[a-zA-Z0-9_-]+$/);
+	});
+
+	test('handles ids that are entirely invalid characters', function () {
+		const out = sanitizeAnthropicToolId('.../');
+		expect(out).toMatch(/^[a-zA-Z0-9_-]+$/);
+		expect(out.length).toBeGreaterThan(0);
+	});
+});
+
+suite('apiMessageToAnthropicMessage - tool id sanitization', function () {
+
+	test('sanitizes tool_use and matching tool_result consistently', function () {
+		const geminiId = 'func_call.abc.123';
+		const assistantMessage = LanguageModelChatMessage.Assistant([
+			new LanguageModelToolCallPart(geminiId, 'my_tool', { foo: 'bar' }),
+		]);
+		const userMessage = LanguageModelChatMessage.User([
+			new LanguageModelToolResultPart(geminiId, []),
+		]);
+
+		const { messages } = apiMessageToAnthropicMessage([assistantMessage, userMessage]);
+
+		// Find the tool_use and tool_result blocks.
+		let toolUseId: string | undefined;
+		let toolResultId: string | undefined;
+		for (const m of messages) {
+			if (!Array.isArray(m.content)) { continue; }
+			for (const block of m.content) {
+				if (block.type === 'tool_use') { toolUseId = block.id; }
+				if (block.type === 'tool_result') { toolResultId = block.tool_use_id; }
+			}
+		}
+
+		expect(toolUseId).toBeDefined();
+		expect(toolResultId).toBeDefined();
+		expect(toolUseId).toBe(toolResultId);
+		expect(toolUseId).toMatch(/^[a-zA-Z0-9_-]+$/);
+		expect(toolUseId).not.toBe(geminiId);
 	});
 });

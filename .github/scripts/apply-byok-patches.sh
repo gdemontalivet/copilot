@@ -1044,3 +1044,100 @@ code = code.replace(original, replacement);
 fs.writeFileSync(f, code);
 console.log("Patched: VirtualToolGrouper copilot-fast resilience");
 PATCH16_EOF
+
+# Patch 17: Sanitise cross-provider tool_use ids in anthropicMessageConverter.ts.
+#
+# Anthropic's API validates `tool_use.id` and `tool_result.tool_use_id` against
+# `^[a-zA-Z0-9_-]+$`. Other providers (notably Gemini) emit call ids that can
+# contain `.`, `/`, `:`, etc. When the user switches mid-conversation from
+# Gemini to Claude, the historical tool-call ids flow through unchanged and
+# Anthropic rejects the request with:
+#
+#   400 invalid_request_error: messages.N.content.M.tool_use.id:
+#   String should match pattern '^[a-zA-Z0-9_-]+$'
+#
+# Fix: export a deterministic `sanitizeAnthropicToolId` helper (valid-through,
+# invalid chars → `_` plus an FNV-1a hash suffix for collision resistance) and
+# wrap the two passthrough sites (tool_use block + tool_result block).
+node << 'PATCH17_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/common/anthropicMessageConverter.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("export function sanitizeAnthropicToolId")) {
+  console.log("sanitizeAnthropicToolId already present, skipping");
+  process.exit(0);
+}
+
+// Step 1: inject the helper just before `function apiContentToAnthropicContent`.
+const fnAnchor = "function apiContentToAnthropicContent(";
+if (!code.includes(fnAnchor)) {
+  console.warn("WARN: apiContentToAnthropicContent anchor not found — skipping patch 17");
+  process.exit(0);
+}
+
+const helper = `/**
+ * Anthropic's API validates \`tool_use.id\` and \`tool_result.tool_use_id\` against
+ * the pattern \`^[a-zA-Z0-9_-]+$\`. Other providers (notably Gemini) emit call IDs
+ * that can contain \`.\`, \`/\`, \`:\`, etc., so when a user switches mid-conversation
+ * from Gemini to Claude the historical tool-call IDs blow up the request with:
+ *
+ *   400 invalid_request_error: messages.N.content.M.tool_use.id:
+ *   String should match pattern '^[a-zA-Z0-9_-]+$'
+ *
+ * This helper deterministically rewrites any call ID to satisfy Anthropic's
+ * pattern. Rules:
+ *   - Already-valid IDs pass through unchanged.
+ *   - Invalid characters are replaced with \`_\`; if any character was replaced
+ *     (or the result becomes empty), a short FNV-1a hash of the original is
+ *     appended so two different offending IDs don't collapse to the same
+ *     sanitized string in the same conversation.
+ *
+ * Must be deterministic and idempotent: the assistant's \`tool_use.id\` and the
+ * user's subsequent \`tool_result.tool_use_id\` go through this helper
+ * independently and MUST produce the same output for the same input.
+ */
+export function sanitizeAnthropicToolId(id: string): string {
+\tif (/^[a-zA-Z0-9_-]+$/.test(id)) {
+\t\treturn id;
+\t}
+\tconst replaced = id.replace(/[^a-zA-Z0-9_-]/g, '_');
+\tlet h = 2166136261;
+\tfor (let i = 0; i < id.length; i++) {
+\t\th ^= id.charCodeAt(i);
+\t\th = Math.imul(h, 16777619);
+\t}
+\tconst suffix = (h >>> 0).toString(16).padStart(8, '0');
+\tconst base = replaced.length > 0 ? replaced : 'toolcall';
+\treturn \`\${base}_\${suffix}\`;
+}
+
+`;
+
+code = code.replace(fnAnchor, helper + fnAnchor);
+
+// Step 2: wrap the tool_use id passthrough.
+const toolUseAnchor = "type: 'tool_use',\n\t\t\t\tid: part.callId,";
+if (!code.includes(toolUseAnchor)) {
+  console.warn("WARN: tool_use id anchor not found — skipping patch 17 (tool_use leg)");
+} else {
+  code = code.replace(
+    toolUseAnchor,
+    "type: 'tool_use',\n\t\t\t\tid: sanitizeAnthropicToolId(part.callId),"
+  );
+}
+
+// Step 3: wrap the tool_result tool_use_id passthrough.
+const toolResultAnchor = "type: 'tool_result',\n\t\t\t\ttool_use_id: part.callId,";
+if (!code.includes(toolResultAnchor)) {
+  console.warn("WARN: tool_result tool_use_id anchor not found — skipping patch 17 (tool_result leg)");
+} else {
+  code = code.replace(
+    toolResultAnchor,
+    "type: 'tool_result',\n\t\t\t\ttool_use_id: sanitizeAnthropicToolId(part.callId),"
+  );
+}
+
+fs.writeFileSync(f, code);
+console.log("Patched: sanitizeAnthropicToolId (cross-provider tool id fix)");
+PATCH17_EOF

@@ -9,6 +9,42 @@ import { CustomDataPartMimeTypes } from '../../../platform/endpoint/common/endpo
 import { isDefined } from '../../../util/vs/base/common/types';
 import { LanguageModelChatMessageRole, LanguageModelDataPart, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, LanguageModelToolResultPart, LanguageModelToolResultPart2 } from '../../../vscodeTypes';
 
+/**
+ * Anthropic's API validates `tool_use.id` and `tool_result.tool_use_id` against
+ * the pattern `^[a-zA-Z0-9_-]+$`. Other providers (notably Gemini) emit call IDs
+ * that can contain `.`, `/`, `:`, etc., so when a user switches mid-conversation
+ * from Gemini to Claude the historical tool-call IDs blow up the request with:
+ *
+ *   400 invalid_request_error: messages.N.content.M.tool_use.id:
+ *   String should match pattern '^[a-zA-Z0-9_-]+$'
+ *
+ * This helper deterministically rewrites any call ID to satisfy Anthropic's
+ * pattern. Rules:
+ *   - Already-valid IDs pass through unchanged.
+ *   - Invalid characters are replaced with `_`; if any character was replaced
+ *     (or the result becomes empty), a short FNV-1a hash of the original is
+ *     appended so two different offending IDs don't collapse to the same
+ *     sanitized string in the same conversation.
+ *
+ * Must be deterministic and idempotent: the assistant's `tool_use.id` and the
+ * user's subsequent `tool_result.tool_use_id` go through this helper
+ * independently and MUST produce the same output for the same input.
+ */
+export function sanitizeAnthropicToolId(id: string): string {
+	if (/^[a-zA-Z0-9_-]+$/.test(id)) {
+		return id;
+	}
+	const replaced = id.replace(/[^a-zA-Z0-9_-]/g, '_');
+	let h = 2166136261;
+	for (let i = 0; i < id.length; i++) {
+		h ^= id.charCodeAt(i);
+		h = Math.imul(h, 16777619);
+	}
+	const suffix = (h >>> 0).toString(16).padStart(8, '0');
+	const base = replaced.length > 0 ? replaced : 'toolcall';
+	return `${base}_${suffix}`;
+}
+
 function apiContentToAnthropicContent(content: (LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelToolCallPart | LanguageModelDataPart | LanguageModelThinkingPart)[]): ContentBlockParam[] {
 	const convertedContent: ContentBlockParam[] = [];
 
@@ -32,7 +68,7 @@ function apiContentToAnthropicContent(content: (LanguageModelTextPart | Language
 		} else if (part instanceof LanguageModelToolCallPart) {
 			convertedContent.push({
 				type: 'tool_use',
-				id: part.callId,
+				id: sanitizeAnthropicToolId(part.callId),
 				input: part.input,
 				name: part.name,
 			});
@@ -62,7 +98,7 @@ function apiContentToAnthropicContent(content: (LanguageModelTextPart | Language
 		} else if (part instanceof LanguageModelToolResultPart || part instanceof LanguageModelToolResultPart2) {
 			convertedContent.push({
 				type: 'tool_result',
-				tool_use_id: part.callId,
+				tool_use_id: sanitizeAnthropicToolId(part.callId),
 				content: part.content.map((p): TextBlockParam | ImageBlockParam | undefined => {
 					if (p instanceof LanguageModelTextPart) {
 						return { type: 'text', text: p.value };
