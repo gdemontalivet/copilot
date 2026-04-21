@@ -43,26 +43,48 @@ export interface VertexAnthropicProviderConfig extends LanguageModelChatConfigur
 // Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
 // Upstream falls back to 100 000 when a Vertex model config omits
 // `maxInputTokens` and hard-codes `vision: false` for every Claude model,
-// which breaks two things:
-//   1. `maxInputTokens=100000` is half modern Claude's real 200K context;
-//      VS Code's LM API treats it as a hard cap and rejects prompts past
-//      100K before they ever reach Vertex.
+// which breaks three things:
+//   1. `maxInputTokens=100000` is a fraction of modern Claude's real context
+//      (200K everywhere, 1M on Vertex for Opus 4.7 / Opus 4.6 / Sonnet 4.6);
+//      VS Code's LM API treats it as a hard cap, and the chat UI's context
+//      circle indicator caps at this value — so the ring fills to 100% at
+//      ~10% actual utilisation, auto-compaction fires on time but the UI
+//      says "full".
 //   2. `vision: false` surfaces to the user as
 //      "vision is not supported by the current model or is disabled by
 //      your organization" — even though every Claude model except
 //      Claude 3.5 Haiku supports image input natively.
-// We provide a small static lookup so users can drop a model ID into
-// `chatLanguageModels.json` without manually recalculating limits or
-// flipping capability flags every time Anthropic ships a new release.
+//   3. No per-model output cap, so 32K-output-capable models are silently
+//      limited to the upstream 8K default.
+// The per-family capability table reflects what Anthropic publishes at
+// https://docs.anthropic.com/en/api/claude-on-vertex-ai and what Google
+// documents at
+// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude.
 const DEFAULT_VERTEX_ANTHROPIC_MAX_INPUT_TOKENS = 200_000;
 const DEFAULT_VERTEX_ANTHROPIC_MAX_OUTPUT_TOKENS = 8_192;
 interface KnownVertexAnthropicModel { maxInputTokens: number; maxOutputTokens: number; vision: boolean }
 const KNOWN_VERTEX_ANTHROPIC_MODELS: Record<string, KnownVertexAnthropicModel> = {
-	'claude-opus-4-6': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true },
+	// ─── 1M-token context window on Vertex AI (default, no beta header) ───────
+	// Per https://docs.anthropic.com/en/api/claude-on-vertex-ai and
+	// https://docs.cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude,
+	// Claude Opus 4.7, Opus 4.6, and Sonnet 4.6 have a native 1M context on
+	// Vertex — twice what the direct Anthropic API offers for the same models.
+	// Leaving these at 200K silently caps every prompt at 20% of the real
+	// window and triggers auto-compaction 5x too early.
+	'claude-opus-4-7': { maxInputTokens: 1_000_000, maxOutputTokens: 32_000, vision: true },
+	'claude-opus-4-6': { maxInputTokens: 1_000_000, maxOutputTokens: 32_000, vision: true },
+	'claude-sonnet-4-6': { maxInputTokens: 1_000_000, maxOutputTokens: 64_000, vision: true },
+	// ─── 200K context window on Vertex AI ─────────────────────────────────────
+	// Claude Sonnet 4.5 and Sonnet 4 can go to 1M on Vertex via the
+	// `context-1m-2025-08-07` beta header, but the default is 200K. Opting
+	// users into the beta silently would change billing so we stay on the
+	// published default.
 	'claude-opus-4-5': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true },
+	'claude-opus-4-1': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true },
 	'claude-opus-4': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true },
 	'claude-sonnet-4-5': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true },
 	'claude-sonnet-4': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true },
+	'claude-haiku-4-5': { maxInputTokens: 200_000, maxOutputTokens: 16_000, vision: true },
 	'claude-3-7-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true },
 	'claude-3-5-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 8_192, vision: true },
 	// Claude 3.5 Haiku is the one modern Claude that does NOT accept images.
