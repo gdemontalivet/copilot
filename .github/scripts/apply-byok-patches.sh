@@ -1672,3 +1672,241 @@ code = code.replace(anchor, replacement);
 fs.writeFileSync(f, code);
 console.log("Patched: always cache system prompt + tools for Anthropic/Vertex BYOK");
 PATCH24_EOF
+
+# Patch 25: Anthropic retry + readable-error resilience.
+#
+# Without this, overloaded_error (529), rate limits (429), transient 5xx,
+# and network blips all bubble up as raw JSON blobs into the chat UI:
+#
+#   Reason: {"type":"error","error":{"type":"overloaded_error",...},"request_id":"..."}
+#
+# That's both ugly and actionable-looking when it shouldn't be — the user
+# can't do anything about an overloaded Anthropic/Vertex capacity spike.
+# Mirrors the Gemini resilience work (Patch 8): 4 retries with exponential
+# backoff (5s → 10s → 20s → 40s, 60s cap), only retrying when no tokens
+# have been emitted yet to avoid duplicated output. On final failure the
+# user sees a clean message ("Overloaded (overloaded_error)") instead of
+# the raw request/response envelope.
+#
+# Works for both the direct Anthropic provider and the Vertex-routed
+# subclass (which has no failover of its own and relies entirely on
+# in-provider retry for resilience).
+node << 'PATCH25_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/anthropicProvider.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: readable Anthropic errors")) {
+  console.log("BYOK anthropic retry/readable-error already present, skipping");
+  process.exit(0);
+}
+
+// --- 1. Insert helper functions before the class declaration.
+const helperAnchor = "export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {";
+const helperBlock = `// \u2500\u2500\u2500 BYOK CUSTOM PATCH: readable Anthropic errors \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Anthropic (and Vertex-routed Anthropic) errors arrive with \`.message\` set
+// to the raw JSON body, e.g.
+//   \`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"},"request_id":"..."}\`
+// Surfacing that directly in chat produces the illegible "Reason: {...}:
+// Error: {...}" format users see today. Extract the nested
+// \`error.message\` + \`error.type\` so the chat UI shows "Overloaded
+// (overloaded_error)" instead of the JSON blob.
+export function extractReadableAnthropicMessage(err: unknown): string {
+\tconst raw = err instanceof Error ? err.message : typeof err === 'string' ? err : undefined;
+\tif (raw) {
+\t\tconst jsonStart = raw.indexOf('{');
+\t\tif (jsonStart >= 0) {
+\t\t\tconst jsonSlice = raw.slice(jsonStart);
+\t\t\ttry {
+\t\t\t\tconst parsed = JSON.parse(jsonSlice);
+\t\t\t\tconst innerMsg = parsed?.error?.message ?? parsed?.message;
+\t\t\t\tconst innerType = parsed?.error?.type ?? parsed?.type;
+\t\t\t\tif (innerMsg) {
+\t\t\t\t\treturn innerType && typeof innerType === 'string' && innerType !== 'error'
+\t\t\t\t\t\t? \`\${innerMsg} (\${innerType})\`
+\t\t\t\t\t\t: String(innerMsg);
+\t\t\t\t}
+\t\t\t} catch {
+\t\t\t\t// Not JSON, fall through.
+\t\t\t}
+\t\t}
+\t\t// Drop anything after the first newline \u2014 Anthropic sometimes appends a
+\t\t// full stack trace, which is noise for the chat UI.
+\t\tconst firstLine = raw.split('\\n', 1)[0];
+\t\tif (firstLine && firstLine.length > 0) {
+\t\t\treturn firstLine;
+\t\t}
+\t}
+\treturn toErrorMessage(err, false);
+}
+// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+// \u2500\u2500\u2500 BYOK CUSTOM PATCH: Anthropic retry resilience \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Classify Anthropic SDK / transport errors as retryable. Returns a label
+// used in progress messages, or null if the error is terminal.
+//
+// Anthropic status codes we treat as retryable:
+//   429 \u2014 rate limit / TPM throttle
+//   502 \u2014 bad gateway (transient upstream glitch)
+//   503 \u2014 service unavailable
+//   504 \u2014 gateway timeout
+//   529 \u2014 "Overloaded" (Anthropic-specific capacity signal)
+//   other 5xx \u2014 general server error
+// Plus any Anthropic.APIConnectionError / APIConnectionTimeoutError and
+// node-level transient codes (ECONNRESET, ETIMEDOUT, UND_ERR_SOCKET, ...).
+//
+// We do NOT retry 400/401/403/404/422 \u2014 those are request-level problems
+// that won't resolve with another attempt.
+export function classifyRetryableAnthropicError(err: unknown): 'overloaded' | 'rate-limit' | 'unavailable' | 'server-error' | 'network' | null {
+\tif (err === undefined || err === null) { return null; }
+
+\tif (err instanceof Anthropic.APIConnectionTimeoutError || err instanceof Anthropic.APIConnectionError) {
+\t\treturn 'network';
+\t}
+\tif (err instanceof Anthropic.RateLimitError) { return 'rate-limit'; }
+\tif (err instanceof Anthropic.InternalServerError) { return 'server-error'; }
+\tif (err instanceof Anthropic.APIError) {
+\t\tconst status = (err as { status?: number }).status ?? 0;
+\t\tif (status === 529) { return 'overloaded'; }
+\t\tif (status === 429) { return 'rate-limit'; }
+\t\tif (status === 502 || status === 503 || status === 504) { return 'unavailable'; }
+\t\tif (status >= 500) { return 'server-error'; }
+\t\treturn null;
+\t}
+
+\t// Non-SDK errors (VertexAnthropic's custom fetch or Node transport errors).
+\tconst e = err as { code?: string; cause?: { code?: string }; message?: string; status?: number };
+\tconst code = typeof e.code === 'string' ? e.code : (typeof e.cause?.code === 'string' ? e.cause.code : undefined);
+\tconst transientCodes = new Set(['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
+\tif (code && transientCodes.has(code)) { return 'network'; }
+
+\tconst msg = typeof e.message === 'string' ? e.message.toLowerCase() : '';
+\t// Match the common overloaded_error payload inside err.message.
+\tif (msg.includes('overloaded_error') || msg.includes('"overloaded"')) { return 'overloaded'; }
+\tif (typeof e.status === 'number') {
+\t\tif (e.status === 529) { return 'overloaded'; }
+\t\tif (e.status === 429) { return 'rate-limit'; }
+\t\tif (e.status === 502 || e.status === 503 || e.status === 504) { return 'unavailable'; }
+\t\tif (e.status >= 500) { return 'server-error'; }
+\t}
+\tif (/fetch failed|network error|timed? ?out|socket hang up/.test(msg)) { return 'network'; }
+\treturn null;
+}
+// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {`;
+
+if (!code.includes(helperAnchor)) {
+  console.warn("WARN: class-declaration anchor not found \u2014 skipping patch 25 (helpers)");
+  process.exit(0);
+}
+code = code.replace(helperAnchor, helperBlock);
+
+// --- 2. Patch the _makeRequest signature to accept retryCount and add MAX_RETRIES.
+const sigAnchor = `\tprivate async _makeRequest(anthropicClient: Anthropic, progress: RecordedProgress<LMResponsePart>, params: Anthropic.Beta.Messages.MessageCreateParamsStreaming, betas: string[], token: CancellationToken, issuedTime: number): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined; contextManagement: ContextManagementResponse | undefined }> {
+\t\tconst start = Date.now();
+\t\tlet ttft: number | undefined;
+\t\tlet ttfte: number | undefined;`;
+const sigReplacement = `\tprivate async _makeRequest(anthropicClient: Anthropic, progress: RecordedProgress<LMResponsePart>, params: Anthropic.Beta.Messages.MessageCreateParamsStreaming, betas: string[], token: CancellationToken, issuedTime: number, retryCount = 0): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined; contextManagement: ContextManagementResponse | undefined }> {
+\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: retry + readable-error constants \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+\t\t// Budget: 5s, 10s, 20s, 40s \u2192 75s cumulative worst case. Matches the
+\t\t// Gemini resilience patch (Patch 8) but capped tighter since
+\t\t// (a) Anthropic has a real failover target (Vertex) for non-Vertex
+\t\t//     primaries, so burning a full Gemini-style 6-retry budget here
+\t\t//     delays the failover unnecessarily, and
+\t\t// (b) VertexAnthropic primaries (the common BYOK case) have no
+\t\t//     failover \u2014 4 retries is enough to smooth out a single
+\t\t//     overloaded_error blip without making the chat UI feel hung.
+\t\tconst MAX_RETRIES = 4;
+\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+\t\tconst start = Date.now();
+\t\tlet ttft: number | undefined;
+\t\tlet ttfte: number | undefined;`;
+
+if (!code.includes(sigAnchor)) {
+  console.warn("WARN: _makeRequest signature anchor not found \u2014 skipping patch 25 (signature)");
+  process.exit(0);
+}
+code = code.replace(sigAnchor, sigReplacement);
+
+// --- 3. Open the try block right before `const stream = ...`. We use a
+//        short, unique anchor to avoid relying on the exact dash count in
+//        the preceding "END BYOK CUSTOM PATCH" marker (which has varied).
+const tryStartAnchor = `\t\tconst stream = await anthropicClient.beta.messages.create({
+\t\t\t...params,
+\t\t\t...(betas.length > 0 && { betas })
+\t\t});`;
+const tryStartReplacement = `\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: retry + readable-error wrapping \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+\t\t// Wrap the stream create + consume in try/catch so overloaded_error /
+\t\t// rate limits / transient 5xx recover transparently instead of dumping
+\t\t// a raw JSON blob into chat. Only retry when \`ttft === undefined\` \u2014
+\t\t// once we've started emitting tokens, retrying would produce
+\t\t// duplicated output.
+\t\ttry {
+\t\tconst stream = await anthropicClient.beta.messages.create({
+\t\t\t...params,
+\t\t\t...(betas.length > 0 && { betas })
+\t\t});`;
+
+// Count occurrences to ensure the anchor is unique.
+const tryStartMatches = code.split(tryStartAnchor).length - 1;
+if (tryStartMatches !== 1) {
+  console.warn("WARN: stream-create anchor matched " + tryStartMatches + " times (expected 1) \u2014 skipping patch 25 (try-start)");
+  process.exit(0);
+}
+code = code.replace(tryStartAnchor, tryStartReplacement);
+
+// --- 4. Close the try and add catch before the final return of the method.
+//        Anchor on the final return + class close to avoid collisions with
+//        the other returns in the file (e.g. provideTokenCount).
+const tryEndAnchor = `\t\treturn { ttft, ttfte, usage, contextManagement: contextManagementResponse };
+\t}
+}`;
+const tryEndReplacement = `\t\treturn { ttft, ttfte, usage, contextManagement: contextManagementResponse };
+\t\t} catch (error) {
+\t\t\tif ((error as { name?: string })?.name === 'AbortError' || token.isCancellationRequested) {
+\t\t\t\tthrow error;
+\t\t\t}
+\t\t\tconst retryKind = classifyRetryableAnthropicError(error);
+\t\t\t// Only retry when no tokens have been emitted yet. Mid-stream
+\t\t\t// failures on the same request can't be safely retried without
+\t\t\t// duplicating output.
+\t\t\tif (retryKind && retryCount < MAX_RETRIES && ttft === undefined) {
+\t\t\t\tconst delay = Math.min(5000 * Math.pow(2, retryCount), 60_000);
+\t\t\t\tconst label = retryKind === 'overloaded'
+\t\t\t\t\t? '[Overloaded] Anthropic is busy'
+\t\t\t\t\t: retryKind === 'rate-limit'
+\t\t\t\t\t\t? '[Rate limit] 429'
+\t\t\t\t\t\t: retryKind === 'unavailable'
+\t\t\t\t\t\t\t? '[Service unavailable]'
+\t\t\t\t\t\t\t: retryKind === 'server-error'
+\t\t\t\t\t\t\t\t? '[Server error]'
+\t\t\t\t\t\t\t\t: '[Network error]';
+\t\t\t\tconst providerTag = (this.constructor as typeof AnthropicLMProvider).providerName;
+\t\t\t\tthis._logService.warn(\`\${providerTag} \${retryKind} error, retrying in \${delay}ms (\${retryCount + 1}/\${MAX_RETRIES}): \${extractReadableAnthropicMessage(error)}\`);
+\t\t\t\tprogress.report(new LanguageModelThinkingPart(\`\${label} \u2014 retry \${retryCount + 1}/\${MAX_RETRIES}: waiting ~\${Math.ceil(delay / 1000)}s...\\n\`));
+\t\t\t\tawait new Promise(resolve => setTimeout(resolve, delay));
+\t\t\t\tif (token.isCancellationRequested) {
+\t\t\t\t\tthrow error;
+\t\t\t\t}
+\t\t\t\treturn this._makeRequest(anthropicClient, progress, params, betas, token, issuedTime, retryCount + 1);
+\t\t\t}
+\t\t\tthis._logService.error(\`\${(this.constructor as typeof AnthropicLMProvider).providerName} streaming error: \${toErrorMessage(error, true)}\`);
+\t\t\tthrow new Error(extractReadableAnthropicMessage(error), { cause: error });
+\t\t}
+\t}
+}`;
+
+if (!code.includes(tryEndAnchor)) {
+  console.warn("WARN: final-return anchor not found \u2014 skipping patch 25 (try-end)");
+  process.exit(0);
+}
+code = code.replace(tryEndAnchor, tryEndReplacement);
+
+fs.writeFileSync(f, code);
+console.log("Patched: Anthropic retry + readable-error resilience");
+PATCH25_EOF
