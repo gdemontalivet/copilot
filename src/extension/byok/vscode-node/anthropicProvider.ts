@@ -506,17 +506,26 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				}
 			}
 			const MAX_CACHE_BREAKPOINTS = 4;
-			type MaybeCacheBlock = { cache_control?: unknown };
+			type MaybeCacheBlock = { cache_control?: unknown; content?: unknown };
+			// Anthropic counts every cache_control occurrence in the request,
+			// including on nested text blocks inside tool_result.content[] (the
+			// converter emits those when the upstream `addCacheBreakpoints`
+			// pass fires between two tool_result parts — see
+			// anthropicMessageConverter.ts line ~107). A flat walk over
+			// `msg.content` misses those and we'd overshoot the 4-slot cap.
+			// Enabling MCP makes this much easier to hit because more tools
+			// mean more tool_result messages → more nested breakpoints.
 			const locateMessageBreakpoints = (): Array<{ block: MaybeCacheBlock }> => {
 				const found: Array<{ block: MaybeCacheBlock }> = [];
-				for (const msg of convertedMessages) {
-					if (!Array.isArray(msg.content)) { continue; }
-					for (const block of msg.content as MaybeCacheBlock[]) {
-						if (block && block.cache_control) {
-							found.push({ block });
-						}
+				const walk = (blocks: unknown): void => {
+					if (!Array.isArray(blocks)) { return; }
+					for (const b of blocks as MaybeCacheBlock[]) {
+						if (!b) { continue; }
+						if (b.cache_control) { found.push({ block: b }); }
+						if (Array.isArray(b.content)) { walk(b.content); }
 					}
-				}
+				};
+				for (const msg of convertedMessages) { walk(msg.content); }
 				return found;
 			};
 			const countBreakpoints = (messageBreakpoints: Array<{ block: MaybeCacheBlock }>): number => {
