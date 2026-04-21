@@ -113,7 +113,7 @@ When making a custom change that touches upstream files:
 
 1. **Patch 1** — Fake token bypass in `copilotTokenManager.ts`
 2. **Patch 2** — `getPrimaryType` for Gemini union types in `geminiFunctionDeclarationConverter.ts`
-3. **Patch 3** — Rename extension + bump version in `package.json`
+3. **Patch 3** — Rename extension + bump version + clamp `engines.vscode` to `^1.116.0` in `package.json`
 4. **Patch 4** — Tiered auto-compaction helpers in `backgroundSummarizer.ts`
 5. **Patch 5** — Fake-token bypass + 1-min backoff in `modelMetadataFetcher.ts`
 6. **Patch 6** — Tier-3 synchronous compaction in `agentIntent.ts`
@@ -121,3 +121,41 @@ When making a custom change that touches upstream files:
 8. **Patch 8** — Gemini retry resilience in `geminiNativeProvider.ts` (6 retries with exponential backoff up to 60s on 429/502/503/504 + transient network errors, plus a 120s connect timeout). Depends on Patch 7 having run first — uses its sentinel as an anchor.
 
 When you add a new patch, bump the number and add an entry here.
+
+## Known Gotchas (recurring upstream regressions)
+
+These are upstream behaviors that keep silently re-breaking the fork across
+nightly syncs. Each one is covered by a patch above — if the patch stops
+working, audit this list before writing a new patch.
+
+### `engines.vscode` bump
+
+Upstream tracks VS Code Insiders and regularly bumps `package.json` →
+`engines.vscode` (e.g. `^1.118.0`, `^1.119.0`). If this ships to the fork
+without being clamped, installing the `.vsix` on VS Code Stable fails with:
+
+> Error: Unable to install extension 'github.copilot-chat' as it is not
+> compatible with VS Code '1.116.0'.
+
+**Fix:** Covered by **Patch 3**, which forces `engines.vscode = "^1.116.0"`
+on every sync. If you intentionally want to bump the floor (e.g. because you
+want to use a new `vscode` API), update Patch 3 — never edit `package.json`
+directly, the nightly sync will undo it.
+
+### Gemini SDK error ergonomics
+
+The `@google/genai` SDK throws `ApiError` whose `.message` is the raw HTTP
+JSON body. It also has no built-in retries for 429/503. Without Patches 7+8
+applied, chat UI shows `Reason: {"error":{"code":503,...}}` and fails
+immediately on transient 503s.
+
+**Fix:** Patches 7 and 8 in `geminiNativeProvider.ts`. Patch 8 depends on
+Patch 7 — if you rewrite Patch 7, re-check Patch 8's anchors.
+
+### Fake token 401 spam
+
+When running in fully offline BYOK mode the fake Copilot token 401s against
+`api.githubcopilot.com`, causing log spam and retry hot-loops in
+`modelMetadataFetcher.ts` and friends.
+
+**Fix:** Patches 1 and 5 add short-circuits for `copilotToken === 'fake-token'`.

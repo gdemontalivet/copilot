@@ -95,7 +95,10 @@ fs.writeFileSync(f, code);
 console.log("Patched: getPrimaryType");
 PATCH2_EOF
 
-# Patch 3: Rename extension and bump version
+# Patch 3: Rename extension, bump version, clamp VS Code engine
+# engines.vscode: upstream bumps this to track VS Code Insiders, which prevents
+# install on Stable. Clamp to ^1.116.0 so the extension installs on current
+# stable builds. Idempotent — always sets the same value.
 node -e '
 const fs = require("fs");
 const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
@@ -103,6 +106,11 @@ pkg.displayName = "Copilot Full BYOK";
 pkg.description = "AI chat features powered by Copilot — Full Bring Your Own Key edition";
 const parts = pkg.version.split(".").map(Number);
 pkg.version = parts[0] + "." + parts[1] + "." + (parts[2] + 1);
+if (pkg.engines && pkg.engines.vscode && pkg.engines.vscode !== "^1.116.0") {
+  const previous = pkg.engines.vscode;
+  pkg.engines.vscode = "^1.116.0";
+  console.log("Clamped engines.vscode: " + previous + " -> " + pkg.engines.vscode);
+}
 fs.writeFileSync("package.json", JSON.stringify(pkg, null, "\t") + "\n");
 console.log("Renamed to: " + pkg.displayName + ", version: " + pkg.version);
 '
