@@ -961,6 +961,37 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		}
 		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
 
+		// ─── BYOK CUSTOM PATCH: per-request TokenBudget info log ──────────────────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Emits one info-level line per completed request so context-window
+		// behaviour is visible without enabling trace logging. Works for both
+		// direct Anthropic and Vertex-routed Anthropic (the subclass overrides
+		// `providerName`, so the log tag tells us which path ran). Grep the
+		// extension log for `[BYOK TokenBudget]` to audit every turn.
+		if (usage && usage.prompt_tokens > 0) {
+			try {
+				const providerTag = (this.constructor as typeof AnthropicLMProvider).providerName;
+				const caps = this._resolveAnthropicCapabilities(params.model);
+				const max = caps?.maxInputTokens ?? 0;
+				const pct = max > 0 ? ((usage.prompt_tokens / max) * 100).toFixed(1) : 'n/a';
+				const ratio = this._charsPerTokenByModel.get(params.model) ?? AnthropicLMProvider._INITIAL_CHARS_PER_TOKEN;
+				const estimated = Math.ceil(promptChars / ratio);
+				const delta = usage.prompt_tokens - estimated;
+				const editsApplied = contextManagementResponse?.applied_edits?.length ?? 0;
+				const out = usage.completion_tokens > 0 ? usage.completion_tokens : 0;
+				this._logService.info(
+					`[BYOK TokenBudget] provider=${providerTag} model=${params.model} ` +
+					`prompt_tokens=${usage.prompt_tokens} output_tokens=${out} ` +
+					`max_input=${max} pct_used=${pct}% ` +
+					`estimated=${estimated} delta=${delta} ratio=${ratio.toFixed(2)} ` +
+					`promptChars=${promptChars} contextEdits=${editsApplied}`
+				);
+			} catch {
+				// Never let instrumentation break the request path.
+			}
+		}
+		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
+
 		return { ttft, ttfte, usage, contextManagement: contextManagementResponse };
 	}
 }

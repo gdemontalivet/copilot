@@ -1364,3 +1364,47 @@ code = code.replace(anchor, replacement);
 fs.writeFileSync(f, code);
 console.log("Patched: Anthropic known-models capability fallback (vision-aware)");
 PATCH21_EOF
+
+# Patch 22: Per-request [BYOK TokenBudget] info log for Anthropic/Vertex.
+#
+# Patch 20's chars-per-token calibration logs at trace level, which is
+# invisible under the default `info` log level. When a user asks "is the
+# context window working on Vertex?" we have no way to answer without
+# asking them to enable trace logging. Emit one info-level line per
+# completed request containing the real usage numbers, so the log is
+# self-service diagnosable.
+#
+# Schema (single line, grep for `[BYOK TokenBudget]`):
+#
+#   [BYOK TokenBudget] provider=<Anthropic|VertexAnthropic> model=<id>
+#     prompt_tokens=<N> output_tokens=<N>
+#     max_input=<cap> pct_used=<N>%
+#     estimated=<est> delta=<real-est> ratio=<chars/token>
+#     promptChars=<N> contextEdits=<N>
+#
+# `providerName` is static and overridden by VertexAnthropicLMProvider, so
+# `(this.constructor as typeof AnthropicLMProvider).providerName` correctly
+# labels Vertex-routed traffic vs direct Anthropic without duplicating
+# the log statement in the subclass.
+node << 'PATCH22_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/anthropicProvider.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: per-request TokenBudget info log")) {
+  console.log("TokenBudget info log already present, skipping");
+  process.exit(0);
+}
+
+const anchor = `\t\tif (usage && usage.prompt_tokens > 0) {\n\t\t\tthis._recordActualInputTokens(params.model, promptChars, usage.prompt_tokens);\n\t\t}\n\t\t// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────\n\n\t\treturn { ttft, ttfte, usage, contextManagement: contextManagementResponse };`;
+
+const replacement = `\t\tif (usage && usage.prompt_tokens > 0) {\n\t\t\tthis._recordActualInputTokens(params.model, promptChars, usage.prompt_tokens);\n\t\t}\n\t\t// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────\n\n\t\t// ─── BYOK CUSTOM PATCH: per-request TokenBudget info log ──────────────────\n\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t// Emits one info-level line per completed request so context-window\n\t\t// behaviour is visible without enabling trace logging. Works for both\n\t\t// direct Anthropic and Vertex-routed Anthropic (the subclass overrides\n\t\t// \`providerName\`, so the log tag tells us which path ran). Grep the\n\t\t// extension log for \`[BYOK TokenBudget]\` to audit every turn.\n\t\tif (usage && usage.prompt_tokens > 0) {\n\t\t\ttry {\n\t\t\t\tconst providerTag = (this.constructor as typeof AnthropicLMProvider).providerName;\n\t\t\t\tconst caps = this._resolveAnthropicCapabilities(params.model);\n\t\t\t\tconst max = caps?.maxInputTokens ?? 0;\n\t\t\t\tconst pct = max > 0 ? ((usage.prompt_tokens / max) * 100).toFixed(1) : 'n/a';\n\t\t\t\tconst ratio = this._charsPerTokenByModel.get(params.model) ?? AnthropicLMProvider._INITIAL_CHARS_PER_TOKEN;\n\t\t\t\tconst estimated = Math.ceil(promptChars / ratio);\n\t\t\t\tconst delta = usage.prompt_tokens - estimated;\n\t\t\t\tconst editsApplied = contextManagementResponse?.applied_edits?.length ?? 0;\n\t\t\t\tconst out = usage.completion_tokens > 0 ? usage.completion_tokens : 0;\n\t\t\t\tthis._logService.info(\n\t\t\t\t\t\`[BYOK TokenBudget] provider=\${providerTag} model=\${params.model} \` +\n\t\t\t\t\t\`prompt_tokens=\${usage.prompt_tokens} output_tokens=\${out} \` +\n\t\t\t\t\t\`max_input=\${max} pct_used=\${pct}% \` +\n\t\t\t\t\t\`estimated=\${estimated} delta=\${delta} ratio=\${ratio.toFixed(2)} \` +\n\t\t\t\t\t\`promptChars=\${promptChars} contextEdits=\${editsApplied}\`\n\t\t\t\t);\n\t\t\t} catch {\n\t\t\t\t// Never let instrumentation break the request path.\n\t\t\t}\n\t\t}\n\t\t// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────\n\n\t\treturn { ttft, ttfte, usage, contextManagement: contextManagementResponse };`;
+
+if (!code.includes(anchor)) {
+  console.warn("WARN: TokenBudget anchor not found — skipping patch 22 (patch 20/21 may be missing)");
+  process.exit(0);
+}
+code = code.replace(anchor, replacement);
+fs.writeFileSync(f, code);
+console.log("Patched: [BYOK TokenBudget] per-request info log");
+PATCH22_EOF
