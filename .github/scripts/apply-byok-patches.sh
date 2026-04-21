@@ -910,3 +910,72 @@ code = code.replace(original, replacement);
 fs.writeFileSync(f, code);
 console.log("Patched: switchToBaseModel BYOK short-circuit");
 PATCH15_EOF
+
+# Patch 16: Tolerate copilot-fast unavailability in VirtualToolGrouper.
+#
+# `_generateBulkGroupDescriptions` unconditionally calls
+# `getChatEndpoint('copilot-fast' → 'gpt-4o-mini')` to have an internal model
+# summarize MCP / extension tool groups. In BYOK-only mode the fake-token
+# bypass in modelMetadataFetcher leaves `_familyMap` empty, so the lookup
+# throws — and the exception bubbles all the way out of `addGroups`, taking
+# down the whole chat turn. This only surfaces when a workspace registers
+# enough tools to cross START_BUILTIN_GROUPING_AFTER_TOOL_COUNT (≈128), which
+# is easy to hit with Pylance + Looker + Tableau MCP servers loaded.
+#
+# Symptom fixed (from exthost.log):
+#   [error] Error: Unable to resolve chat model with family selection: gpt-4o-mini
+#     at async VirtualToolGrouper._generateBulkGroupDescriptions (…)
+#
+# Fix: wrap the endpoint lookup in try/catch, short-circuit when nothing
+# needs describing, and iterate over `missing` instead of `described.length`
+# so every missing entry still gets a deterministic fallback description.
+node << 'PATCH16_EOF'
+const fs = require("fs");
+const f = "src/extension/tools/common/virtualTools/virtualToolGrouper.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: tolerate copilot-fast unavailability")) {
+  console.log("VirtualToolGrouper BYOK guard already present, skipping");
+  process.exit(0);
+}
+
+const original = `\t\tconst endpoint = await this._endpointProvider.getChatEndpoint(CATEGORIZATION_ENDPOINT);
+\t\tconst described = await describeBulkToolGroups(endpoint, missing.map(m => m.tools), token);
+\t\tlet missed = 0;
+\t\tfor (let i = 0; i < described.length; i++) {`;
+
+const replacement = `\t\t// ─── BYOK CUSTOM PATCH: tolerate copilot-fast unavailability ──────────────
+\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+\t\t// In BYOK-only mode the fake-token bypass in modelMetadataFetcher leaves
+\t\t// \`_familyMap\` empty, so \`getChatEndpoint('copilot-fast' → 'gpt-4o-mini')\`
+\t\t// throws. Without this guard, any chat turn that triggers virtual-tool
+\t\t// grouping (≳128 tools, i.e. any MCP-heavy workspace like Looker +
+\t\t// Tableau + Pylance) crashes entirely. We also short-circuit when nothing
+\t\t// needs describing, and iterate over \`missing\` (not \`described.length\`)
+\t\t// so each missing entry always gets a deterministic fallback description
+\t\t// even when the LLM call returned a shorter array.
+\t\tif (missing.length === 0) {
+\t\t\treturn { groups: output, missed: 0 };
+\t\t}
+
+\t\tlet described: (ISummarizedToolCategory | undefined)[] = [];
+\t\ttry {
+\t\t\tconst endpoint = await this._endpointProvider.getChatEndpoint(CATEGORIZATION_ENDPOINT);
+\t\t\tdescribed = await describeBulkToolGroups(endpoint, missing.map(m => m.tools), token);
+\t\t} catch (e) {
+\t\t\tthis._logService.warn(\`[virtual-tools] \${CATEGORIZATION_ENDPOINT} unavailable, using deterministic group descriptions: \${e}\`);
+\t\t}
+\t\t// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
+
+\t\tlet missed = 0;
+\t\tfor (let i = 0; i < missing.length; i++) {`;
+
+if (!code.includes(original)) {
+  console.error("ERROR: _generateBulkGroupDescriptions source did not match expected shape; skipping patch 16");
+  console.error("       Inspect virtualToolGrouper.ts and update apply-byok-patches.sh to match.");
+  process.exit(0);
+}
+code = code.replace(original, replacement);
+fs.writeFileSync(f, code);
+console.log("Patched: VirtualToolGrouper copilot-fast resilience");
+PATCH16_EOF

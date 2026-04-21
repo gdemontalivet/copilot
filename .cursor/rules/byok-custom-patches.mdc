@@ -119,6 +119,14 @@ When making a custom change that touches upstream files:
 6. **Patch 6** — Tier-3 synchronous compaction in `agentIntent.ts`
 7. **Patch 7** — Readable Gemini errors in `geminiNativeProvider.ts` (strip JSON blob from `ApiError.message` before surfacing in chat UI)
 8. **Patch 8** — Gemini retry resilience in `geminiNativeProvider.ts` (6 retries with exponential backoff up to 60s on 429/502/503/504 + transient network errors, plus a 120s connect timeout). Depends on Patch 7 having run first — uses its sentinel as an anchor.
+9. **Patch 9** — Reinstall BYOK-only files that don't exist upstream (canonical copies in `.github/byok-patches/files/` → `src/`).
+10. **Patch 10** — Anthropic provider `createClient()` hook + cross-provider failover wrapper in `anthropicProvider.ts`.
+11. **Patch 11** — Register `VertexAnthropicLMProvider` and wire it as the Anthropic failover target in `byokContribution.ts`.
+12. **Patch 12** — Add VertexAnthropic + Anthropic-fallback settings to `configurationService.ts`.
+13. **Patch 13** — Promote `google-auth-library` to a direct dependency (required by `VertexAnthropicLMProvider`).
+14. **Patch 14** — Declare `vertexanthropic` (lowercase) as a `languageModelChatProviders` vendor in `package.json`, normalising any stray camelCase variants.
+15. **Patch 15** — Short-circuit `switchToBaseModel()` in `chatParticipants.ts` before it looks up `copilot-base`, which throws in BYOK-only mode.
+16. **Patch 16** — Tolerate `copilot-fast` unavailability in `VirtualToolGrouper._generateBulkGroupDescriptions` so MCP-heavy workspaces (>128 tools) don't crash the chat turn when `gpt-4o-mini` can't be resolved under the fake-token bypass.
 
 When you add a new patch, bump the number and add an entry here.
 
@@ -159,3 +167,23 @@ When running in fully offline BYOK mode the fake Copilot token 401s against
 `modelMetadataFetcher.ts` and friends.
 
 **Fix:** Patches 1 and 5 add short-circuits for `copilotToken === 'fake-token'`.
+
+### Internal model family lookups throwing in BYOK-only mode
+
+Several code paths hard-code an internal Copilot model family and call
+`getChatEndpoint('copilot-base')` / `getChatEndpoint('copilot-fast')` (the
+latter aliases to `gpt-4o-mini`). Under the fake-token bypass these lookups
+throw because `modelMetadataFetcher._familyMap` / `_copilotBaseModel` are
+never populated. Symptoms users see:
+
+> Error: Unable to resolve chat model with family selection: copilot-base  
+> Error: Unable to resolve chat model with family selection: gpt-4o-mini
+
+The second one is particularly sneaky because it only surfaces when the
+workspace registers ≳128 tools (e.g. Pylance + Looker MCP + Tableau MCP all
+loaded), tipping `VirtualToolGrouper` into its LLM-summarization path.
+
+**Fix:** Patch 15 reorders `switchToBaseModel` to short-circuit BYOK / free
+/ non-copilot requests before the `copilot-base` lookup. Patch 16 wraps the
+`copilot-fast` lookup in `_generateBulkGroupDescriptions` in try/catch and
+falls back to deterministic group descriptions so chat turns still complete.

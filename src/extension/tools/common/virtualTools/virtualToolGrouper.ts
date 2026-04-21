@@ -414,10 +414,31 @@ export class VirtualToolGrouper implements IToolCategorization {
 			}
 		}
 
-		const endpoint = await this._endpointProvider.getChatEndpoint(CATEGORIZATION_ENDPOINT);
-		const described = await describeBulkToolGroups(endpoint, missing.map(m => m.tools), token);
+		// ─── BYOK CUSTOM PATCH: tolerate copilot-fast unavailability ──────────────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// In BYOK-only mode the fake-token bypass in modelMetadataFetcher leaves
+		// `_familyMap` empty, so `getChatEndpoint('copilot-fast' → 'gpt-4o-mini')`
+		// throws. Without this guard, any chat turn that triggers virtual-tool
+		// grouping (≳128 tools, i.e. any MCP-heavy workspace like Looker +
+		// Tableau + Pylance) crashes entirely. We also short-circuit when nothing
+		// needs describing, and iterate over `missing` (not `described.length`)
+		// so each missing entry always gets a deterministic fallback description
+		// even when the LLM call returned a shorter array.
+		if (missing.length === 0) {
+			return { groups: output, missed: 0 };
+		}
+
+		let described: (ISummarizedToolCategory | undefined)[] = [];
+		try {
+			const endpoint = await this._endpointProvider.getChatEndpoint(CATEGORIZATION_ENDPOINT);
+			described = await describeBulkToolGroups(endpoint, missing.map(m => m.tools), token);
+		} catch (e) {
+			this._logService.warn(`[virtual-tools] ${CATEGORIZATION_ENDPOINT} unavailable, using deterministic group descriptions: ${e}`);
+		}
+		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
+
 		let missed = 0;
-		for (let i = 0; i < described.length; i++) {
+		for (let i = 0; i < missing.length; i++) {
 			const d = described[i];
 			const m = missing[i];
 			if (d) {
