@@ -9,6 +9,12 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Run the build in London time so file mtimes inside the VSIX, `date`
+      # output, and Node `Date.toString()` match the maintainer's local wall
+      # clock instead of the runner's default UTC. Swap for another IANA zone
+      # (e.g. `America/New_York`) if the maintainer ever changes timezone.
+      TZ: Europe/London
 
     steps:
       - name: Checkout code
