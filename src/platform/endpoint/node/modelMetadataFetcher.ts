@@ -232,6 +232,18 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 		const requestStartTime = Date.now();
 
 		const copilotToken = (await this._authService.getCopilotToken()).token;
+
+		// ─── BYOK CUSTOM PATCH: fake-token bypass ─────────────────────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Skip API call when using a fake/offline token (BYOK-only mode).
+		// The fake token will always 401 against the Copilot API, so avoid
+		// the network round-trip and error log spam.
+		if (copilotToken === 'fake-token') {
+			this._lastFetchTime = Date.now();
+			this._onDidModelRefresh.fire();
+			return;
+		}
+		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────
 		const requestId = generateUuid();
 		const requestMetadata: RequestMetadata = { type: RequestType.Models, isModelLab: this._isModelLab };
 
@@ -278,7 +290,9 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 		} catch (e) {
 			this._logService.error(e, `Failed to fetch models (${requestId})`);
 			this._lastFetchError = e;
-			this._lastFetchTime = 0;
+			// BYOK CUSTOM PATCH: 1-min backoff instead of hot-loop retry
+			this._lastFetchTime = Date.now() - 9 * 60 * 1000;
+			this._onDidModelRefresh.fire();
 		}
 	}
 

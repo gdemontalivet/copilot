@@ -177,3 +177,72 @@ export class BackgroundSummarizer {
 		this._promise = undefined;
 	}
 }
+
+// ─── BYOK CUSTOM PATCH: Tiered auto-compaction ──────────────────────────────
+// The following exports are preserved across upstream syncs by
+// .github/scripts/apply-byok-patches.sh. Do not remove.
+
+/**
+ * Compaction urgency tier:
+ *   0 = no action
+ *   1 = start background compaction
+ *   2 = start urgent background compaction (log warning)
+ *   3 = block synchronously on background compaction before next LLM call
+ */
+export type CompactionTier = 0 | 1 | 2 | 3;
+
+/**
+ * Tiered thresholds used to preempt context window overflow. Unlike the single
+ * `BackgroundSummarizationThresholds.base` gate, these fire at lower estimate
+ * ratios so compaction starts well before we hit Gemini's 1M input-token cap.
+ */
+export const TieredCompactionThresholds = {
+	tier1Estimate: 0.70,
+	tier2Estimate: 0.80,
+	tier3Estimate: 0.90,
+	tier1Confirmed: 0.65,
+	tier2Confirmed: 0.75,
+	tier3Confirmed: 0.85,
+} as const;
+
+/**
+ * Map a post-render context ratio to a compaction tier.
+ *
+ * Inline path (cache parity matters): cold cache only triggers tier 3, warm
+ * cache uses the full tiered ladder.
+ *
+ * Non-inline path (no cache benefit): full tiered ladder regardless.
+ */
+export function getCompactionTier(
+	postRenderRatio: number,
+	useInlineSummarization: boolean,
+	cacheWarm: boolean,
+): CompactionTier {
+	const t = TieredCompactionThresholds;
+	if (!useInlineSummarization) {
+		if (postRenderRatio >= t.tier3Estimate) { return 3; }
+		if (postRenderRatio >= t.tier2Estimate) { return 2; }
+		if (postRenderRatio >= t.tier1Estimate) { return 1; }
+		return 0;
+	}
+	if (!cacheWarm) {
+		return postRenderRatio >= t.tier3Estimate ? 3 : 0;
+	}
+	if (postRenderRatio >= t.tier3Estimate) { return 3; }
+	if (postRenderRatio >= t.tier2Estimate) { return 2; }
+	if (postRenderRatio >= t.tier1Estimate) { return 1; }
+	return 0;
+}
+
+/**
+ * Map an API-confirmed ratio (from Gemini countTokens) to a compaction tier.
+ * Reserved for future use once the countTokens gate is wired in.
+ */
+export function getConfirmedCompactionTier(trueRatio: number): CompactionTier {
+	const t = TieredCompactionThresholds;
+	if (trueRatio >= t.tier3Confirmed) { return 3; }
+	if (trueRatio >= t.tier2Confirmed) { return 2; }
+	if (trueRatio >= t.tier1Confirmed) { return 1; }
+	return 0;
+}
+// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────

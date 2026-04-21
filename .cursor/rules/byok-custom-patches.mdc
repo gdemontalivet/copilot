@@ -1,0 +1,121 @@
+---
+description: BYOK custom patch workflow — survive nightly upstream syncs
+alwaysApply: true
+---
+
+# BYOK Custom Patches — Survive Nightly Syncs
+
+This repo nightly-syncs from `microsoft/vscode-copilot-chat`. The sync workflow
+(`.github/workflows/sync-upstream.yml`) resets tracked files to upstream HEAD
+and then runs `.github/scripts/apply-byok-patches.sh`.
+
+**Any custom code you write directly in source files will be wiped out the next
+night unless you also add a patch to that script.**
+
+## When to Add a Patch
+
+Whenever you modify a file that also exists upstream and you want the change to
+persist, you MUST add a corresponding patch to
+`.github/scripts/apply-byok-patches.sh`.
+
+Examples of code that MUST be patched:
+
+- Modifications to `src/platform/**` (copilot auth, token management, model fetch)
+- Modifications to `src/extension/**` that touch upstream files (agent intent,
+  BYOK providers, prompt rendering, etc.)
+- `package.json` metadata (name, description, version)
+- Any file tracked by upstream
+
+New files you add under a custom directory (e.g. `src/byok-custom/`) are safe —
+the sync workflow doesn't touch untracked paths.
+
+## Patch Design Rules
+
+### 1. Idempotency
+
+Every patch MUST be safe to run multiple times. Use a sentinel check:
+
+```js
+if (code.includes("BYOK CUSTOM PATCH: my-feature")) {
+  console.log("my-feature already present, skipping");
+  process.exit(0);
+}
+```
+
+### 2. Sentinel Markers
+
+Wrap inserted code with comment markers so future reviewers (and the sentinel
+check) can find it:
+
+```typescript
+// ─── BYOK CUSTOM PATCH: my-feature ──────────────────────────
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+...your code...
+// ─── END BYOK CUSTOM PATCH ──────────────────────────────────
+```
+
+### 3. Anchor Robustness
+
+Prefer stable, rarely-changing strings as replacement anchors. Bad anchors are
+long multi-line bodies that upstream might tweak. Good anchors:
+
+- Import statements
+- Function signatures
+- Well-known exported constant names
+
+If an anchor is missing, **log a warning and exit 0** — never fail the sync
+workflow over a missing anchor:
+
+```js
+if (!code.includes(anchor)) {
+  console.warn("WARN: anchor not found — skipping my-feature patch");
+  process.exit(0);
+}
+```
+
+### 4. Prefer Append Over Replace
+
+When adding new exports/helpers, append at EOF rather than inserting in the
+middle. EOF appends don't conflict with upstream edits.
+
+When modifying behavior, insert a guard BEFORE the upstream logic rather than
+replacing the upstream block entirely — this keeps the patch smaller and makes
+upstream evolution less likely to break it.
+
+### 5. Test Before Committing
+
+Always test the patch in both modes:
+
+```bash
+# Fresh apply (simulates nightly sync on clean upstream)
+git stash push -- <files-you-patched>
+bash .github/scripts/apply-byok-patches.sh
+git diff stash@'{0}' -- <files-you-patched>  # should match your manual edit
+git stash drop
+
+# Idempotent re-apply
+bash .github/scripts/apply-byok-patches.sh   # should say "already present, skipping"
+```
+
+## Workflow Checklist
+
+When making a custom change that touches upstream files:
+
+- [ ] Make the change manually in the source file(s) with sentinel markers
+- [ ] Write a corresponding patch in `.github/scripts/apply-byok-patches.sh`
+- [ ] Use `if (code.includes(sentinel)) { skip }` for idempotency
+- [ ] Gracefully skip on missing anchors (exit 0, log warning)
+- [ ] Test fresh-apply: stash, run script, diff against stash, confirm match
+- [ ] Test idempotency: run script twice, confirm second run skips
+- [ ] Commit the source changes AND the script update together
+
+## Existing Patches (as of this rule)
+
+1. **Patch 1** — Fake token bypass in `copilotTokenManager.ts`
+2. **Patch 2** — `getPrimaryType` for Gemini union types in `geminiFunctionDeclarationConverter.ts`
+3. **Patch 3** — Rename extension + bump version in `package.json`
+4. **Patch 4** — Tiered auto-compaction helpers in `backgroundSummarizer.ts`
+5. **Patch 5** — Fake-token bypass + 1-min backoff in `modelMetadataFetcher.ts`
+6. **Patch 6** — Tier-3 synchronous compaction in `agentIntent.ts`
+
+When you add a new patch, bump the number and add an entry here.
