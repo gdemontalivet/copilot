@@ -23,6 +23,46 @@ import { apiMessageToGeminiMessage, geminiMessagesToRawMessagesForLogging } from
 import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
 import { IBYOKStorageService } from './byokStorageService';
 
+// ─── BYOK CUSTOM PATCH: readable Gemini errors ──────────────────────────────
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// The Gemini SDK (`@google/genai`) throws `ApiError` whose `message` is the
+// raw JSON body (e.g. `{"error":{"code":503,"message":"...","status":"..."}}`).
+// Surfacing that JSON in chat UI is noisy — extract the nested `error.message`.
+function extractReadableGeminiMessage(err: unknown): string {
+	if (err instanceof ApiError) {
+		try {
+			const parsed = JSON.parse(err.message);
+			const nested = parsed?.error?.message;
+			if (typeof nested === 'string' && nested.length > 0) {
+				return nested;
+			}
+		} catch { /* fall through */ }
+		return err.message;
+	}
+	return toErrorMessage(err);
+}
+// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
+
+// ─── BYOK CUSTOM PATCH: Gemini retry resilience ─────────────────────────────
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Classify SDK / transport errors as retryable. Returns a label used in
+// progress messages, or null if the error is terminal.
+function classifyRetryableGeminiError(err: unknown): 'rate-limit' | 'unavailable' | 'network' | null {
+	if (err instanceof ApiError) {
+		if (err.status === 429) { return 'rate-limit'; }
+		if (err.status === 502 || err.status === 503 || err.status === 504) { return 'unavailable'; }
+		return null;
+	}
+	const e = err as any;
+	const code = typeof e?.code === 'string' ? e.code : (typeof e?.cause?.code === 'string' ? e.cause.code : undefined);
+	const transientCodes = new Set(['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
+	if (code && transientCodes.has(code)) { return 'network'; }
+	const msg = typeof e?.message === 'string' ? e.message.toLowerCase() : '';
+	if (/fetch failed|network error|timed? ?out|socket hang up/.test(msg)) { return 'network'; }
+	return null;
+}
+// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
+
 export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvider {
 
 	public static readonly providerName = 'Gemini';
@@ -310,11 +350,12 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				});
 			} catch (err) {
 				this._logService.error(`BYOK GeminiNative error: ${toErrorMessage(err, true)}`);
+				const readableReason = token.isCancellationRequested ? 'cancelled' : extractReadableGeminiMessage(err);
 				pendingLoggedChatRequest.resolve({
 					type: token.isCancellationRequested ? ChatFetchResponseType.Canceled : ChatFetchResponseType.Unknown,
 					requestId,
 					serverRequestId: requestId,
-					reason: token.isCancellationRequested ? 'cancelled' : toErrorMessage(err)
+					reason: readableReason
 				}, wrappedProgress.items.map((i): IResponseDelta => {
 					return {
 						text: i instanceof LanguageModelTextPart ? i.value : '',
@@ -325,7 +366,12 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 						}] : undefined,
 					};
 				}));
-				throw err;
+				if (token.isCancellationRequested || err instanceof Error && err.name === 'AbortError') {
+					throw err;
+				}
+				// Re-throw with a clean message so the chat UI shows the human-readable
+				// error (not the raw Gemini JSON blob). Preserve the original via `cause`.
+				throw new Error(readableReason, { cause: err });
 			} finally {
 				cancelSub.dispose();
 			}
@@ -394,14 +440,26 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 		return Math.ceil(text.toString().length / 4);
 	}
 
-	private async _makeRequest(client: GoogleGenAI, progress: Progress<LMResponsePart>, params: GenerateContentParameters, token: CancellationToken, issuedTime: number): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined }> {
+	private async _makeRequest(client: GoogleGenAI, progress: Progress<LMResponsePart>, params: GenerateContentParameters, token: CancellationToken, issuedTime: number, retryCount = 0): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined }> {
+		// BYOK CUSTOM PATCH: retry + connect-timeout constants
+		const MAX_RETRIES = 6;
+		const CONNECT_TIMEOUT_MS = 120_000;
 		const start = Date.now();
 		let ttft: number | undefined;
 		let ttfte: number | undefined;
 		let usage: APIUsage | undefined;
 
 		try {
-			const stream = await client.models.generateContentStream(params);
+			let __byokConnectTimer: ReturnType<typeof setTimeout> | undefined;
+			const stream = await Promise.race([
+				client.models.generateContentStream(params),
+				new Promise<never>((_, reject) => {
+					__byokConnectTimer = setTimeout(
+						() => reject(new TypeError('Gemini API request timed out waiting for initial response')),
+						CONNECT_TIMEOUT_MS
+					);
+				})
+			]).finally(() => clearTimeout(__byokConnectTimer));
 
 			let pendingThinkingSignature: string | undefined;
 
@@ -511,8 +569,30 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				// Return partial usage data collected before cancellation
 				return { ttft, ttfte, usage };
 			}
+			// ─── BYOK CUSTOM PATCH: retry on transient errors ─────────────
+			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			const __byokRetryKind = classifyRetryableGeminiError(error);
+			if (__byokRetryKind && retryCount < MAX_RETRIES) {
+				const __byokDelay = Math.min(5000 * Math.pow(2, retryCount), 60_000);
+				const __byokLabel = __byokRetryKind === 'rate-limit'
+					? '[Rate limit] 429'
+					: __byokRetryKind === 'unavailable'
+						? '[Service unavailable] 503'
+						: '[Network error]';
+				this._logService.warn(`Gemini ${__byokRetryKind} error, retrying in ${__byokDelay}ms (${retryCount + 1}/${MAX_RETRIES}): ${extractReadableGeminiMessage(error)}`);
+				progress.report(new LanguageModelThinkingPart(`${__byokLabel} retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(__byokDelay / 1000)}s...\n`));
+				await new Promise(resolve => setTimeout(resolve, __byokDelay));
+				if (token.isCancellationRequested) {
+					return { ttft, ttfte, usage };
+				}
+				return this._makeRequest(client, progress, params, token, issuedTime, retryCount + 1);
+			}
+			// ─── END BYOK CUSTOM PATCH ────────────────────────────────────
 			this._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);
-			throw error;
+			if ((error as any)?.name === 'AbortError' || token.isCancellationRequested) {
+				throw error;
+			}
+			throw new Error(extractReadableGeminiMessage(error), { cause: error });
 		}
 	}
 }

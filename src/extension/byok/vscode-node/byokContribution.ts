@@ -20,6 +20,7 @@ import { GeminiNativeBYOKLMProvider } from './geminiNativeProvider';
 import { OllamaLMProvider } from './ollamaProvider';
 import { OAIBYOKLMProvider } from './openAIProvider';
 import { OpenRouterLMProvider } from './openRouterProvider';
+import { VertexAnthropicLMProvider } from './vertexAnthropicProvider';
 import { XAIBYOKLMProvider } from './xAIProvider';
 
 export class BYOKContrib extends Disposable implements IExtensionContribution {
@@ -65,7 +66,14 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 				return;
 			}
 			this._providers.set(OllamaLMProvider.providerName.toLowerCase(), instantiationService.createInstance(OllamaLMProvider, this._byokStorageService));
-			this._providers.set(AnthropicLMProvider.providerName.toLowerCase(), instantiationService.createInstance(AnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService));
+			const anthropicProvider = instantiationService.createInstance(AnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService);
+			this._providers.set(AnthropicLMProvider.providerName.toLowerCase(), anthropicProvider);
+			// BYOK CUSTOM PATCH: Vertex-hosted Anthropic, registered as a separate vendor so it has
+			// independent API key / quota / concurrency state. Also wired as a failover target for
+			// the direct Anthropic provider (gated by chat.byok.anthropic.fallback.enabled).
+			const vertexAnthropicProvider = instantiationService.createInstance(VertexAnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService);
+			this._providers.set(VertexAnthropicLMProvider.providerName.toLowerCase(), vertexAnthropicProvider);
+			anthropicProvider.setFailoverTarget(vertexAnthropicProvider);
 			this._providers.set(GeminiNativeBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiNativeBYOKLMProvider, knownModels[GeminiNativeBYOKLMProvider.providerName], this._byokStorageService));
 			this._providers.set(XAIBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(XAIBYOKLMProvider, knownModels[XAIBYOKLMProvider.providerName], this._byokStorageService));
 			this._providers.set(OAIBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(OAIBYOKLMProvider, knownModels[OAIBYOKLMProvider.providerName], this._byokStorageService));

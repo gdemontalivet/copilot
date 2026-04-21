@@ -26,21 +26,32 @@ import { toErrorMessage } from '../../../util/common/errorMessage';
 import { RecordedProgress } from '../../../util/common/progressRecorder';
 import { generateUuid } from '../../../util/vs/base/common/uuid';
 import { anthropicMessagesToRawMessagesForLogging, apiMessageToAnthropicMessage } from '../common/anthropicMessageConverter';
+import { anthropicPrimaryPool, classifyAnthropicError, DeferredProgress, isFailoverTrigger, keyFingerprint } from '../common/byokFailover';
 import { BYOKKnownModels, BYOKModelCapabilities, LMResponsePart } from '../common/byokProvider';
 import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
 import { byokKnownModelsToAPIInfoWithEffort } from './byokModelInfo';
 import { IBYOKStorageService } from './byokStorageService';
 
+export interface IAnthropicFailoverTarget {
+	resolveFailoverModel(primaryModelId: string): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration> | undefined>;
+	provideLanguageModelChatResponse(model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void>;
+}
+
 export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 
-	public static readonly providerName = 'Anthropic';
+	// BYOK CUSTOM PATCH — optional sibling provider (Vertex) used as a failover target.
+	private _failoverTarget: IAnthropicFailoverTarget | undefined;
+	setFailoverTarget(target: IAnthropicFailoverTarget | undefined): void { this._failoverTarget = target; }
+
+	// Typed as `string` so subclasses (VertexAnthropicLMProvider) can override.
+	public static readonly providerName: string = 'Anthropic';
 
 	constructor(
 		knownModels: BYOKKnownModels | undefined,
 		byokStorageService: IBYOKStorageService,
 		@ILogService logService: ILogService,
 		@IRequestLogger private readonly _requestLogger: IRequestLogger,
-		@IConfigurationService private readonly _configurationService: IConfigurationService,
+		@IConfigurationService protected readonly _configurationService: IConfigurationService,
 		@IExperimentationService private readonly _experimentationService: IExperimentationService,
 		@ITelemetryService private readonly _telemetryService: ITelemetryService,
 		@IOTelService private readonly _otelService: IOTelService,
@@ -96,7 +107,57 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		}
 	}
 
+	/** Hook for subclasses (e.g. Vertex) to replace the Anthropic client. */
+	protected createClient(apiKey: string, _model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>): Anthropic {
+		return new Anthropic({ apiKey });
+	}
+
 	async provideLanguageModelChatResponse(model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {
+		const failoverEnabled = !!this._failoverTarget
+			&& this._configurationService.getConfig(ConfigKey.ByokAnthropicFallbackEnabled);
+		if (!failoverEnabled) {
+			return this._doProvideLanguageModelChatResponse(model, messages, options, progress, token);
+		}
+		anthropicPrimaryPool.configure(
+			this._configurationService.getConfig(ConfigKey.ByokAnthropicMaxConcurrency),
+			this._configurationService.getConfig(ConfigKey.ByokAnthropicCooldownSeconds) * 1000,
+		);
+		const fingerprint = keyFingerprint(model.configuration?.apiKey);
+		const runSecondary = async (reason: string) => {
+			const target = this._failoverTarget!;
+			const secondaryModel = await target.resolveFailoverModel(model.id);
+			if (!secondaryModel) {
+				this._logService.warn(`[BYOK failover] No Vertex fallback configured for ${model.id}; surfacing primary error.`);
+				throw new Error(`Anthropic failover requested (${reason}) but no Vertex fallback is configured for ${model.id}`);
+			}
+			this._logService.info(`[BYOK failover] Routing ${model.id} via VertexAnthropic (${reason}).`);
+			return target.provideLanguageModelChatResponse(secondaryModel, messages, options, progress, token);
+		};
+		if (anthropicPrimaryPool.shouldSkipPrimary(fingerprint)) { return runSecondary('circuit-open'); }
+		const deferred = new DeferredProgress<LanguageModelResponsePart2>(progress);
+		anthropicPrimaryPool.acquireSlot(fingerprint);
+		try {
+			const commitOnFirstReport: Progress<LanguageModelResponsePart2> = {
+				report: value => { if (!deferred.hasCommitted()) { deferred.commit(); } deferred.report(value); },
+			};
+			await this._doProvideLanguageModelChatResponse(model, messages, options, commitOnFirstReport, token);
+			anthropicPrimaryPool.recordSuccess(fingerprint);
+			if (!deferred.hasCommitted()) { deferred.commit(); }
+		} catch (err) {
+			const classification = classifyAnthropicError(err);
+			anthropicPrimaryPool.recordFailure(fingerprint, classification);
+			if (isFailoverTrigger(classification) && !deferred.hasCommitted()) {
+				deferred.discard();
+				return runSecondary(classification);
+			}
+			deferred.commit();
+			throw err;
+		} finally {
+			anthropicPrimaryPool.releaseSlot(fingerprint);
+		}
+	}
+
+	private async _doProvideLanguageModelChatResponse(model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {
 		// Restore CapturingToken context if correlation ID was passed through modelOptions.
 		// This handles the case where AsyncLocalStorage context was lost crossing VS Code IPC.
 		const correlationId = (options as { modelOptions?: OTelModelOptions }).modelOptions?._capturingTokenCorrelationId;
@@ -115,7 +176,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				throw new Error('API key not found for the model');
 			}
 
-			const anthropicClient = new Anthropic({ apiKey });
+			const anthropicClient = this.createClient(apiKey, model);
 
 			// Convert the messages from the API format into messages that we can use against anthropic
 			const { system, messages: convertedMessages } = apiMessageToAnthropicMessage(messages as LanguageModelChatMessage[]);

@@ -878,6 +878,21 @@ export namespace ConfigKey {
 	}
 
 	/**
+	 * User-configured Vertex-hosted Anthropic models. Keyed by the full Vertex model id
+	 * (e.g. `claude-sonnet-4-5@20250629`).
+	 */
+	export const VertexAnthropicModels = defineSetting<Record<string, { name: string; projectId: string; locationId: string; maxInputTokens?: number; maxOutputTokens?: number }>>('chat.vertexAnthropicModels', ConfigType.Simple, {});
+
+	/** Failover policy for the Anthropic (direct) BYOK provider. */
+	export const ByokAnthropicFallbackEnabled = defineSetting<boolean>('chat.byok.anthropic.fallback.enabled', ConfigType.Simple, false);
+	/** Anthropic model id → Vertex model id override. */
+	export const ByokAnthropicFallbackModelMap = defineSetting<Record<string, string>>('chat.byok.anthropic.fallback.modelMap', ConfigType.Simple, {});
+	/** Max concurrent direct-Anthropic requests before routing to Vertex (0 = unlimited). */
+	export const ByokAnthropicMaxConcurrency = defineSetting<number>('chat.byok.anthropic.fallback.maxConcurrency', ConfigType.Simple, 0);
+	/** Cooldown (seconds) skipping direct Anthropic after a failover event. */
+	export const ByokAnthropicCooldownSeconds = defineSetting<number>('chat.byok.anthropic.fallback.cooldownSeconds', ConfigType.Simple, 60);
+
+	/**
 	 * Deprecated settings that are no longer in use.
 	 */
 	export namespace Deprecated {

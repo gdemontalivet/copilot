@@ -117,5 +117,7 @@ When making a custom change that touches upstream files:
 4. **Patch 4** — Tiered auto-compaction helpers in `backgroundSummarizer.ts`
 5. **Patch 5** — Fake-token bypass + 1-min backoff in `modelMetadataFetcher.ts`
 6. **Patch 6** — Tier-3 synchronous compaction in `agentIntent.ts`
+7. **Patch 7** — Readable Gemini errors in `geminiNativeProvider.ts` (strip JSON blob from `ApiError.message` before surfacing in chat UI)
+8. **Patch 8** — Gemini retry resilience in `geminiNativeProvider.ts` (6 retries with exponential backoff up to 60s on 429/502/503/504 + transient network errors, plus a 120s connect timeout). Depends on Patch 7 having run first — uses its sentinel as an anchor.
 
 When you add a new patch, bump the number and add an entry here.

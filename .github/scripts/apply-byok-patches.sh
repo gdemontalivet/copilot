@@ -358,3 +358,421 @@ if (code.includes(ifAnchor)) {
 fs.writeFileSync(f, code);
 console.log("Patched: tier 3 synchronous compaction in agentIntent");
 PATCH6_EOF
+
+# Patch 7: Readable Gemini errors
+# The Gemini SDK throws ApiError with a JSON-stringified body as `.message`.
+# Surfacing it directly in chat produces ugly output like:
+#   "Reason: { \"error\": { \"code\": 503, \"message\": \"...\" } }"
+# This patch extracts the nested `error.message` and re-throws with a clean
+# message so the chat UI shows only the human-readable part.
+node << 'PATCH7_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/geminiNativeProvider.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: readable Gemini errors")) {
+  console.log("readable Gemini errors already present, skipping");
+  process.exit(0);
+}
+
+// Step 1: insert helper function after IBYOKStorageService import
+const helperAnchor = "import { IBYOKStorageService } from './byokStorageService';";
+if (!code.includes(helperAnchor)) {
+  console.warn("WARN: IBYOKStorageService import anchor not found — skipping readable Gemini errors patch");
+  process.exit(0);
+}
+
+const helperBlock = `${helperAnchor}
+
+// ─── BYOK CUSTOM PATCH: readable Gemini errors ──────────────────────────────
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// The Gemini SDK (\`@google/genai\`) throws \`ApiError\` whose \`message\` is the
+// raw JSON body (e.g. \`{"error":{"code":503,"message":"...","status":"..."}}\`).
+// Surfacing that JSON in chat UI is noisy — extract the nested \`error.message\`.
+function extractReadableGeminiMessage(err: unknown): string {
+	if (err instanceof ApiError) {
+		try {
+			const parsed = JSON.parse(err.message);
+			const nested = parsed?.error?.message;
+			if (typeof nested === 'string' && nested.length > 0) {
+				return nested;
+			}
+		} catch { /* fall through */ }
+		return err.message;
+	}
+	return toErrorMessage(err);
+}
+// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────`;
+
+code = code.replace(helperAnchor, helperBlock);
+
+// Step 2: replace the `reason:` assignment + rethrow in doRequest's catch block
+const reasonAnchor = "reason: token.isCancellationRequested ? 'cancelled' : toErrorMessage(err)";
+if (code.includes(reasonAnchor)) {
+  // Inject a local `readableReason` variable before pendingLoggedChatRequest.resolve
+  const resolveAnchor = "pendingLoggedChatRequest.resolve({\n\t\t\t\t\ttype: token.isCancellationRequested ? ChatFetchResponseType.Canceled : ChatFetchResponseType.Unknown,\n\t\t\t\t\trequestId,\n\t\t\t\t\tserverRequestId: requestId,\n\t\t\t\t\treason: token.isCancellationRequested ? 'cancelled' : toErrorMessage(err)";
+  const resolveReplacement = "const readableReason = token.isCancellationRequested ? 'cancelled' : extractReadableGeminiMessage(err);\n\t\t\t\tpendingLoggedChatRequest.resolve({\n\t\t\t\t\ttype: token.isCancellationRequested ? ChatFetchResponseType.Canceled : ChatFetchResponseType.Unknown,\n\t\t\t\t\trequestId,\n\t\t\t\t\tserverRequestId: requestId,\n\t\t\t\t\treason: readableReason";
+  if (code.includes(resolveAnchor)) {
+    code = code.replace(resolveAnchor, resolveReplacement);
+  } else {
+    console.warn("WARN: pendingLoggedChatRequest.resolve anchor not found — skipping reason replacement");
+  }
+}
+
+// Step 3: replace `throw err;` at the end of doRequest's catch with wrapped throw
+const throwAnchor = "}));\n\t\t\t\tthrow err;\n\t\t\t} finally {\n\t\t\t\tcancelSub.dispose();";
+if (code.includes(throwAnchor)) {
+  const throwReplacement = "}));\n\t\t\t\tif (token.isCancellationRequested || err instanceof Error && err.name === 'AbortError') {\n\t\t\t\t\tthrow err;\n\t\t\t\t}\n\t\t\t\t// Re-throw with a clean message so the chat UI shows the human-readable\n\t\t\t\t// error (not the raw Gemini JSON blob). Preserve the original via `cause`.\n\t\t\t\tthrow new Error(readableReason, { cause: err });\n\t\t\t} finally {\n\t\t\t\tcancelSub.dispose();";
+  code = code.replace(throwAnchor, throwReplacement);
+}
+
+// Step 4: clean up the final throw inside _makeRequest too
+const makeRequestAnchor = "this._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);\n\t\t\tthrow error;";
+if (code.includes(makeRequestAnchor)) {
+  const makeRequestReplacement = "this._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);\n\t\t\tif ((error as any)?.name === 'AbortError' || token.isCancellationRequested) {\n\t\t\t\tthrow error;\n\t\t\t}\n\t\t\tthrow new Error(extractReadableGeminiMessage(error), { cause: error });";
+  code = code.replace(makeRequestAnchor, makeRequestReplacement);
+}
+
+fs.writeFileSync(f, code);
+console.log("Patched: readable Gemini errors");
+PATCH7_EOF
+
+# Patch 8: Gemini retry / timeout resilience
+# Gemini API 503s (model overloaded) and 429s (rate limits) are common. Without
+# retries the chat UI just errors out. This patch adds:
+#   - `retryCount` parameter + MAX_RETRIES = 6 with exponential backoff up to 60s
+#   - 120s connect timeout on `generateContentStream` to avoid 5-minute hangs
+#   - Progress messages to the user during retries
+#   - Retries on 429, 502, 503, 504 and transient network errors (ECONNRESET etc.)
+# Depends on Patch 7 (uses `extractReadableGeminiMessage` + the BYOK patch marker
+# as an anchor) — make sure Patch 7 runs first.
+node << 'PATCH8_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/geminiNativeProvider.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: Gemini retry resilience")) {
+  console.log("Gemini retry resilience already present, skipping");
+  process.exit(0);
+}
+
+// Require Patch 7 to have been applied — we reuse its marker as anchor.
+const patch7Marker = "// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────";
+if (!code.includes(patch7Marker)) {
+  console.warn("WARN: Patch 7 marker not found — skipping Gemini retry resilience patch");
+  process.exit(0);
+}
+
+// Step 1: inject retry helper immediately after Patch 7's END marker.
+// Use indexOf so we only replace the FIRST occurrence (Patch 7 in this file).
+const helperBlock = `${patch7Marker}
+
+// ─── BYOK CUSTOM PATCH: Gemini retry resilience ─────────────────────────────
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Classify SDK / transport errors as retryable. Returns a label used in
+// progress messages, or null if the error is terminal.
+function classifyRetryableGeminiError(err: unknown): 'rate-limit' | 'unavailable' | 'network' | null {
+	if (err instanceof ApiError) {
+		if (err.status === 429) { return 'rate-limit'; }
+		if (err.status === 502 || err.status === 503 || err.status === 504) { return 'unavailable'; }
+		return null;
+	}
+	const e = err as any;
+	const code = typeof e?.code === 'string' ? e.code : (typeof e?.cause?.code === 'string' ? e.cause.code : undefined);
+	const transientCodes = new Set(['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
+	if (code && transientCodes.has(code)) { return 'network'; }
+	const msg = typeof e?.message === 'string' ? e.message.toLowerCase() : '';
+	if (/fetch failed|network error|timed? ?out|socket hang up/.test(msg)) { return 'network'; }
+	return null;
+}
+// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────`;
+
+// Replace only the first occurrence of the marker.
+const firstMarkerIdx = code.indexOf(patch7Marker);
+code = code.slice(0, firstMarkerIdx) + helperBlock + code.slice(firstMarkerIdx + patch7Marker.length);
+
+// Step 2: add `retryCount = 0` parameter + MAX_RETRIES / CONNECT_TIMEOUT_MS constants.
+const sigAnchor = "private async _makeRequest(client: GoogleGenAI, progress: Progress<LMResponsePart>, params: GenerateContentParameters, token: CancellationToken, issuedTime: number): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined }> {\n\t\tconst start = Date.now();";
+if (!code.includes(sigAnchor)) {
+  console.warn("WARN: _makeRequest signature anchor not found — skipping Gemini retry resilience patch");
+  process.exit(0);
+}
+const sigReplacement = "private async _makeRequest(client: GoogleGenAI, progress: Progress<LMResponsePart>, params: GenerateContentParameters, token: CancellationToken, issuedTime: number, retryCount = 0): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined }> {\n\t\t// BYOK CUSTOM PATCH: retry + connect-timeout constants\n\t\tconst MAX_RETRIES = 6;\n\t\tconst CONNECT_TIMEOUT_MS = 120_000;\n\t\tconst start = Date.now();";
+code = code.replace(sigAnchor, sigReplacement);
+
+// Step 3: wrap `generateContentStream` in a connect timeout so hung requests
+// don't stall the whole chat turn for 5 minutes.
+const streamAnchor = "const stream = await client.models.generateContentStream(params);";
+if (code.includes(streamAnchor)) {
+  const streamReplacement = "let __byokConnectTimer: ReturnType<typeof setTimeout> | undefined;\n\t\t\tconst stream = await Promise.race([\n\t\t\t\tclient.models.generateContentStream(params),\n\t\t\t\tnew Promise<never>((_, reject) => {\n\t\t\t\t\t__byokConnectTimer = setTimeout(\n\t\t\t\t\t\t() => reject(new TypeError('Gemini API request timed out waiting for initial response')),\n\t\t\t\t\t\tCONNECT_TIMEOUT_MS\n\t\t\t\t\t);\n\t\t\t\t})\n\t\t\t]).finally(() => clearTimeout(__byokConnectTimer));";
+  code = code.replace(streamAnchor, streamReplacement);
+} else {
+  console.warn("WARN: generateContentStream anchor not found — skipping connect timeout");
+}
+
+// Step 4: inject retry logic in the catch block, before the final log/throw.
+// Anchor picks up the post-Patch-7 shape.
+const catchAnchor = "\t\t\treturn { ttft, ttfte, usage };\n\t\t} catch (error) {\n\t\t\tif ((error as any)?.name === 'AbortError' || token.isCancellationRequested) {\n\t\t\t\tthis._logService.trace('Gemini streaming aborted');\n\t\t\t\t// Return partial usage data collected before cancellation\n\t\t\t\treturn { ttft, ttfte, usage };\n\t\t\t}\n\t\t\tthis._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);";
+if (!code.includes(catchAnchor)) {
+  console.warn("WARN: _makeRequest catch anchor not found — skipping retry injection");
+  fs.writeFileSync(f, code);
+  process.exit(0);
+}
+const catchReplacement = "\t\t\treturn { ttft, ttfte, usage };\n\t\t} catch (error) {\n\t\t\tif ((error as any)?.name === 'AbortError' || token.isCancellationRequested) {\n\t\t\t\tthis._logService.trace('Gemini streaming aborted');\n\t\t\t\t// Return partial usage data collected before cancellation\n\t\t\t\treturn { ttft, ttfte, usage };\n\t\t\t}\n\t\t\t// ─── BYOK CUSTOM PATCH: retry on transient errors ─────────────\n\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t\tconst __byokRetryKind = classifyRetryableGeminiError(error);\n\t\t\tif (__byokRetryKind && retryCount < MAX_RETRIES) {\n\t\t\t\tconst __byokDelay = Math.min(5000 * Math.pow(2, retryCount), 60_000);\n\t\t\t\tconst __byokLabel = __byokRetryKind === 'rate-limit'\n\t\t\t\t\t? '[Rate limit] 429'\n\t\t\t\t\t: __byokRetryKind === 'unavailable'\n\t\t\t\t\t\t? '[Service unavailable] 503'\n\t\t\t\t\t\t: '[Network error]';\n\t\t\t\tthis._logService.warn(`Gemini ${__byokRetryKind} error, retrying in ${__byokDelay}ms (${retryCount + 1}/${MAX_RETRIES}): ${extractReadableGeminiMessage(error)}`);\n\t\t\t\tprogress.report(new LanguageModelThinkingPart(`${__byokLabel} retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(__byokDelay / 1000)}s...\\n`));\n\t\t\t\tawait new Promise(resolve => setTimeout(resolve, __byokDelay));\n\t\t\t\tif (token.isCancellationRequested) {\n\t\t\t\t\treturn { ttft, ttfte, usage };\n\t\t\t\t}\n\t\t\t\treturn this._makeRequest(client, progress, params, token, issuedTime, retryCount + 1);\n\t\t\t}\n\t\t\t// ─── END BYOK CUSTOM PATCH ────────────────────────────────────\n\t\t\tthis._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);";
+code = code.replace(catchAnchor, catchReplacement);
+
+fs.writeFileSync(f, code);
+console.log("Patched: Gemini retry resilience");
+PATCH8_EOF
+
+# Patch 9: Reinstall BYOK-only files that don't exist upstream
+# The sync workflow rsync's with --delete, which wipes any file not present in
+# microsoft/vscode. For files we add on top of the upstream tree, we keep a
+# canonical copy under `.github/byok-patches/files/` (excluded from --delete)
+# and re-install them here.
+install_byok_file() {
+  local src="$1"
+  local dest="$2"
+  if [ ! -f "$src" ]; then
+    echo "WARN: canonical BYOK file missing: $src"
+    return
+  fi
+  mkdir -p "$(dirname "$dest")"
+  if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+    echo "BYOK file up-to-date: $dest"
+    return
+  fi
+  cp "$src" "$dest"
+  echo "Installed BYOK file: $dest"
+}
+
+install_byok_file \
+  ".github/byok-patches/files/vertexAnthropicProvider.ts" \
+  "src/extension/byok/vscode-node/vertexAnthropicProvider.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/byokFailover.ts" \
+  "src/extension/byok/common/byokFailover.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/byokFailover.spec.ts" \
+  "src/extension/byok/common/test/byokFailover.spec.ts"
+
+# Patch 10: Anthropic provider — createClient() hook + fail-over wrapper
+# Required so VertexAnthropicLMProvider can subclass it and reuse the stream
+# handling, and so the primary Anthropic path can transparently failover to
+# Vertex on rate-limit / server / auth errors.
+node << 'PATCH10_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/anthropicProvider.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("setFailoverTarget")) {
+  console.log("Anthropic failover wrapper already present, skipping");
+  process.exit(0);
+}
+
+// Step 1: allow providerName override by subclasses.
+code = code.replace(
+  "public static readonly providerName = 'Anthropic';",
+  "// Typed as `string` so subclasses (VertexAnthropicLMProvider) can override.\n\tpublic static readonly providerName: string = 'Anthropic';"
+);
+
+// Step 2: expose _configurationService to subclasses.
+code = code.replace(
+  "@IConfigurationService private readonly _configurationService: IConfigurationService,",
+  "@IConfigurationService protected readonly _configurationService: IConfigurationService,"
+);
+
+// Step 3: import failover helpers.
+const importAnchor = "import { anthropicMessagesToRawMessagesForLogging, apiMessageToAnthropicMessage } from '../common/anthropicMessageConverter';";
+if (code.includes(importAnchor) && !code.includes("byokFailover")) {
+  code = code.replace(
+    importAnchor,
+    `${importAnchor}\nimport { anthropicPrimaryPool, classifyAnthropicError, DeferredProgress, isFailoverTrigger, keyFingerprint } from '../common/byokFailover';`
+  );
+}
+
+// Step 4: inject IAnthropicFailoverTarget interface + setFailoverTarget field.
+const classAnchor = "export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {";
+const classReplacement = `export interface IAnthropicFailoverTarget {
+	resolveFailoverModel(primaryModelId: string): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration> | undefined>;
+	provideLanguageModelChatResponse(model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void>;
+}
+
+export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
+
+	// BYOK CUSTOM PATCH — optional sibling provider (Vertex) used as a failover target.
+	private _failoverTarget: IAnthropicFailoverTarget | undefined;
+	setFailoverTarget(target: IAnthropicFailoverTarget | undefined): void { this._failoverTarget = target; }`;
+if (!code.includes("IAnthropicFailoverTarget")) {
+  code = code.replace(classAnchor, classReplacement);
+}
+
+// Step 5: replace `new Anthropic({ apiKey })` with `this.createClient(apiKey, model)`
+// and add the default createClient hook just before provideLanguageModelChatResponse.
+const createClientAnchor = "const anthropicClient = new Anthropic({ apiKey });";
+if (code.includes(createClientAnchor)) {
+  code = code.replace(createClientAnchor, "const anthropicClient = this.createClient(apiKey, model);");
+}
+
+const hookAnchor = "async provideLanguageModelChatResponse(model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>";
+if (!code.includes("protected createClient(apiKey: string")) {
+  code = code.replace(
+    hookAnchor,
+    `/** Hook for subclasses (e.g. Vertex) to replace the Anthropic client. */\n\tprotected createClient(apiKey: string, _model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>): Anthropic {\n\t\treturn new Anthropic({ apiKey });\n\t}\n\n\t${hookAnchor}`
+  );
+}
+
+// Step 6: wrap provideLanguageModelChatResponse with failover logic. We rename
+// the existing implementation to _doProvideLanguageModelChatResponse and add
+// a thin router as the new public method.
+const publicMethodSignature = "async provideLanguageModelChatResponse(model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {";
+// Only apply once — second occurrence is the wrapper we create.
+const firstIdx = code.indexOf(publicMethodSignature);
+const lastIdx = code.lastIndexOf(publicMethodSignature);
+if (firstIdx !== -1 && firstIdx === lastIdx) {
+  const wrapper = `async provideLanguageModelChatResponse(model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {
+		const failoverEnabled = !!this._failoverTarget
+			&& this._configurationService.getConfig(ConfigKey.ByokAnthropicFallbackEnabled);
+		if (!failoverEnabled) {
+			return this._doProvideLanguageModelChatResponse(model, messages, options, progress, token);
+		}
+		anthropicPrimaryPool.configure(
+			this._configurationService.getConfig(ConfigKey.ByokAnthropicMaxConcurrency),
+			this._configurationService.getConfig(ConfigKey.ByokAnthropicCooldownSeconds) * 1000,
+		);
+		const fingerprint = keyFingerprint(model.configuration?.apiKey);
+		const runSecondary = async (reason: string) => {
+			const target = this._failoverTarget!;
+			const secondaryModel = await target.resolveFailoverModel(model.id);
+			if (!secondaryModel) {
+				this._logService.warn(\`[BYOK failover] No Vertex fallback configured for \${model.id}; surfacing primary error.\`);
+				throw new Error(\`Anthropic failover requested (\${reason}) but no Vertex fallback is configured for \${model.id}\`);
+			}
+			this._logService.info(\`[BYOK failover] Routing \${model.id} via VertexAnthropic (\${reason}).\`);
+			return target.provideLanguageModelChatResponse(secondaryModel, messages, options, progress, token);
+		};
+		if (anthropicPrimaryPool.shouldSkipPrimary(fingerprint)) { return runSecondary('circuit-open'); }
+		const deferred = new DeferredProgress<LanguageModelResponsePart2>(progress);
+		anthropicPrimaryPool.acquireSlot(fingerprint);
+		try {
+			const commitOnFirstReport: Progress<LanguageModelResponsePart2> = {
+				report: value => { if (!deferred.hasCommitted()) { deferred.commit(); } deferred.report(value); },
+			};
+			await this._doProvideLanguageModelChatResponse(model, messages, options, commitOnFirstReport, token);
+			anthropicPrimaryPool.recordSuccess(fingerprint);
+			if (!deferred.hasCommitted()) { deferred.commit(); }
+		} catch (err) {
+			const classification = classifyAnthropicError(err);
+			anthropicPrimaryPool.recordFailure(fingerprint, classification);
+			if (isFailoverTrigger(classification) && !deferred.hasCommitted()) {
+				deferred.discard();
+				return runSecondary(classification);
+			}
+			deferred.commit();
+			throw err;
+		} finally {
+			anthropicPrimaryPool.releaseSlot(fingerprint);
+		}
+	}
+
+	private async _doProvideLanguageModelChatResponse(model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void> {`;
+  code = code.substring(0, firstIdx) + wrapper + code.substring(firstIdx + publicMethodSignature.length);
+}
+
+fs.writeFileSync(f, code);
+console.log("Patched: Anthropic createClient + failover wrapper");
+PATCH10_EOF
+
+# Patch 11: Register VertexAnthropic + wire failover in byokContribution.ts
+node << 'PATCH11_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/byokContribution.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("VertexAnthropicLMProvider")) {
+  console.log("VertexAnthropic already registered, skipping");
+  process.exit(0);
+}
+
+// Step 1: import.
+const xaiImport = "import { XAIBYOKLMProvider } from './xAIProvider';";
+if (code.includes(xaiImport)) {
+  code = code.replace(xaiImport, "import { VertexAnthropicLMProvider } from './vertexAnthropicProvider';\n" + xaiImport);
+}
+
+// Step 2: expand Anthropic provider set and add Vertex + wire failover.
+const anthropicLine = "this._providers.set(AnthropicLMProvider.providerName.toLowerCase(), instantiationService.createInstance(AnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService));";
+const replacement = "const anthropicProvider = instantiationService.createInstance(AnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService);\n\t\t\tthis._providers.set(AnthropicLMProvider.providerName.toLowerCase(), anthropicProvider);\n\t\t\t// BYOK CUSTOM PATCH: Vertex-hosted Anthropic, registered as a separate vendor so it has\n\t\t\t// independent API key / quota / concurrency state. Also wired as a failover target for\n\t\t\t// the direct Anthropic provider (gated by chat.byok.anthropic.fallback.enabled).\n\t\t\tconst vertexAnthropicProvider = instantiationService.createInstance(VertexAnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService);\n\t\t\tthis._providers.set(VertexAnthropicLMProvider.providerName.toLowerCase(), vertexAnthropicProvider);\n\t\t\tanthropicProvider.setFailoverTarget(vertexAnthropicProvider);";
+if (code.includes(anthropicLine)) {
+  code = code.replace(anthropicLine, replacement);
+} else {
+  console.warn("WARN: AnthropicLMProvider registration anchor not found — skipping");
+}
+
+fs.writeFileSync(f, code);
+console.log("Patched: byokContribution (VertexAnthropic + failover wire-up)");
+PATCH11_EOF
+
+# Patch 12: VertexAnthropic + Anthropic fallback settings in configurationService.ts
+node << 'PATCH12_EOF'
+const fs = require("fs");
+const f = "src/platform/configuration/common/configurationService.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("VertexAnthropicModels")) {
+  console.log("VertexAnthropicModels / fallback settings already present, skipping");
+  process.exit(0);
+}
+
+const anchor = "/**\n\t * Deprecated settings that are no longer in use.";
+if (!code.includes(anchor)) {
+  console.warn("WARN: Deprecated settings anchor not found — skipping");
+  process.exit(0);
+}
+
+const block = `/**
+	 * User-configured Vertex-hosted Anthropic models. Keyed by the full Vertex model id
+	 * (e.g. \`claude-sonnet-4-5@20250629\`).
+	 */
+	export const VertexAnthropicModels = defineSetting<Record<string, { name: string; projectId: string; locationId: string; maxInputTokens?: number; maxOutputTokens?: number }>>('chat.vertexAnthropicModels', ConfigType.Simple, {});
+
+	/** Failover policy for the Anthropic (direct) BYOK provider. */
+	export const ByokAnthropicFallbackEnabled = defineSetting<boolean>('chat.byok.anthropic.fallback.enabled', ConfigType.Simple, false);
+	/** Anthropic model id → Vertex model id override. */
+	export const ByokAnthropicFallbackModelMap = defineSetting<Record<string, string>>('chat.byok.anthropic.fallback.modelMap', ConfigType.Simple, {});
+	/** Max concurrent direct-Anthropic requests before routing to Vertex (0 = unlimited). */
+	export const ByokAnthropicMaxConcurrency = defineSetting<number>('chat.byok.anthropic.fallback.maxConcurrency', ConfigType.Simple, 0);
+	/** Cooldown (seconds) skipping direct Anthropic after a failover event. */
+	export const ByokAnthropicCooldownSeconds = defineSetting<number>('chat.byok.anthropic.fallback.cooldownSeconds', ConfigType.Simple, 60);
+
+	` + anchor;
+code = code.replace(anchor, block);
+
+fs.writeFileSync(f, code);
+console.log("Patched: configurationService (VertexAnthropicModels + fallback settings)");
+PATCH12_EOF
+
+# Patch 13: Ensure google-auth-library is a direct dependency.
+# Installed transitively by @google/genai, but we surface it so upstream
+# dependency pruning doesn't silently break Vertex auth.
+node << 'PATCH13_EOF'
+const fs = require("fs");
+const f = "package.json";
+const pkg = JSON.parse(fs.readFileSync(f, "utf8"));
+pkg.dependencies = pkg.dependencies || {};
+if (pkg.dependencies["google-auth-library"]) {
+  console.log("google-auth-library already in package.json dependencies, skipping");
+  process.exit(0);
+}
+pkg.dependencies["google-auth-library"] = "^9.15.1";
+// Keep dependencies alphabetically sorted to match the existing style.
+const sorted = Object.keys(pkg.dependencies).sort().reduce((acc, k) => {
+  acc[k] = pkg.dependencies[k];
+  return acc;
+}, {});
+pkg.dependencies = sorted;
+fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+console.log("Patched: google-auth-library pinned in package.json");
+PATCH13_EOF
