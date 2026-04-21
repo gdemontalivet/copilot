@@ -76,6 +76,45 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		return Math.min(32000, maxOutputTokens - 1, normalizedBudget);
 	}
 
+	// ─── BYOK CUSTOM PATCH: anthropic known-models capability fallback ────────
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Upstream's generic fallback for models missing from `_knownModels`
+	// hard-codes `maxInputTokens: 100000`, `vision: false`, `thinking: false`.
+	// Under the BYOK fake-token bypass `_knownModels` is almost always empty
+	// (the list is fetched from GitHub and filtered by Copilot subscription),
+	// so every Anthropic model falls through to that fallback and the user
+	// sees "vision is not supported by the current model" even when chatting
+	// with Claude Opus 4.6 which natively accepts images. Consult a small
+	// per-model-family capability table first.
+	private static readonly _KNOWN_ANTHROPIC_CAPABILITIES: Record<string, { maxInputTokens: number; maxOutputTokens: number; vision: boolean; thinking: boolean }> = {
+		'claude-opus-4-6': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true, thinking: true },
+		'claude-opus-4-5': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true, thinking: true },
+		'claude-opus-4': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true, thinking: true },
+		'claude-sonnet-4-5': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true, thinking: true },
+		'claude-sonnet-4': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true, thinking: true },
+		'claude-3-7-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true, thinking: true },
+		'claude-3-5-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 8_192, vision: true, thinking: false },
+		// Claude 3.5 Haiku is the one modern Claude that does NOT accept images.
+		'claude-3-5-haiku': { maxInputTokens: 200_000, maxOutputTokens: 8_192, vision: false, thinking: false },
+		'claude-3-opus': { maxInputTokens: 200_000, maxOutputTokens: 4_096, vision: true, thinking: false },
+		'claude-3-haiku': { maxInputTokens: 200_000, maxOutputTokens: 4_096, vision: true, thinking: false },
+	};
+	private _resolveAnthropicCapabilities(modelId: string): { maxInputTokens: number; maxOutputTokens: number; vision: boolean; thinking: boolean } | undefined {
+		// Claude API IDs usually carry a `-YYYYMMDD` date suffix
+		// (e.g. `claude-sonnet-4-5-20250629`). Longest-prefix match so
+		// `claude-3-5-sonnet-…` matches the 3.5 entry rather than `claude-3-…`.
+		let best: { maxInputTokens: number; maxOutputTokens: number; vision: boolean; thinking: boolean } | undefined;
+		let bestPrefix = '';
+		for (const [prefix, caps] of Object.entries(AnthropicLMProvider._KNOWN_ANTHROPIC_CAPABILITIES)) {
+			if ((modelId === prefix || modelId.startsWith(`${prefix}-`) || modelId.startsWith(`${prefix}@`) || modelId.startsWith(`${prefix}_`)) && prefix.length > bestPrefix.length) {
+				best = caps;
+				bestPrefix = prefix;
+			}
+		}
+		return best;
+	}
+	// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
+
 	// Filters the byok known models based on what the anthropic API knows as well
 	protected async getAllModels(silent: boolean, apiKey: string | undefined): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
 		if (!apiKey && silent) {
@@ -89,15 +128,33 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				if (this._knownModels && this._knownModels[model.id]) {
 					modelList[model.id] = this._knownModels[model.id];
 				} else {
-					// Mix in generic capabilities for models we don't know
-					modelList[model.id] = {
-						maxInputTokens: 100000,
-						maxOutputTokens: 16000,
-						name: model.display_name,
-						toolCalling: true,
-						vision: false,
-						thinking: false
-					};
+					// ─── BYOK CUSTOM PATCH: vision-aware generic fallback ──────────
+					// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+					// Consult the static known-capability table first; fall back to
+					// a safe generic entry only if the model family is unrecognised.
+					const known = this._resolveAnthropicCapabilities(model.id);
+					modelList[model.id] = known
+						? {
+							maxInputTokens: known.maxInputTokens,
+							maxOutputTokens: known.maxOutputTokens,
+							name: model.display_name,
+							toolCalling: true,
+							vision: known.vision,
+							thinking: known.thinking,
+						}
+						: {
+							maxInputTokens: 200_000,
+							maxOutputTokens: 16_000,
+							name: model.display_name,
+							toolCalling: true,
+							// Modern Claude is multimodal by default; the cost of a
+							// false positive (a 400 on image input against a text-only
+							// model Anthropic ships later) is far lower than the false
+							// negative ("vision is not supported") users hit today.
+							vision: true,
+							thinking: false,
+						};
+					// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────
 				}
 			}
 			return byokKnownModelsToAPIInfoWithEffort(this._name, modelList);

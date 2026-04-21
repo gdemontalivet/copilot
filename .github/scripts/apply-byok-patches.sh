@@ -1209,17 +1209,24 @@ fs.writeFileSync(f, code);
 console.log("Patched: renderPromptElementJSON copilot-base fallback");
 PATCH18_EOF
 
-# Patch 19: VertexAnthropic context defaults + known Claude model table.
+# Patch 19: VertexAnthropic context defaults + known Claude capability table.
 #
-# Upstream defaults `maxInputTokens` to 100K when a Vertex Anthropic model
-# config omits it — that's half the real 200K context window of modern Claude
-# models, and because `maxInputTokens` is a hard client-side cap in VS Code's
-# Language Model API, users see prompts silently rejected once the
-# conversation grows past 100K with no useful error. The JSON just fails to
-# send. Bump the default to 200K and, for users who drop a model ID into
-# `chatLanguageModels.json` without specifying limits, resolve per-model
-# capabilities via a small static lookup so new Claude releases work sensibly
-# out of the box.
+# Upstream hard-codes TWO wrong things for every Vertex-hosted Claude model:
+#
+#   1. `maxInputTokens` defaults to 100K when a Vertex model config omits it —
+#      that's half the real 200K context window of modern Claude models, and
+#      because `maxInputTokens` is a hard client-side cap in VS Code's LM API,
+#      prompts past 100K get rejected before they ever reach Vertex.
+#
+#   2. `vision: false` is hard-coded, so users see
+#      "vision is not supported by the current model or is disabled by your
+#      organization" even though every Claude model except Claude 3.5 Haiku
+#      supports image input natively.
+#
+# The fix is a single `resolveVertexAnthropicLimits` helper backed by a
+# static per-family capability table, plus a new optional `vision?: boolean`
+# field on `VertexAnthropicModelConfig` so users who want to force-disable
+# vision for a specific entry still can.
 node << 'PATCH19_EOF'
 const fs = require("fs");
 const f = "src/extension/byok/vscode-node/vertexAnthropicProvider.ts";
@@ -1230,8 +1237,16 @@ if (code.includes("BYOK CUSTOM PATCH: vertex anthropic sensible context defaults
   process.exit(0);
 }
 
+const modelConfigAnchor = `export interface VertexAnthropicModelConfig {\n\tname: string;\n\tprojectId: string;\n\tlocationId: string;\n\tmaxInputTokens?: number;\n\tmaxOutputTokens?: number;\n}`;
+const modelConfigReplacement = `export interface VertexAnthropicModelConfig {\n\tname: string;\n\tprojectId: string;\n\tlocationId: string;\n\tmaxInputTokens?: number;\n\tmaxOutputTokens?: number;\n\t/**\n\t * Override the default vision capability for this model. When omitted,\n\t * vision defaults to whatever the known-models table says for the model\n\t * ID (true for all modern Claude models except Claude 3.5 Haiku).\n\t */\n\tvision?: boolean;\n}`;
+if (!code.includes(modelConfigAnchor)) {
+  console.warn("WARN: VertexAnthropicModelConfig anchor not found — skipping patch 19 vision override field");
+} else {
+  code = code.replace(modelConfigAnchor, modelConfigReplacement);
+}
+
 const interfaceAnchor = `export interface VertexAnthropicProviderConfig extends LanguageModelChatConfiguration {\n\tmodels?: (VertexAnthropicModelConfig & { id: string })[];\n}`;
-const interfaceReplacement = `export interface VertexAnthropicProviderConfig extends LanguageModelChatConfiguration {\n\tmodels?: (VertexAnthropicModelConfig & { id: string })[];\n}\n\n// ─── BYOK CUSTOM PATCH: vertex anthropic sensible context defaults ────────────\n// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n// Upstream falls back to 100 000 when a Vertex model config omits\n// \`maxInputTokens\`, which is half of modern Claude models' real 200K context\n// window (and far less than the 1M that recent claude-sonnet-4 previews\n// advertise with the long-context beta). The symptom is dangerous: the VS\n// Code LM API treats \`maxInputTokens\` as a hard cap, so prompts approaching\n// 100K get rejected client-side before they ever reach Vertex — the chat UI\n// just stops responding with no useful error. We also provide a small\n// static lookup so users can drop a model ID into \`chatLanguageModels.json\`\n// without manually recalculating limits every time Anthropic ships a new\n// Claude release.\nconst DEFAULT_VERTEX_ANTHROPIC_MAX_INPUT_TOKENS = 200_000;\nconst DEFAULT_VERTEX_ANTHROPIC_MAX_OUTPUT_TOKENS = 8_192;\nconst KNOWN_VERTEX_ANTHROPIC_MODELS: Record<string, { maxInputTokens: number; maxOutputTokens: number }> = {\n\t'claude-opus-4-6': { maxInputTokens: 200_000, maxOutputTokens: 32_000 },\n\t'claude-opus-4-5': { maxInputTokens: 200_000, maxOutputTokens: 32_000 },\n\t'claude-opus-4': { maxInputTokens: 200_000, maxOutputTokens: 32_000 },\n\t'claude-sonnet-4-5': { maxInputTokens: 200_000, maxOutputTokens: 64_000 },\n\t'claude-sonnet-4': { maxInputTokens: 200_000, maxOutputTokens: 64_000 },\n\t'claude-3-7-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 64_000 },\n\t'claude-3-5-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 8_192 },\n\t'claude-3-5-haiku': { maxInputTokens: 200_000, maxOutputTokens: 8_192 },\n\t'claude-3-opus': { maxInputTokens: 200_000, maxOutputTokens: 4_096 },\n\t'claude-3-haiku': { maxInputTokens: 200_000, maxOutputTokens: 4_096 },\n};\nfunction resolveVertexAnthropicLimits(modelId: string, cfg: { maxInputTokens?: number; maxOutputTokens?: number }): { maxInputTokens: number; maxOutputTokens: number } {\n\t// Strip the \`@YYYYMMDD\` date suffix Vertex uses so \`claude-sonnet-4@20250629\`\n\t// matches the \`claude-sonnet-4\` known entry. Longest-prefix wins so\n\t// \`claude-3-5-sonnet-…\` hits the 3.5 entry rather than the bare \`claude-3-\`.\n\tconst stripped = modelId.replace(/@.*$/, '');\n\tlet known: { maxInputTokens: number; maxOutputTokens: number } | undefined;\n\tlet bestPrefix = '';\n\tfor (const [prefix, limits] of Object.entries(KNOWN_VERTEX_ANTHROPIC_MODELS)) {\n\t\tif ((stripped === prefix || stripped.startsWith(\`\${prefix}-\`) || stripped.startsWith(\`\${prefix}_\`)) && prefix.length > bestPrefix.length) {\n\t\t\tknown = limits;\n\t\t\tbestPrefix = prefix;\n\t\t}\n\t}\n\treturn {\n\t\tmaxInputTokens: cfg.maxInputTokens ?? known?.maxInputTokens ?? DEFAULT_VERTEX_ANTHROPIC_MAX_INPUT_TOKENS,\n\t\tmaxOutputTokens: cfg.maxOutputTokens ?? known?.maxOutputTokens ?? DEFAULT_VERTEX_ANTHROPIC_MAX_OUTPUT_TOKENS,\n\t};\n}\n// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────────`;
+const interfaceReplacement = `export interface VertexAnthropicProviderConfig extends LanguageModelChatConfiguration {\n\tmodels?: (VertexAnthropicModelConfig & { id: string })[];\n}\n\n// ─── BYOK CUSTOM PATCH: vertex anthropic sensible context defaults ────────────\n// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n// Upstream falls back to 100 000 when a Vertex model config omits\n// \`maxInputTokens\` and hard-codes \`vision: false\` for every Claude model,\n// which breaks two things:\n//   1. \`maxInputTokens=100000\` is half modern Claude's real 200K context;\n//      VS Code's LM API treats it as a hard cap and rejects prompts past\n//      100K before they ever reach Vertex.\n//   2. \`vision: false\` surfaces to the user as\n//      \"vision is not supported by the current model or is disabled by\n//      your organization\" — even though every Claude model except\n//      Claude 3.5 Haiku supports image input natively.\n// We provide a small static lookup so users can drop a model ID into\n// \`chatLanguageModels.json\` without manually recalculating limits or\n// flipping capability flags every time Anthropic ships a new release.\nconst DEFAULT_VERTEX_ANTHROPIC_MAX_INPUT_TOKENS = 200_000;\nconst DEFAULT_VERTEX_ANTHROPIC_MAX_OUTPUT_TOKENS = 8_192;\ninterface KnownVertexAnthropicModel { maxInputTokens: number; maxOutputTokens: number; vision: boolean }\nconst KNOWN_VERTEX_ANTHROPIC_MODELS: Record<string, KnownVertexAnthropicModel> = {\n\t'claude-opus-4-6': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true },\n\t'claude-opus-4-5': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true },\n\t'claude-opus-4': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true },\n\t'claude-sonnet-4-5': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true },\n\t'claude-sonnet-4': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true },\n\t'claude-3-7-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true },\n\t'claude-3-5-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 8_192, vision: true },\n\t// Claude 3.5 Haiku is the one modern Claude that does NOT accept images.\n\t'claude-3-5-haiku': { maxInputTokens: 200_000, maxOutputTokens: 8_192, vision: false },\n\t'claude-3-opus': { maxInputTokens: 200_000, maxOutputTokens: 4_096, vision: true },\n\t'claude-3-haiku': { maxInputTokens: 200_000, maxOutputTokens: 4_096, vision: true },\n};\ninterface ResolvedVertexAnthropicLimits { maxInputTokens: number; maxOutputTokens: number; vision: boolean }\nfunction resolveVertexAnthropicLimits(modelId: string, cfg: { maxInputTokens?: number; maxOutputTokens?: number; vision?: boolean }): ResolvedVertexAnthropicLimits {\n\t// Strip the \`@YYYYMMDD\` date suffix Vertex uses so \`claude-sonnet-4@20250629\`\n\t// matches the \`claude-sonnet-4\` known entry. Longest-prefix wins so\n\t// \`claude-3-5-sonnet-…\` hits the 3.5 entry rather than the bare \`claude-3-\`.\n\tconst stripped = modelId.replace(/@.*$/, '');\n\tlet known: KnownVertexAnthropicModel | undefined;\n\tlet bestPrefix = '';\n\tfor (const [prefix, limits] of Object.entries(KNOWN_VERTEX_ANTHROPIC_MODELS)) {\n\t\tif ((stripped === prefix || stripped.startsWith(\`\${prefix}-\`) || stripped.startsWith(\`\${prefix}_\`)) && prefix.length > bestPrefix.length) {\n\t\t\tknown = limits;\n\t\t\tbestPrefix = prefix;\n\t\t}\n\t}\n\treturn {\n\t\tmaxInputTokens: cfg.maxInputTokens ?? known?.maxInputTokens ?? DEFAULT_VERTEX_ANTHROPIC_MAX_INPUT_TOKENS,\n\t\tmaxOutputTokens: cfg.maxOutputTokens ?? known?.maxOutputTokens ?? DEFAULT_VERTEX_ANTHROPIC_MAX_OUTPUT_TOKENS,\n\t\t// Unknown models default to vision-on — modern Claude is multimodal\n\t\t// by default and the cost of a false positive (a harmless 400 on\n\t\t// image input) is far lower than the current false negative\n\t\t// (\"vision is not supported by the current model\").\n\t\tvision: cfg.vision ?? known?.vision ?? true,\n\t};\n}\n// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────────`;
 
 if (!code.includes(interfaceAnchor)) {
   console.warn("WARN: VertexAnthropicProviderConfig anchor not found — skipping patch 19");
@@ -1240,7 +1255,7 @@ if (!code.includes(interfaceAnchor)) {
 code = code.replace(interfaceAnchor, interfaceReplacement);
 
 const failoverAnchor = `\t\tconst baseInfo = byokKnownModelToAPIInfo(this._name, vertexId, {\n\t\t\tname: cfg.name || vertexId,\n\t\t\tmaxInputTokens: cfg.maxInputTokens || 100000,\n\t\t\tmaxOutputTokens: cfg.maxOutputTokens || 8192,\n\t\t\ttoolCalling: true,\n\t\t\tvision: false,\n\t\t});`;
-const failoverReplacement = `\t\tconst { maxInputTokens, maxOutputTokens } = resolveVertexAnthropicLimits(vertexId, cfg);\n\t\tconst baseInfo = byokKnownModelToAPIInfo(this._name, vertexId, {\n\t\t\tname: cfg.name || vertexId,\n\t\t\tmaxInputTokens,\n\t\t\tmaxOutputTokens,\n\t\t\ttoolCalling: true,\n\t\t\tvision: false,\n\t\t});`;
+const failoverReplacement = `\t\tconst { maxInputTokens, maxOutputTokens, vision } = resolveVertexAnthropicLimits(vertexId, cfg);\n\t\tconst baseInfo = byokKnownModelToAPIInfo(this._name, vertexId, {\n\t\t\tname: cfg.name || vertexId,\n\t\t\tmaxInputTokens,\n\t\t\tmaxOutputTokens,\n\t\t\ttoolCalling: true,\n\t\t\tvision,\n\t\t});`;
 if (!code.includes(failoverAnchor)) {
   console.warn("WARN: resolveFailoverModel 100K literal not found — skipping patch 19 failover site");
 } else {
@@ -1248,7 +1263,7 @@ if (!code.includes(failoverAnchor)) {
 }
 
 const listAnchor = `\t\tconst models: ExtendedLanguageModelChatInformation<VertexAnthropicProviderConfig>[] = [];\n\t\tfor (const modelConfig of modelConfigs) {\n\t\t\tconst modelId = modelConfig.id;\n\t\t\tmodels.push({\n\t\t\t\t...byokKnownModelToAPIInfo(this._name, modelId, {\n\t\t\t\t\tname: modelConfig.name || modelId,\n\t\t\t\t\tmaxInputTokens: modelConfig.maxInputTokens || 100000,\n\t\t\t\t\tmaxOutputTokens: modelConfig.maxOutputTokens || 8192,\n\t\t\t\t\ttoolCalling: true,\n\t\t\t\t\tvision: false\n\t\t\t\t}),\n\t\t\t\tconfiguration: {\n\t\t\t\t\tmodels: [{ ...modelConfig }]\n\t\t\t\t}\n\t\t\t});\n\t\t}\n\t\treturn models;`;
-const listReplacement = `\t\tconst models: ExtendedLanguageModelChatInformation<VertexAnthropicProviderConfig>[] = [];\n\t\tfor (const modelConfig of modelConfigs) {\n\t\t\tconst modelId = modelConfig.id;\n\t\t\tconst { maxInputTokens, maxOutputTokens } = resolveVertexAnthropicLimits(modelId, modelConfig);\n\t\t\tmodels.push({\n\t\t\t\t...byokKnownModelToAPIInfo(this._name, modelId, {\n\t\t\t\t\tname: modelConfig.name || modelId,\n\t\t\t\t\tmaxInputTokens,\n\t\t\t\t\tmaxOutputTokens,\n\t\t\t\t\ttoolCalling: true,\n\t\t\t\t\tvision: false\n\t\t\t\t}),\n\t\t\t\tconfiguration: {\n\t\t\t\t\tmodels: [{ ...modelConfig }]\n\t\t\t\t}\n\t\t\t});\n\t\t}\n\t\treturn models;`;
+const listReplacement = `\t\tconst models: ExtendedLanguageModelChatInformation<VertexAnthropicProviderConfig>[] = [];\n\t\tfor (const modelConfig of modelConfigs) {\n\t\t\tconst modelId = modelConfig.id;\n\t\t\tconst { maxInputTokens, maxOutputTokens, vision } = resolveVertexAnthropicLimits(modelId, modelConfig);\n\t\t\tmodels.push({\n\t\t\t\t...byokKnownModelToAPIInfo(this._name, modelId, {\n\t\t\t\t\tname: modelConfig.name || modelId,\n\t\t\t\t\tmaxInputTokens,\n\t\t\t\t\tmaxOutputTokens,\n\t\t\t\t\ttoolCalling: true,\n\t\t\t\t\tvision\n\t\t\t\t}),\n\t\t\t\tconfiguration: {\n\t\t\t\t\tmodels: [{ ...modelConfig }]\n\t\t\t\t}\n\t\t\t});\n\t\t}\n\t\treturn models;`;
 if (!code.includes(listAnchor)) {
   console.warn("WARN: getAllModels 100K literal not found — skipping patch 19 list site");
 } else {
@@ -1309,3 +1324,43 @@ if (!code.includes(returnAnchor)) {
 fs.writeFileSync(f, code);
 console.log("Patched: self-calibrating chars-per-token ratio for Anthropic/Vertex");
 PATCH20_EOF
+
+# Patch 21: Anthropic generic fallback capability table (vision default).
+#
+# `AnthropicLMProvider.getAllModels` populates model capabilities by first
+# checking `this._knownModels` (the GitHub-fetched Copilot BYOK list) and,
+# for anything missing, using a hard-coded generic fallback:
+#
+#     maxInputTokens: 100000
+#     vision: false
+#     thinking: false
+#
+# Under the BYOK fake-token bypass `_knownModels` is almost always empty
+# (the list is filtered by Copilot subscription entitlement, which we spoof
+# as `individual`), so every Anthropic model falls into that fallback and
+# the user sees "vision is not supported by the current model" even when
+# chatting with Claude Opus 4.6 or Sonnet 4.5 — both of which accept images
+# natively. Consult a small per-family static capability table first, and
+# make the ultimate generic fallback vision-on since every modern Claude
+# except 3.5 Haiku is multimodal.
+node << 'PATCH21_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/anthropicProvider.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: anthropic known-models capability fallback")) {
+  console.log("Anthropic capability fallback already present, skipping");
+  process.exit(0);
+}
+
+const anchor = `\t// Filters the byok known models based on what the anthropic API knows as well\n\tprotected async getAllModels(silent: boolean, apiKey: string | undefined): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {\n\t\tif (!apiKey && silent) {\n\t\t\treturn [];\n\t\t}\n\n\t\ttry {\n\t\t\tconst response = await new Anthropic({ apiKey }).models.list();\n\t\t\tconst modelList: Record<string, BYOKModelCapabilities> = {};\n\t\t\tfor (const model of response.data) {\n\t\t\t\tif (this._knownModels && this._knownModels[model.id]) {\n\t\t\t\t\tmodelList[model.id] = this._knownModels[model.id];\n\t\t\t\t} else {\n\t\t\t\t\t// Mix in generic capabilities for models we don't know\n\t\t\t\t\tmodelList[model.id] = {\n\t\t\t\t\t\tmaxInputTokens: 100000,\n\t\t\t\t\t\tmaxOutputTokens: 16000,\n\t\t\t\t\t\tname: model.display_name,\n\t\t\t\t\t\ttoolCalling: true,\n\t\t\t\t\t\tvision: false,\n\t\t\t\t\t\tthinking: false\n\t\t\t\t\t};\n\t\t\t\t}\n\t\t\t}\n\t\t\treturn byokKnownModelsToAPIInfoWithEffort(this._name, modelList);`;
+const replacement = `\t// ─── BYOK CUSTOM PATCH: anthropic known-models capability fallback ────────\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// Upstream's generic fallback for models missing from \`_knownModels\`\n\t// hard-codes \`maxInputTokens: 100000\`, \`vision: false\`, \`thinking: false\`.\n\t// Under the BYOK fake-token bypass \`_knownModels\` is almost always empty\n\t// (the list is fetched from GitHub and filtered by Copilot subscription),\n\t// so every Anthropic model falls through to that fallback and the user\n\t// sees \"vision is not supported by the current model\" even when chatting\n\t// with Claude Opus 4.6 which natively accepts images. Consult a small\n\t// per-model-family capability table first.\n\tprivate static readonly _KNOWN_ANTHROPIC_CAPABILITIES: Record<string, { maxInputTokens: number; maxOutputTokens: number; vision: boolean; thinking: boolean }> = {\n\t\t'claude-opus-4-6': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true, thinking: true },\n\t\t'claude-opus-4-5': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true, thinking: true },\n\t\t'claude-opus-4': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true, thinking: true },\n\t\t'claude-sonnet-4-5': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true, thinking: true },\n\t\t'claude-sonnet-4': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true, thinking: true },\n\t\t'claude-3-7-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true, thinking: true },\n\t\t'claude-3-5-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 8_192, vision: true, thinking: false },\n\t\t// Claude 3.5 Haiku is the one modern Claude that does NOT accept images.\n\t\t'claude-3-5-haiku': { maxInputTokens: 200_000, maxOutputTokens: 8_192, vision: false, thinking: false },\n\t\t'claude-3-opus': { maxInputTokens: 200_000, maxOutputTokens: 4_096, vision: true, thinking: false },\n\t\t'claude-3-haiku': { maxInputTokens: 200_000, maxOutputTokens: 4_096, vision: true, thinking: false },\n\t};\n\tprivate _resolveAnthropicCapabilities(modelId: string): { maxInputTokens: number; maxOutputTokens: number; vision: boolean; thinking: boolean } | undefined {\n\t\t// Claude API IDs usually carry a \`-YYYYMMDD\` date suffix\n\t\t// (e.g. \`claude-sonnet-4-5-20250629\`). Longest-prefix match so\n\t\t// \`claude-3-5-sonnet-…\` matches the 3.5 entry rather than \`claude-3-…\`.\n\t\tlet best: { maxInputTokens: number; maxOutputTokens: number; vision: boolean; thinking: boolean } | undefined;\n\t\tlet bestPrefix = '';\n\t\tfor (const [prefix, caps] of Object.entries(AnthropicLMProvider._KNOWN_ANTHROPIC_CAPABILITIES)) {\n\t\t\tif ((modelId === prefix || modelId.startsWith(\`\${prefix}-\`) || modelId.startsWith(\`\${prefix}@\`) || modelId.startsWith(\`\${prefix}_\`)) && prefix.length > bestPrefix.length) {\n\t\t\t\tbest = caps;\n\t\t\t\tbestPrefix = prefix;\n\t\t\t}\n\t\t}\n\t\treturn best;\n\t}\n\t// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────\n\n\t// Filters the byok known models based on what the anthropic API knows as well\n\tprotected async getAllModels(silent: boolean, apiKey: string | undefined): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {\n\t\tif (!apiKey && silent) {\n\t\t\treturn [];\n\t\t}\n\n\t\ttry {\n\t\t\tconst response = await new Anthropic({ apiKey }).models.list();\n\t\t\tconst modelList: Record<string, BYOKModelCapabilities> = {};\n\t\t\tfor (const model of response.data) {\n\t\t\t\tif (this._knownModels && this._knownModels[model.id]) {\n\t\t\t\t\tmodelList[model.id] = this._knownModels[model.id];\n\t\t\t\t} else {\n\t\t\t\t\t// ─── BYOK CUSTOM PATCH: vision-aware generic fallback ──────────\n\t\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t\t\t\t// Consult the static known-capability table first; fall back to\n\t\t\t\t\t// a safe generic entry only if the model family is unrecognised.\n\t\t\t\t\tconst known = this._resolveAnthropicCapabilities(model.id);\n\t\t\t\t\tmodelList[model.id] = known\n\t\t\t\t\t\t? {\n\t\t\t\t\t\t\tmaxInputTokens: known.maxInputTokens,\n\t\t\t\t\t\t\tmaxOutputTokens: known.maxOutputTokens,\n\t\t\t\t\t\t\tname: model.display_name,\n\t\t\t\t\t\t\ttoolCalling: true,\n\t\t\t\t\t\t\tvision: known.vision,\n\t\t\t\t\t\t\tthinking: known.thinking,\n\t\t\t\t\t\t}\n\t\t\t\t\t\t: {\n\t\t\t\t\t\t\tmaxInputTokens: 200_000,\n\t\t\t\t\t\t\tmaxOutputTokens: 16_000,\n\t\t\t\t\t\t\tname: model.display_name,\n\t\t\t\t\t\t\ttoolCalling: true,\n\t\t\t\t\t\t\t// Modern Claude is multimodal by default; the cost of a\n\t\t\t\t\t\t\t// false positive (a 400 on image input against a text-only\n\t\t\t\t\t\t\t// model Anthropic ships later) is far lower than the false\n\t\t\t\t\t\t\t// negative (\"vision is not supported\") users hit today.\n\t\t\t\t\t\t\tvision: true,\n\t\t\t\t\t\t\tthinking: false,\n\t\t\t\t\t\t};\n\t\t\t\t\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────\n\t\t\t\t}\n\t\t\t}\n\t\t\treturn byokKnownModelsToAPIInfoWithEffort(this._name, modelList);`;
+
+if (!code.includes(anchor)) {
+  console.warn("WARN: AnthropicLMProvider.getAllModels anchor not found — skipping patch 21");
+  process.exit(0);
+}
+code = code.replace(anchor, replacement);
+fs.writeFileSync(f, code);
+console.log("Patched: Anthropic known-models capability fallback (vision-aware)");
+PATCH21_EOF

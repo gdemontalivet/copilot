@@ -27,6 +27,12 @@ export interface VertexAnthropicModelConfig {
 	locationId: string;
 	maxInputTokens?: number;
 	maxOutputTokens?: number;
+	/**
+	 * Override the default vision capability for this model. When omitted,
+	 * vision defaults to whatever the known-models table says for the model
+	 * ID (true for all modern Claude models except Claude 3.5 Haiku).
+	 */
+	vision?: boolean;
 }
 
 export interface VertexAnthropicProviderConfig extends LanguageModelChatConfiguration {
@@ -36,35 +42,41 @@ export interface VertexAnthropicProviderConfig extends LanguageModelChatConfigur
 // ─── BYOK CUSTOM PATCH: vertex anthropic sensible context defaults ────────────
 // Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
 // Upstream falls back to 100 000 when a Vertex model config omits
-// `maxInputTokens`, which is half of modern Claude models' real 200K context
-// window (and far less than the 1M that recent claude-sonnet-4 previews
-// advertise with the long-context beta). The symptom is dangerous: the VS
-// Code LM API treats `maxInputTokens` as a hard cap, so prompts approaching
-// 100K get rejected client-side before they ever reach Vertex — the chat UI
-// just stops responding with no useful error. We also provide a small
-// static lookup so users can drop a model ID into `chatLanguageModels.json`
-// without manually recalculating limits every time Anthropic ships a new
-// Claude release.
+// `maxInputTokens` and hard-codes `vision: false` for every Claude model,
+// which breaks two things:
+//   1. `maxInputTokens=100000` is half modern Claude's real 200K context;
+//      VS Code's LM API treats it as a hard cap and rejects prompts past
+//      100K before they ever reach Vertex.
+//   2. `vision: false` surfaces to the user as
+//      "vision is not supported by the current model or is disabled by
+//      your organization" — even though every Claude model except
+//      Claude 3.5 Haiku supports image input natively.
+// We provide a small static lookup so users can drop a model ID into
+// `chatLanguageModels.json` without manually recalculating limits or
+// flipping capability flags every time Anthropic ships a new release.
 const DEFAULT_VERTEX_ANTHROPIC_MAX_INPUT_TOKENS = 200_000;
 const DEFAULT_VERTEX_ANTHROPIC_MAX_OUTPUT_TOKENS = 8_192;
-const KNOWN_VERTEX_ANTHROPIC_MODELS: Record<string, { maxInputTokens: number; maxOutputTokens: number }> = {
-	'claude-opus-4-6': { maxInputTokens: 200_000, maxOutputTokens: 32_000 },
-	'claude-opus-4-5': { maxInputTokens: 200_000, maxOutputTokens: 32_000 },
-	'claude-opus-4': { maxInputTokens: 200_000, maxOutputTokens: 32_000 },
-	'claude-sonnet-4-5': { maxInputTokens: 200_000, maxOutputTokens: 64_000 },
-	'claude-sonnet-4': { maxInputTokens: 200_000, maxOutputTokens: 64_000 },
-	'claude-3-7-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 64_000 },
-	'claude-3-5-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 8_192 },
-	'claude-3-5-haiku': { maxInputTokens: 200_000, maxOutputTokens: 8_192 },
-	'claude-3-opus': { maxInputTokens: 200_000, maxOutputTokens: 4_096 },
-	'claude-3-haiku': { maxInputTokens: 200_000, maxOutputTokens: 4_096 },
+interface KnownVertexAnthropicModel { maxInputTokens: number; maxOutputTokens: number; vision: boolean }
+const KNOWN_VERTEX_ANTHROPIC_MODELS: Record<string, KnownVertexAnthropicModel> = {
+	'claude-opus-4-6': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true },
+	'claude-opus-4-5': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true },
+	'claude-opus-4': { maxInputTokens: 200_000, maxOutputTokens: 32_000, vision: true },
+	'claude-sonnet-4-5': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true },
+	'claude-sonnet-4': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true },
+	'claude-3-7-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 64_000, vision: true },
+	'claude-3-5-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 8_192, vision: true },
+	// Claude 3.5 Haiku is the one modern Claude that does NOT accept images.
+	'claude-3-5-haiku': { maxInputTokens: 200_000, maxOutputTokens: 8_192, vision: false },
+	'claude-3-opus': { maxInputTokens: 200_000, maxOutputTokens: 4_096, vision: true },
+	'claude-3-haiku': { maxInputTokens: 200_000, maxOutputTokens: 4_096, vision: true },
 };
-function resolveVertexAnthropicLimits(modelId: string, cfg: { maxInputTokens?: number; maxOutputTokens?: number }): { maxInputTokens: number; maxOutputTokens: number } {
+interface ResolvedVertexAnthropicLimits { maxInputTokens: number; maxOutputTokens: number; vision: boolean }
+function resolveVertexAnthropicLimits(modelId: string, cfg: { maxInputTokens?: number; maxOutputTokens?: number; vision?: boolean }): ResolvedVertexAnthropicLimits {
 	// Strip the `@YYYYMMDD` date suffix Vertex uses so `claude-sonnet-4@20250629`
 	// matches the `claude-sonnet-4` known entry. Longest-prefix wins so
 	// `claude-3-5-sonnet-…` hits the 3.5 entry rather than the bare `claude-3-`.
 	const stripped = modelId.replace(/@.*$/, '');
-	let known: { maxInputTokens: number; maxOutputTokens: number } | undefined;
+	let known: KnownVertexAnthropicModel | undefined;
 	let bestPrefix = '';
 	for (const [prefix, limits] of Object.entries(KNOWN_VERTEX_ANTHROPIC_MODELS)) {
 		if ((stripped === prefix || stripped.startsWith(`${prefix}-`) || stripped.startsWith(`${prefix}_`)) && prefix.length > bestPrefix.length) {
@@ -75,6 +87,11 @@ function resolveVertexAnthropicLimits(modelId: string, cfg: { maxInputTokens?: n
 	return {
 		maxInputTokens: cfg.maxInputTokens ?? known?.maxInputTokens ?? DEFAULT_VERTEX_ANTHROPIC_MAX_INPUT_TOKENS,
 		maxOutputTokens: cfg.maxOutputTokens ?? known?.maxOutputTokens ?? DEFAULT_VERTEX_ANTHROPIC_MAX_OUTPUT_TOKENS,
+		// Unknown models default to vision-on — modern Claude is multimodal
+		// by default and the cost of a false positive (a harmless 400 on
+		// image input) is far lower than the current false negative
+		// ("vision is not supported by the current model").
+		vision: cfg.vision ?? known?.vision ?? true,
 	};
 }
 // ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────────
@@ -184,13 +201,13 @@ export class VertexAnthropicLMProvider extends AnthropicLMProvider implements IA
 			return undefined;
 		}
 
-		const { maxInputTokens, maxOutputTokens } = resolveVertexAnthropicLimits(vertexId, cfg);
+		const { maxInputTokens, maxOutputTokens, vision } = resolveVertexAnthropicLimits(vertexId, cfg);
 		const baseInfo = byokKnownModelToAPIInfo(this._name, vertexId, {
 			name: cfg.name || vertexId,
 			maxInputTokens,
 			maxOutputTokens,
 			toolCalling: true,
-			vision: false,
+			vision,
 		});
 		const failoverConfig: VertexAnthropicProviderConfig = {
 			apiKey,
@@ -218,14 +235,14 @@ export class VertexAnthropicLMProvider extends AnthropicLMProvider implements IA
 		const models: ExtendedLanguageModelChatInformation<VertexAnthropicProviderConfig>[] = [];
 		for (const modelConfig of modelConfigs) {
 			const modelId = modelConfig.id;
-			const { maxInputTokens, maxOutputTokens } = resolveVertexAnthropicLimits(modelId, modelConfig);
+			const { maxInputTokens, maxOutputTokens, vision } = resolveVertexAnthropicLimits(modelId, modelConfig);
 			models.push({
 				...byokKnownModelToAPIInfo(this._name, modelId, {
 					name: modelConfig.name || modelId,
 					maxInputTokens,
 					maxOutputTokens,
 					toolCalling: true,
-					vision: false
+					vision
 				}),
 				configuration: {
 					models: [{ ...modelConfig }]
