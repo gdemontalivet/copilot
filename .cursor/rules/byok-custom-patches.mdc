@@ -128,6 +128,7 @@ When making a custom change that touches upstream files:
 15. **Patch 15** — Short-circuit `switchToBaseModel()` in `chatParticipants.ts` before it looks up `copilot-base`, which throws in BYOK-only mode.
 16. **Patch 16** — Tolerate `copilot-fast` unavailability in `VirtualToolGrouper._generateBulkGroupDescriptions` so MCP-heavy workspaces (>128 tools) don't crash the chat turn when `gpt-4o-mini` can't be resolved under the fake-token bypass.
 17. **Patch 17** — `sanitizeAnthropicToolId` in `anthropicMessageConverter.ts`. Rewrites cross-provider tool-call ids (e.g. Gemini's `func_call.abc.123`) to match Anthropic's `^[a-zA-Z0-9_-]+$` validator so switching mid-conversation from Gemini to Claude doesn't 400.
+18. **Patch 18** — `renderPromptElementJSON` copilot-base fallback in `promptRenderer.ts`. The common trunk every file/edit tool uses to render tool results (read_file, list_dir, file_search, grep_search, get_errors, edit tools via codeMapper, etc.) hard-codes `getChatEndpoint('copilot-base')`, which throws under the fake-token bypass. Wraps the lookup in try/catch and falls back to `getAllChatEndpoints()[0]`.
 
 When you add a new patch, bump the number and add an entry here.
 
@@ -213,3 +214,11 @@ loaded), tipping `VirtualToolGrouper` into its LLM-summarization path.
 / non-copilot requests before the `copilot-base` lookup. Patch 16 wraps the
 `copilot-fast` lookup in `_generateBulkGroupDescriptions` in try/catch and
 falls back to deterministic group descriptions so chat turns still complete.
+Patch 18 covers the third (and most impactful) site: `renderPromptElementJSON`
+in `promptRenderer.ts`, which every built-in file tool routes through. Without
+it the chat looks superficially healthy (turns complete, model answers) but
+`read_file` / `list_dir` / `file_search` / `grep_search` / `get_errors` /
+edits via `codeMapper` all fail with "Unable to resolve chat model with family
+selection: copilot-base", typically manifesting as the assistant blaming MCP,
+workspace indexing, or your Copilot subscription for a problem that is
+entirely in the BYOK fake-token path.
