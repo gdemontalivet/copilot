@@ -1208,3 +1208,104 @@ code = code.replace(original, replacement);
 fs.writeFileSync(f, code);
 console.log("Patched: renderPromptElementJSON copilot-base fallback");
 PATCH18_EOF
+
+# Patch 19: VertexAnthropic context defaults + known Claude model table.
+#
+# Upstream defaults `maxInputTokens` to 100K when a Vertex Anthropic model
+# config omits it — that's half the real 200K context window of modern Claude
+# models, and because `maxInputTokens` is a hard client-side cap in VS Code's
+# Language Model API, users see prompts silently rejected once the
+# conversation grows past 100K with no useful error. The JSON just fails to
+# send. Bump the default to 200K and, for users who drop a model ID into
+# `chatLanguageModels.json` without specifying limits, resolve per-model
+# capabilities via a small static lookup so new Claude releases work sensibly
+# out of the box.
+node << 'PATCH19_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/vertexAnthropicProvider.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: vertex anthropic sensible context defaults")) {
+  console.log("VertexAnthropic context defaults already present, skipping");
+  process.exit(0);
+}
+
+const interfaceAnchor = `export interface VertexAnthropicProviderConfig extends LanguageModelChatConfiguration {\n\tmodels?: (VertexAnthropicModelConfig & { id: string })[];\n}`;
+const interfaceReplacement = `export interface VertexAnthropicProviderConfig extends LanguageModelChatConfiguration {\n\tmodels?: (VertexAnthropicModelConfig & { id: string })[];\n}\n\n// ─── BYOK CUSTOM PATCH: vertex anthropic sensible context defaults ────────────\n// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n// Upstream falls back to 100 000 when a Vertex model config omits\n// \`maxInputTokens\`, which is half of modern Claude models' real 200K context\n// window (and far less than the 1M that recent claude-sonnet-4 previews\n// advertise with the long-context beta). The symptom is dangerous: the VS\n// Code LM API treats \`maxInputTokens\` as a hard cap, so prompts approaching\n// 100K get rejected client-side before they ever reach Vertex — the chat UI\n// just stops responding with no useful error. We also provide a small\n// static lookup so users can drop a model ID into \`chatLanguageModels.json\`\n// without manually recalculating limits every time Anthropic ships a new\n// Claude release.\nconst DEFAULT_VERTEX_ANTHROPIC_MAX_INPUT_TOKENS = 200_000;\nconst DEFAULT_VERTEX_ANTHROPIC_MAX_OUTPUT_TOKENS = 8_192;\nconst KNOWN_VERTEX_ANTHROPIC_MODELS: Record<string, { maxInputTokens: number; maxOutputTokens: number }> = {\n\t'claude-opus-4-6': { maxInputTokens: 200_000, maxOutputTokens: 32_000 },\n\t'claude-opus-4-5': { maxInputTokens: 200_000, maxOutputTokens: 32_000 },\n\t'claude-opus-4': { maxInputTokens: 200_000, maxOutputTokens: 32_000 },\n\t'claude-sonnet-4-5': { maxInputTokens: 200_000, maxOutputTokens: 64_000 },\n\t'claude-sonnet-4': { maxInputTokens: 200_000, maxOutputTokens: 64_000 },\n\t'claude-3-7-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 64_000 },\n\t'claude-3-5-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 8_192 },\n\t'claude-3-5-haiku': { maxInputTokens: 200_000, maxOutputTokens: 8_192 },\n\t'claude-3-opus': { maxInputTokens: 200_000, maxOutputTokens: 4_096 },\n\t'claude-3-haiku': { maxInputTokens: 200_000, maxOutputTokens: 4_096 },\n};\nfunction resolveVertexAnthropicLimits(modelId: string, cfg: { maxInputTokens?: number; maxOutputTokens?: number }): { maxInputTokens: number; maxOutputTokens: number } {\n\t// Strip the \`@YYYYMMDD\` date suffix Vertex uses so \`claude-sonnet-4@20250629\`\n\t// matches the \`claude-sonnet-4\` known entry. Longest-prefix wins so\n\t// \`claude-3-5-sonnet-…\` hits the 3.5 entry rather than the bare \`claude-3-\`.\n\tconst stripped = modelId.replace(/@.*$/, '');\n\tlet known: { maxInputTokens: number; maxOutputTokens: number } | undefined;\n\tlet bestPrefix = '';\n\tfor (const [prefix, limits] of Object.entries(KNOWN_VERTEX_ANTHROPIC_MODELS)) {\n\t\tif ((stripped === prefix || stripped.startsWith(\`\${prefix}-\`) || stripped.startsWith(\`\${prefix}_\`)) && prefix.length > bestPrefix.length) {\n\t\t\tknown = limits;\n\t\t\tbestPrefix = prefix;\n\t\t}\n\t}\n\treturn {\n\t\tmaxInputTokens: cfg.maxInputTokens ?? known?.maxInputTokens ?? DEFAULT_VERTEX_ANTHROPIC_MAX_INPUT_TOKENS,\n\t\tmaxOutputTokens: cfg.maxOutputTokens ?? known?.maxOutputTokens ?? DEFAULT_VERTEX_ANTHROPIC_MAX_OUTPUT_TOKENS,\n\t};\n}\n// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────────`;
+
+if (!code.includes(interfaceAnchor)) {
+  console.warn("WARN: VertexAnthropicProviderConfig anchor not found — skipping patch 19");
+  process.exit(0);
+}
+code = code.replace(interfaceAnchor, interfaceReplacement);
+
+const failoverAnchor = `\t\tconst baseInfo = byokKnownModelToAPIInfo(this._name, vertexId, {\n\t\t\tname: cfg.name || vertexId,\n\t\t\tmaxInputTokens: cfg.maxInputTokens || 100000,\n\t\t\tmaxOutputTokens: cfg.maxOutputTokens || 8192,\n\t\t\ttoolCalling: true,\n\t\t\tvision: false,\n\t\t});`;
+const failoverReplacement = `\t\tconst { maxInputTokens, maxOutputTokens } = resolveVertexAnthropicLimits(vertexId, cfg);\n\t\tconst baseInfo = byokKnownModelToAPIInfo(this._name, vertexId, {\n\t\t\tname: cfg.name || vertexId,\n\t\t\tmaxInputTokens,\n\t\t\tmaxOutputTokens,\n\t\t\ttoolCalling: true,\n\t\t\tvision: false,\n\t\t});`;
+if (!code.includes(failoverAnchor)) {
+  console.warn("WARN: resolveFailoverModel 100K literal not found — skipping patch 19 failover site");
+} else {
+  code = code.replace(failoverAnchor, failoverReplacement);
+}
+
+const listAnchor = `\t\tconst models: ExtendedLanguageModelChatInformation<VertexAnthropicProviderConfig>[] = [];\n\t\tfor (const modelConfig of modelConfigs) {\n\t\t\tconst modelId = modelConfig.id;\n\t\t\tmodels.push({\n\t\t\t\t...byokKnownModelToAPIInfo(this._name, modelId, {\n\t\t\t\t\tname: modelConfig.name || modelId,\n\t\t\t\t\tmaxInputTokens: modelConfig.maxInputTokens || 100000,\n\t\t\t\t\tmaxOutputTokens: modelConfig.maxOutputTokens || 8192,\n\t\t\t\t\ttoolCalling: true,\n\t\t\t\t\tvision: false\n\t\t\t\t}),\n\t\t\t\tconfiguration: {\n\t\t\t\t\tmodels: [{ ...modelConfig }]\n\t\t\t\t}\n\t\t\t});\n\t\t}\n\t\treturn models;`;
+const listReplacement = `\t\tconst models: ExtendedLanguageModelChatInformation<VertexAnthropicProviderConfig>[] = [];\n\t\tfor (const modelConfig of modelConfigs) {\n\t\t\tconst modelId = modelConfig.id;\n\t\t\tconst { maxInputTokens, maxOutputTokens } = resolveVertexAnthropicLimits(modelId, modelConfig);\n\t\t\tmodels.push({\n\t\t\t\t...byokKnownModelToAPIInfo(this._name, modelId, {\n\t\t\t\t\tname: modelConfig.name || modelId,\n\t\t\t\t\tmaxInputTokens,\n\t\t\t\t\tmaxOutputTokens,\n\t\t\t\t\ttoolCalling: true,\n\t\t\t\t\tvision: false\n\t\t\t\t}),\n\t\t\t\tconfiguration: {\n\t\t\t\t\tmodels: [{ ...modelConfig }]\n\t\t\t\t}\n\t\t\t});\n\t\t}\n\t\treturn models;`;
+if (!code.includes(listAnchor)) {
+  console.warn("WARN: getAllModels 100K literal not found — skipping patch 19 list site");
+} else {
+  code = code.replace(listAnchor, listReplacement);
+}
+
+fs.writeFileSync(f, code);
+console.log("Patched: VertexAnthropic context defaults + known Claude model table");
+PATCH19_EOF
+
+# Patch 20: Self-calibrating chars-per-token ratio for Anthropic/Vertex.
+#
+# Upstream's `provideTokenCount` returns `Math.ceil(text.length / 4)`, which
+# is optimistic for Claude — actual ratio is closer to 3.3 for code/JSON,
+# ~3.8 for English. That heuristic drives the VS Code chat UI's context
+# window indicator *and* our tiered auto-compaction thresholds (patches
+# 4, 6), so an optimistic count means the user can silently approach the
+# true model cap without a warning. Calling Anthropic's
+# `/messages/count_tokens` endpoint per invocation would be prohibitively
+# expensive (this method is hot), so instead we seed each model with a
+# tighter baseline (3.5) and self-calibrate from the real `usage.input_tokens`
+# every streamed response returns. After 2-3 turns the ratio converges to
+# ground truth for the actual conversation style.
+node << 'PATCH20_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/anthropicProvider.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: self-calibrating chars-per-token ratio")) {
+  console.log("Anthropic token-ratio calibration already present, skipping");
+  process.exit(0);
+}
+
+const provideTokenCountAnchor = `\tasync provideTokenCount(model: LanguageModelChatInformation, text: string | LanguageModelChatMessage | LanguageModelChatMessage2, token: CancellationToken): Promise<number> {\n\t\t// Simple estimation - actual token count would require Claude's tokenizer\n\t\treturn Math.ceil(text.toString().length / 4);\n\t}`;
+const provideTokenCountReplacement = `\t// ─── BYOK CUSTOM PATCH: self-calibrating chars-per-token ratio ────────────\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// Upstream returns \`Math.ceil(text.length / 4)\`, which is optimistic for\n\t// Claude (actual ratio is closer to 3.3 for code/JSON, 3.8 for English).\n\t// Calling Anthropic's \`/messages/count_tokens\` endpoint on every\n\t// \`provideTokenCount\` invocation would be unusable (this method is hot —\n\t// VS Code calls it dozens of times per turn for UI sizing), so instead\n\t// we seed each model with a tighter baseline (3.5) and self-calibrate\n\t// from the real \`usage.input_tokens\` that every response returns. After\n\t// 2-3 turns the ratio converges to ground-truth for the specific\n\t// conversation style (code-heavy vs prose vs tool-call-heavy).\n\t//\n\t// The UI context-window indicator and auto-compaction thresholds\n\t// (Patches 4, 6) both flow from this number, so accuracy here directly\n\t// determines whether "we'll run out without noticing" or get a timely\n\t// warning before the hard cap.\n\tprivate static readonly _INITIAL_CHARS_PER_TOKEN = 3.5;\n\tprivate readonly _charsPerTokenByModel = new Map<string, number>();\n\tprivate _recordActualInputTokens(modelId: string, promptChars: number, actualInputTokens: number): void {\n\t\tif (!modelId || promptChars <= 0 || actualInputTokens <= 0) {\n\t\t\treturn;\n\t\t}\n\t\tconst observed = promptChars / actualInputTokens;\n\t\t// Reject pathological observations (empty prompts, cache-only hits,\n\t\t// count_tokens mismatches from context editing) that would otherwise\n\t\t// yank the running average around. 1.5–8.0 brackets every realistic\n\t\t// tokenizer ratio across English, code, and heavily-nested JSON.\n\t\tif (!isFinite(observed) || observed < 1.5 || observed > 8.0) {\n\t\t\treturn;\n\t\t}\n\t\tconst prior = this._charsPerTokenByModel.get(modelId) ?? AnthropicLMProvider._INITIAL_CHARS_PER_TOKEN;\n\t\t// EMA with α=0.3 — recent turns dominate but a single weird turn can't\n\t\t// overwrite the prior. Converges visibly within ~3 turns.\n\t\tconst smoothed = prior * 0.7 + observed * 0.3;\n\t\tthis._charsPerTokenByModel.set(modelId, smoothed);\n\t\tthis._logService.trace(\`[BYOK Anthropic] token-ratio calibrated for \${modelId}: chars/token=\${smoothed.toFixed(2)} (observed \${observed.toFixed(2)}, \${actualInputTokens} real tokens for \${promptChars} chars)\`);\n\t}\n\n\tasync provideTokenCount(model: LanguageModelChatInformation, text: string | LanguageModelChatMessage | LanguageModelChatMessage2, token: CancellationToken): Promise<number> {\n\t\tconst ratio = this._charsPerTokenByModel.get(model.id) ?? AnthropicLMProvider._INITIAL_CHARS_PER_TOKEN;\n\t\treturn Math.ceil(text.toString().length / ratio);\n\t}\n\t// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────`;
+if (!code.includes(provideTokenCountAnchor)) {
+  console.warn("WARN: provideTokenCount anchor not found — skipping patch 20");
+  process.exit(0);
+}
+code = code.replace(provideTokenCountAnchor, provideTokenCountReplacement);
+
+const makeRequestAnchor = `\tprivate async _makeRequest(anthropicClient: Anthropic, progress: RecordedProgress<LMResponsePart>, params: Anthropic.Beta.Messages.MessageCreateParamsStreaming, betas: string[], token: CancellationToken, issuedTime: number): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined; contextManagement: ContextManagementResponse | undefined }> {\n\t\tconst start = Date.now();\n\t\tlet ttft: number | undefined;\n\t\tlet ttfte: number | undefined;\n\n\t\tconst stream = await anthropicClient.beta.messages.create({`;
+const makeRequestReplacement = `\tprivate async _makeRequest(anthropicClient: Anthropic, progress: RecordedProgress<LMResponsePart>, params: Anthropic.Beta.Messages.MessageCreateParamsStreaming, betas: string[], token: CancellationToken, issuedTime: number): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined; contextManagement: ContextManagementResponse | undefined }> {\n\t\tconst start = Date.now();\n\t\tlet ttft: number | undefined;\n\t\tlet ttfte: number | undefined;\n\n\t\t// ─── BYOK CUSTOM PATCH: capture prompt chars for token ratio calibration ──\n\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t// Serialize the outgoing prompt once so that after the response returns\n\t\t// we can divide promptChars / actual input_tokens to derive a real\n\t\t// chars-per-token ratio for this model. JSON.stringify is a reasonable\n\t\t// proxy for \"what the tokenizer sees\" — it captures both message text\n\t\t// and the boilerplate (role markers, tool schemas, etc.) that\n\t\t// contribute to the prompt size.\n\t\tconst promptChars = (() => {\n\t\t\ttry {\n\t\t\t\treturn JSON.stringify({ system: params.system, messages: params.messages }).length;\n\t\t\t} catch {\n\t\t\t\treturn 0;\n\t\t\t}\n\t\t})();\n\t\t// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────\n\n\t\tconst stream = await anthropicClient.beta.messages.create({`;
+if (!code.includes(makeRequestAnchor)) {
+  console.warn("WARN: _makeRequest stream-start anchor not found — skipping patch 20 promptChars site");
+} else {
+  code = code.replace(makeRequestAnchor, makeRequestReplacement);
+}
+
+const returnAnchor = `\t\treturn { ttft, ttfte, usage, contextManagement: contextManagementResponse };\n\t}\n}`;
+const returnReplacement = `\t\t// ─── BYOK CUSTOM PATCH: calibrate chars-per-token from real usage ─────────\n\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t// \`usage.prompt_tokens\` here already folds in cache-creation and\n\t\t// cache-read tokens (see \`message_start\` handling above), which is what\n\t\t// Anthropic actually billed and what their tokenizer produced. Using it\n\t\t// to calibrate \`provideTokenCount\` keeps the UI context indicator and\n\t\t// auto-compaction thresholds honest over the life of the conversation.\n\t\tif (usage && usage.prompt_tokens > 0) {\n\t\t\tthis._recordActualInputTokens(params.model, promptChars, usage.prompt_tokens);\n\t\t}\n\t\t// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────\n\n\t\treturn { ttft, ttfte, usage, contextManagement: contextManagementResponse };\n\t}\n}`;
+if (!code.includes(returnAnchor)) {
+  console.warn("WARN: _makeRequest return anchor not found — skipping patch 20 calibration site");
+} else {
+  code = code.replace(returnAnchor, returnReplacement);
+}
+
+fs.writeFileSync(f, code);
+console.log("Patched: self-calibrating chars-per-token ratio for Anthropic/Vertex");
+PATCH20_EOF

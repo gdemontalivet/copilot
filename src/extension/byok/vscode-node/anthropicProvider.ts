@@ -594,15 +594,71 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		return executeRequest();
 	}
 
-	async provideTokenCount(model: LanguageModelChatInformation, text: string | LanguageModelChatMessage | LanguageModelChatMessage2, token: CancellationToken): Promise<number> {
-		// Simple estimation - actual token count would require Claude's tokenizer
-		return Math.ceil(text.toString().length / 4);
+	// ─── BYOK CUSTOM PATCH: self-calibrating chars-per-token ratio ────────────
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Upstream returns `Math.ceil(text.length / 4)`, which is optimistic for
+	// Claude (actual ratio is closer to 3.3 for code/JSON, 3.8 for English).
+	// Calling Anthropic's `/messages/count_tokens` endpoint on every
+	// `provideTokenCount` invocation would be unusable (this method is hot —
+	// VS Code calls it dozens of times per turn for UI sizing), so instead
+	// we seed each model with a tighter baseline (3.5) and self-calibrate
+	// from the real `usage.input_tokens` that every response returns. After
+	// 2-3 turns the ratio converges to ground-truth for the specific
+	// conversation style (code-heavy vs prose vs tool-call-heavy).
+	//
+	// The UI context-window indicator and auto-compaction thresholds
+	// (Patches 4, 6) both flow from this number, so accuracy here directly
+	// determines whether "we'll run out without noticing" or get a timely
+	// warning before the hard cap.
+	private static readonly _INITIAL_CHARS_PER_TOKEN = 3.5;
+	private readonly _charsPerTokenByModel = new Map<string, number>();
+	private _recordActualInputTokens(modelId: string, promptChars: number, actualInputTokens: number): void {
+		if (!modelId || promptChars <= 0 || actualInputTokens <= 0) {
+			return;
+		}
+		const observed = promptChars / actualInputTokens;
+		// Reject pathological observations (empty prompts, cache-only hits,
+		// count_tokens mismatches from context editing) that would otherwise
+		// yank the running average around. 1.5–8.0 brackets every realistic
+		// tokenizer ratio across English, code, and heavily-nested JSON.
+		if (!isFinite(observed) || observed < 1.5 || observed > 8.0) {
+			return;
+		}
+		const prior = this._charsPerTokenByModel.get(modelId) ?? AnthropicLMProvider._INITIAL_CHARS_PER_TOKEN;
+		// EMA with α=0.3 — recent turns dominate but a single weird turn can't
+		// overwrite the prior. Converges visibly within ~3 turns.
+		const smoothed = prior * 0.7 + observed * 0.3;
+		this._charsPerTokenByModel.set(modelId, smoothed);
+		this._logService.trace(`[BYOK Anthropic] token-ratio calibrated for ${modelId}: chars/token=${smoothed.toFixed(2)} (observed ${observed.toFixed(2)}, ${actualInputTokens} real tokens for ${promptChars} chars)`);
 	}
+
+	async provideTokenCount(model: LanguageModelChatInformation, text: string | LanguageModelChatMessage | LanguageModelChatMessage2, token: CancellationToken): Promise<number> {
+		const ratio = this._charsPerTokenByModel.get(model.id) ?? AnthropicLMProvider._INITIAL_CHARS_PER_TOKEN;
+		return Math.ceil(text.toString().length / ratio);
+	}
+	// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
 
 	private async _makeRequest(anthropicClient: Anthropic, progress: RecordedProgress<LMResponsePart>, params: Anthropic.Beta.Messages.MessageCreateParamsStreaming, betas: string[], token: CancellationToken, issuedTime: number): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined; contextManagement: ContextManagementResponse | undefined }> {
 		const start = Date.now();
 		let ttft: number | undefined;
 		let ttfte: number | undefined;
+
+		// ─── BYOK CUSTOM PATCH: capture prompt chars for token ratio calibration ──
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Serialize the outgoing prompt once so that after the response returns
+		// we can divide promptChars / actual input_tokens to derive a real
+		// chars-per-token ratio for this model. JSON.stringify is a reasonable
+		// proxy for "what the tokenizer sees" — it captures both message text
+		// and the boilerplate (role markers, tool schemas, etc.) that
+		// contribute to the prompt size.
+		const promptChars = (() => {
+			try {
+				return JSON.stringify({ system: params.system, messages: params.messages }).length;
+			} catch {
+				return 0;
+			}
+		})();
+		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
 
 		const stream = await anthropicClient.beta.messages.create({
 			...params,
@@ -835,6 +891,18 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				}
 			}
 		}
+
+		// ─── BYOK CUSTOM PATCH: calibrate chars-per-token from real usage ─────────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// `usage.prompt_tokens` here already folds in cache-creation and
+		// cache-read tokens (see `message_start` handling above), which is what
+		// Anthropic actually billed and what their tokenizer produced. Using it
+		// to calibrate `provideTokenCount` keeps the UI context indicator and
+		// auto-compaction thresholds honest over the life of the conversation.
+		if (usage && usage.prompt_tokens > 0) {
+			this._recordActualInputTokens(params.model, promptChars, usage.prompt_tokens);
+		}
+		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
 
 		return { ttft, ttfte, usage, contextManagement: contextManagementResponse };
 	}

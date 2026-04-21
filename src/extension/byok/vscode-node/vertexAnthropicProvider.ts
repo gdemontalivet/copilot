@@ -33,6 +33,52 @@ export interface VertexAnthropicProviderConfig extends LanguageModelChatConfigur
 	models?: (VertexAnthropicModelConfig & { id: string })[];
 }
 
+// ─── BYOK CUSTOM PATCH: vertex anthropic sensible context defaults ────────────
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Upstream falls back to 100 000 when a Vertex model config omits
+// `maxInputTokens`, which is half of modern Claude models' real 200K context
+// window (and far less than the 1M that recent claude-sonnet-4 previews
+// advertise with the long-context beta). The symptom is dangerous: the VS
+// Code LM API treats `maxInputTokens` as a hard cap, so prompts approaching
+// 100K get rejected client-side before they ever reach Vertex — the chat UI
+// just stops responding with no useful error. We also provide a small
+// static lookup so users can drop a model ID into `chatLanguageModels.json`
+// without manually recalculating limits every time Anthropic ships a new
+// Claude release.
+const DEFAULT_VERTEX_ANTHROPIC_MAX_INPUT_TOKENS = 200_000;
+const DEFAULT_VERTEX_ANTHROPIC_MAX_OUTPUT_TOKENS = 8_192;
+const KNOWN_VERTEX_ANTHROPIC_MODELS: Record<string, { maxInputTokens: number; maxOutputTokens: number }> = {
+	'claude-opus-4-6': { maxInputTokens: 200_000, maxOutputTokens: 32_000 },
+	'claude-opus-4-5': { maxInputTokens: 200_000, maxOutputTokens: 32_000 },
+	'claude-opus-4': { maxInputTokens: 200_000, maxOutputTokens: 32_000 },
+	'claude-sonnet-4-5': { maxInputTokens: 200_000, maxOutputTokens: 64_000 },
+	'claude-sonnet-4': { maxInputTokens: 200_000, maxOutputTokens: 64_000 },
+	'claude-3-7-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 64_000 },
+	'claude-3-5-sonnet': { maxInputTokens: 200_000, maxOutputTokens: 8_192 },
+	'claude-3-5-haiku': { maxInputTokens: 200_000, maxOutputTokens: 8_192 },
+	'claude-3-opus': { maxInputTokens: 200_000, maxOutputTokens: 4_096 },
+	'claude-3-haiku': { maxInputTokens: 200_000, maxOutputTokens: 4_096 },
+};
+function resolveVertexAnthropicLimits(modelId: string, cfg: { maxInputTokens?: number; maxOutputTokens?: number }): { maxInputTokens: number; maxOutputTokens: number } {
+	// Strip the `@YYYYMMDD` date suffix Vertex uses so `claude-sonnet-4@20250629`
+	// matches the `claude-sonnet-4` known entry. Longest-prefix wins so
+	// `claude-3-5-sonnet-…` hits the 3.5 entry rather than the bare `claude-3-`.
+	const stripped = modelId.replace(/@.*$/, '');
+	let known: { maxInputTokens: number; maxOutputTokens: number } | undefined;
+	let bestPrefix = '';
+	for (const [prefix, limits] of Object.entries(KNOWN_VERTEX_ANTHROPIC_MODELS)) {
+		if ((stripped === prefix || stripped.startsWith(`${prefix}-`) || stripped.startsWith(`${prefix}_`)) && prefix.length > bestPrefix.length) {
+			known = limits;
+			bestPrefix = prefix;
+		}
+	}
+	return {
+		maxInputTokens: cfg.maxInputTokens ?? known?.maxInputTokens ?? DEFAULT_VERTEX_ANTHROPIC_MAX_INPUT_TOKENS,
+		maxOutputTokens: cfg.maxOutputTokens ?? known?.maxOutputTokens ?? DEFAULT_VERTEX_ANTHROPIC_MAX_OUTPUT_TOKENS,
+	};
+}
+// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────────
+
 /**
  * Routes Anthropic (Claude) requests through Google Cloud Vertex AI instead of
  * Anthropic's direct API. Useful as a failover target when the direct API is
@@ -138,10 +184,11 @@ export class VertexAnthropicLMProvider extends AnthropicLMProvider implements IA
 			return undefined;
 		}
 
+		const { maxInputTokens, maxOutputTokens } = resolveVertexAnthropicLimits(vertexId, cfg);
 		const baseInfo = byokKnownModelToAPIInfo(this._name, vertexId, {
 			name: cfg.name || vertexId,
-			maxInputTokens: cfg.maxInputTokens || 100000,
-			maxOutputTokens: cfg.maxOutputTokens || 8192,
+			maxInputTokens,
+			maxOutputTokens,
 			toolCalling: true,
 			vision: false,
 		});
@@ -171,11 +218,12 @@ export class VertexAnthropicLMProvider extends AnthropicLMProvider implements IA
 		const models: ExtendedLanguageModelChatInformation<VertexAnthropicProviderConfig>[] = [];
 		for (const modelConfig of modelConfigs) {
 			const modelId = modelConfig.id;
+			const { maxInputTokens, maxOutputTokens } = resolveVertexAnthropicLimits(modelId, modelConfig);
 			models.push({
 				...byokKnownModelToAPIInfo(this._name, modelId, {
 					name: modelConfig.name || modelId,
-					maxInputTokens: modelConfig.maxInputTokens || 100000,
-					maxOutputTokens: modelConfig.maxOutputTokens || 8192,
+					maxInputTokens,
+					maxOutputTokens,
 					toolCalling: true,
 					vision: false
 				}),
