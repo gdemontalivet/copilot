@@ -1768,6 +1768,23 @@
 				}
 			},
 			{
+				"vendor": "VertexAnthropic",
+				"displayName": "Anthropic (Vertex AI)",
+				"configuration": {
+					"properties": {
+						"apiKey": {
+							"type": "string",
+							"secret": true,
+							"description": "Google Cloud service-account JSON or access token for the Vertex AI project that hosts the Claude model family.",
+							"title": "Vertex AI credentials"
+						}
+					},
+					"required": [
+						"apiKey"
+					]
+				}
+			},
+			{
 				"vendor": "xai",
 				"displayName": "xAI",
 				"configuration": {

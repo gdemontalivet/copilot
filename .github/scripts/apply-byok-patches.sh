@@ -784,3 +784,116 @@ pkg.dependencies = sorted;
 fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
 console.log("Patched: google-auth-library pinned in package.json");
 PATCH13_EOF
+
+# Patch 14: Declare VertexAnthropic as a known languageModelChatProviders vendor.
+# Without this, VS Code refuses the registration at runtime with
+# "Chat model provider uses UNKNOWN vendor vertexanthropic", which in turn
+# breaks downstream `copilot-base` / family resolution for the primary chat
+# participant. The entry is placed right after the `anthropic` entry so the
+# two providers stay adjacent in the manifest.
+node << 'PATCH14_EOF'
+const fs = require("fs");
+const f = "package.json";
+const pkg = JSON.parse(fs.readFileSync(f, "utf8"));
+const contributes = pkg.contributes || {};
+const providers = contributes.languageModelChatProviders;
+if (!Array.isArray(providers)) {
+  console.log("languageModelChatProviders missing, skipping VertexAnthropic registration");
+  process.exit(0);
+}
+if (providers.some(p => p && p.vendor === "VertexAnthropic")) {
+  console.log("VertexAnthropic vendor already declared, skipping");
+  process.exit(0);
+}
+const anthropicIdx = providers.findIndex(p => p && p.vendor === "anthropic");
+const entry = {
+  vendor: "VertexAnthropic",
+  displayName: "Anthropic (Vertex AI)",
+  configuration: {
+    properties: {
+      apiKey: {
+        type: "string",
+        secret: true,
+        description: "Google Cloud service-account JSON or access token for the Vertex AI project that hosts the Claude model family.",
+        title: "Vertex AI credentials"
+      }
+    },
+    required: ["apiKey"]
+  }
+};
+if (anthropicIdx >= 0) {
+  providers.splice(anthropicIdx + 1, 0, entry);
+} else {
+  providers.push(entry);
+}
+contributes.languageModelChatProviders = providers;
+pkg.contributes = contributes;
+fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+console.log("Patched: VertexAnthropic vendor declared in package.json");
+PATCH14_EOF
+
+# Patch 15: Short-circuit switchToBaseModel() for BYOK / free / non-copilot
+# requests BEFORE resolving the copilot-base endpoint.
+#
+# Upstream unconditionally calls `getChatEndpoint('copilot-base')` at the top
+# of the method, which throws in BYOK-only mode (our fake-token bypass leaves
+# `_copilotBaseModel` undefined and the rest of the function never gets to
+# run). Since the existing guard already returns `request` unchanged for
+# non-copilot vendors / 0x or undefined multipliers, move that guard *above*
+# the base-endpoint lookup so BYOK requests never trigger the failed fetch.
+#
+# Symptom fixed (from exthost.log):
+#   [error] Error: Unable to resolve chat model with family selection: copilot-base
+#     at SS.getChatModelFromFamily (…)
+#     at async n$.getChatEndpoint (…)
+#     at async r4e.switchToBaseModel (…)
+node << 'PATCH15_EOF'
+const fs = require("fs");
+const f = "src/extension/conversation/vscode-node/chatParticipants.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: skip copilot-base lookup for BYOK / free requests")) {
+  console.log("switchToBaseModel BYOK guard already present, skipping");
+  process.exit(0);
+}
+
+const original = `private async switchToBaseModel(request: vscode.ChatRequest, stream: vscode.ChatResponseStream): Promise<ChatRequest> {
+\t\tconst endpoint = await this.endpointProvider.getChatEndpoint(request);
+\t\tconst baseEndpoint = await this.endpointProvider.getChatEndpoint('copilot-base');
+\t\t// If it has a 0x multipler, it's free so don't switch them. If it's BYOK, it's free so don't switch them.
+\t\tif (endpoint.multiplier === 0 || request.model.vendor !== 'copilot' || endpoint.multiplier === undefined) {
+\t\t\treturn request;
+\t\t}
+\t\tif (this._chatQuotaService.overagesEnabled || !this._chatQuotaService.quotaExhausted) {
+\t\t\treturn request;
+\t\t}
+\t\tconst baseLmModel = (await vscode.lm.selectChatModels({ id: baseEndpoint.model, family: baseEndpoint.family, vendor: 'copilot' }))[0];`;
+
+const replacement = `private async switchToBaseModel(request: vscode.ChatRequest, stream: vscode.ChatResponseStream): Promise<ChatRequest> {
+\t\tconst endpoint = await this.endpointProvider.getChatEndpoint(request);
+\t\t// ─── BYOK CUSTOM PATCH: skip copilot-base lookup for BYOK / free requests ───
+\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+\t\t// Upstream unconditionally calls \`getChatEndpoint('copilot-base')\` here, which
+\t\t// throws in BYOK-only mode (fake-token bypass leaves \`_copilotBaseModel\`
+\t\t// unset). Since we short-circuit below for non-copilot / 0x / undefined-
+\t\t// multiplier requests anyway, do the guard *before* the base-endpoint
+\t\t// resolution to avoid the unnecessary (and failure-prone) lookup.
+\t\tif (endpoint.multiplier === 0 || request.model.vendor !== 'copilot' || endpoint.multiplier === undefined) {
+\t\t\treturn request;
+\t\t}
+\t\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
+\t\tif (this._chatQuotaService.overagesEnabled || !this._chatQuotaService.quotaExhausted) {
+\t\t\treturn request;
+\t\t}
+\t\tconst baseEndpoint = await this.endpointProvider.getChatEndpoint('copilot-base');
+\t\tconst baseLmModel = (await vscode.lm.selectChatModels({ id: baseEndpoint.model, family: baseEndpoint.family, vendor: 'copilot' }))[0];`;
+
+if (!code.includes(original)) {
+  console.error("ERROR: switchToBaseModel source did not match expected shape; skipping patch 15");
+  console.error("       Inspect chatParticipants.ts and update apply-byok-patches.sh to match.");
+  process.exit(0);
+}
+code = code.replace(original, replacement);
+fs.writeFileSync(f, code);
+console.log("Patched: switchToBaseModel BYOK short-circuit");
+PATCH15_EOF
