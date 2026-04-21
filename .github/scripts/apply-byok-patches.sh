@@ -801,13 +801,26 @@ if (!Array.isArray(providers)) {
   console.log("languageModelChatProviders missing, skipping VertexAnthropic registration");
   process.exit(0);
 }
-if (providers.some(p => p && p.vendor === "VertexAnthropic")) {
-  console.log("VertexAnthropic vendor already declared, skipping");
+// Vendor name must be lowercase to match `providerName.toLowerCase()` used in
+// `byokContribution.ts` when calling `lm.registerLanguageModelChatProvider()`.
+// Any past camelCase variants are normalised here so a bad manifest doesn't
+// linger after a patch-script upgrade.
+for (const p of providers) {
+  if (p && typeof p.vendor === "string" && p.vendor.toLowerCase() === "vertexanthropic" && p.vendor !== "vertexanthropic") {
+    console.log("Normalising existing VertexAnthropic vendor casing (" + p.vendor + " -> vertexanthropic)");
+    p.vendor = "vertexanthropic";
+  }
+}
+if (providers.some(p => p && p.vendor === "vertexanthropic")) {
+  contributes.languageModelChatProviders = providers;
+  pkg.contributes = contributes;
+  fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+  console.log("VertexAnthropic vendor already declared, ensured lowercase");
   process.exit(0);
 }
 const anthropicIdx = providers.findIndex(p => p && p.vendor === "anthropic");
 const entry = {
-  vendor: "VertexAnthropic",
+  vendor: "vertexanthropic",
   displayName: "Anthropic (Vertex AI)",
   configuration: {
     properties: {

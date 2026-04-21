@@ -1768,7 +1768,7 @@
 				}
 			},
 			{
-				"vendor": "VertexAnthropic",
+				"vendor": "vertexanthropic",
 				"displayName": "Anthropic (Vertex AI)",
 				"configuration": {
 					"properties": {
