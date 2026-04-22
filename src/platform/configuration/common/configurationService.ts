@@ -886,6 +886,14 @@ export namespace ConfigKey {
 	 */
 	export const VertexAnthropicModels = defineSetting<Record<string, { name: string; projectId: string; locationId: string; maxInputTokens?: number; maxOutputTokens?: number }>>('chat.vertexAnthropicModels', ConfigType.Simple, {});
 
+	/**
+	 * BYOK custom setting. Maps Vertex Gemini model ids to per-model config
+	 * (GCP project/location + optional context + vision overrides). Keyed by
+	 * the Vertex model id (e.g. `gemini-3.1-pro-preview`). Parallels
+	 * {@link VertexAnthropicModels}.
+	 */
+	export const VertexGeminiModels = defineSetting<Record<string, { name: string; projectId: string; locationId: string; maxInputTokens?: number; maxOutputTokens?: number; vision?: boolean }>>('chat.vertexGeminiModels', ConfigType.Simple, {});
+
 	/** Failover policy for the Anthropic (direct) BYOK provider. */
 	export const ByokAnthropicFallbackEnabled = defineSetting<boolean>('chat.byok.anthropic.fallback.enabled', ConfigType.Simple, false);
 	/** Anthropic model id → Vertex model id override. */

@@ -2,7 +2,7 @@
 	"name": "copilot-chat",
 	"displayName": "Copilot Full BYOK",
 	"description": "AI chat features powered by Copilot — Full Bring Your Own Key edition",
-	"version": "0.46.1",
+	"version": "0.46.2",
 	"build": "1",
 	"internalAIKey": "1058ec22-3c95-4951-8443-f26c1f325911",
 	"completionsCoreVersion": "1.378.1799",
@@ -1811,6 +1811,23 @@
 							"secret": true,
 							"description": "API key for Google Gemini",
 							"title": "API Key"
+						}
+					},
+					"required": [
+						"apiKey"
+					]
+				}
+			},
+			{
+				"vendor": "vertexgemini",
+				"displayName": "Google Gemini (Vertex AI)",
+				"configuration": {
+					"properties": {
+						"apiKey": {
+							"type": "string",
+							"secret": true,
+							"description": "Google Cloud service-account JSON or access token for the Vertex AI project that hosts the Gemini model family.",
+							"title": "Vertex AI credentials"
 						}
 					},
 					"required": [

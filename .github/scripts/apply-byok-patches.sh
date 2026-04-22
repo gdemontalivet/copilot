@@ -671,6 +671,10 @@ install_byok_file \
   ".github/byok-patches/files/byokFailover.spec.ts" \
   "src/extension/byok/common/test/byokFailover.spec.ts"
 
+install_byok_file \
+  ".github/byok-patches/files/vertexGeminiProvider.ts" \
+  "src/extension/byok/vscode-node/vertexGeminiProvider.ts"
+
 # Patch 10: Anthropic provider — createClient() hook + fail-over wrapper
 # Required so VertexAnthropicLMProvider can subclass it and reuse the stream
 # handling, and so the primary Anthropic path can transparently failover to
@@ -1930,3 +1934,184 @@ code = code.replace(tryEndAnchor, tryEndReplacement);
 fs.writeFileSync(f, code);
 console.log("Patched: Anthropic retry + readable-error resilience");
 PATCH25_EOF
+
+# Patch 26: Gemini provider — subclassable providerName + createClient() hook
+# Required so VertexGeminiLMProvider can subclass GeminiNativeBYOKLMProvider
+# and swap in a Vertex-configured `GoogleGenAI` client without re-implementing
+# the 300+ line streaming / OTel / retry pipeline.
+node << 'PATCH26_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/geminiNativeProvider.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: createClient hook")) {
+  console.log("Gemini createClient hook already present, skipping");
+  process.exit(0);
+}
+
+// Step 1: allow providerName override by subclasses. We check for BOTH forms
+// (literal and already-widened) so repeated runs are idempotent.
+const pnLiteral = "public static readonly providerName = 'Gemini';";
+const pnReplacement = "// ─── BYOK CUSTOM PATCH: subclassable providerName ──────────────────────────\n\t// Typed as `string` so subclasses (e.g. VertexGeminiLMProvider) can override\n\t// with a different literal value without TypeScript narrowing complaining.\n\tpublic static readonly providerName: string = 'Gemini';\n\t// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────";
+if (code.includes(pnLiteral)) {
+  code = code.replace(pnLiteral, pnReplacement);
+} else if (!code.includes("BYOK CUSTOM PATCH: subclassable providerName")) {
+  console.warn("WARN: Gemini providerName anchor not found — skipping patch 26 (providerName)");
+}
+
+// Step 2: widen private constructor params we need subclasses to access
+// (_requestLogger / _telemetryService / _otelService are referenced by the
+// OTel/logging pipeline in provideLanguageModelChatResponse; the subclass
+// itself only needs them indirectly, but keeping them protected avoids
+// surprises if future subclasses override more surface area).
+const ctorAnchor = "@IRequestLogger private readonly _requestLogger: IRequestLogger,\n\t\t@ITelemetryService private readonly _telemetryService: ITelemetryService,\n\t\t@IOTelService private readonly _otelService: IOTelService,";
+const ctorReplacement = "@IRequestLogger protected readonly _requestLogger: IRequestLogger,\n\t\t@ITelemetryService protected readonly _telemetryService: ITelemetryService,\n\t\t@IOTelService protected readonly _otelService: IOTelService,";
+if (code.includes(ctorAnchor)) {
+  code = code.replace(ctorAnchor, ctorReplacement);
+} else if (!code.includes("@IRequestLogger protected readonly _requestLogger")) {
+  console.warn("WARN: Gemini constructor anchor not found — skipping patch 26 (ctor visibility)");
+}
+
+// Step 3: insert createClient() hook after the constructor closing brace.
+// Anchor is the full constructor body (including the super call) so we land
+// immediately after it. The exact super call is stable and rarely edited by
+// upstream.
+const hookAnchor = "\t\tsuper(GeminiNativeBYOKLMProvider.providerName.toLowerCase(), GeminiNativeBYOKLMProvider.providerName, knownModels, byokStorageService, logService);\n\t}";
+const hookReplacement = "\t\tsuper(GeminiNativeBYOKLMProvider.providerName.toLowerCase(), GeminiNativeBYOKLMProvider.providerName, knownModels, byokStorageService, logService);\n\t}\n\n\t// ─── BYOK CUSTOM PATCH: createClient hook ──────────────────────────────────\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// Factors out `new GoogleGenAI({ apiKey })` so subclasses (e.g.\n\t// VertexGeminiLMProvider) can return a differently-configured client\n\t// (Vertex endpoint, service-account auth) without re-implementing the\n\t// entire streaming + OTel pipeline in `provideLanguageModelChatResponse`.\n\tprotected createClient(apiKey: string, _model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>): GoogleGenAI {\n\t\treturn new GoogleGenAI({ apiKey });\n\t}\n\t// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────";
+if (!code.includes(hookAnchor)) {
+  console.warn("WARN: Gemini constructor body anchor not found — skipping patch 26 (createClient hook)");
+  fs.writeFileSync(f, code);
+  process.exit(0);
+}
+code = code.replace(hookAnchor, hookReplacement);
+
+// Step 4: route the `doRequest` inline client through createClient().
+const inlineAnchor = "const client = new GoogleGenAI({ apiKey });\n\t\t\t// Convert the messages from the API format into messages that we can use against Gemini";
+const inlineReplacement = "// BYOK CUSTOM PATCH: route through createClient() hook so subclasses\n\t\t\t// (VertexGeminiLMProvider) can swap in a Vertex-configured client.\n\t\t\tconst client = this.createClient(apiKey, model);\n\t\t\t// Convert the messages from the API format into messages that we can use against Gemini";
+if (!code.includes(inlineAnchor)) {
+  console.warn("WARN: inline Gemini client anchor not found — skipping patch 26 (inline swap)");
+} else {
+  code = code.replace(inlineAnchor, inlineReplacement);
+}
+
+fs.writeFileSync(f, code);
+console.log("Patched: Gemini createClient() hook + subclassable providerName");
+PATCH26_EOF
+
+# Patch 27: Register VertexGeminiLMProvider in byokContribution.ts
+node << 'PATCH27_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/byokContribution.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("VertexGeminiLMProvider")) {
+  console.log("VertexGemini already registered, skipping");
+  process.exit(0);
+}
+
+// Step 1: add the import right after the VertexAnthropic import so diffs stay small.
+const importAnchor = "import { VertexAnthropicLMProvider } from './vertexAnthropicProvider';";
+if (code.includes(importAnchor)) {
+  code = code.replace(importAnchor, importAnchor + "\nimport { VertexGeminiLMProvider } from './vertexGeminiProvider';");
+} else {
+  console.warn("WARN: VertexAnthropic import anchor not found — skipping patch 27");
+  process.exit(0);
+}
+
+// Step 2: register the provider right after the native Gemini provider so the
+// two Gemini surfaces sit together in the provider list.
+const geminiNativeLine = "this._providers.set(GeminiNativeBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiNativeBYOKLMProvider, knownModels[GeminiNativeBYOKLMProvider.providerName], this._byokStorageService));";
+const registration = geminiNativeLine + "\n\t\t\t// BYOK CUSTOM PATCH: Vertex-hosted Gemini, registered as a separate vendor so it has\n\t\t\t// independent API key / quota state. Auth is SA-JSON or pre-minted Bearer token, not\n\t\t\t// the Gemini public-API apiKey.\n\t\t\tthis._providers.set(VertexGeminiLMProvider.providerName.toLowerCase(), instantiationService.createInstance(VertexGeminiLMProvider, knownModels[GeminiNativeBYOKLMProvider.providerName], this._byokStorageService));";
+if (!code.includes(geminiNativeLine)) {
+  console.warn("WARN: GeminiNative registration anchor not found — skipping patch 27");
+  process.exit(0);
+}
+code = code.replace(geminiNativeLine, registration);
+
+fs.writeFileSync(f, code);
+console.log("Patched: byokContribution (VertexGemini registration)");
+PATCH27_EOF
+
+# Patch 28: Declare vertexgemini as a known languageModelChatProviders vendor.
+# Without this, VS Code refuses the registration at runtime with "Chat model
+# provider uses UNKNOWN vendor vertexgemini" — same symptom as VertexAnthropic
+# before Patch 14.
+node << 'PATCH28_EOF'
+const fs = require("fs");
+const f = "package.json";
+const pkg = JSON.parse(fs.readFileSync(f, "utf8"));
+const contributes = pkg.contributes || {};
+const providers = contributes.languageModelChatProviders;
+if (!Array.isArray(providers)) {
+  console.log("languageModelChatProviders missing, skipping VertexGemini registration");
+  process.exit(0);
+}
+
+// Normalise any stray camelCase variants first, so mixed-case duplicates don't
+// linger after a patch-script upgrade.
+for (const p of providers) {
+  if (p && typeof p.vendor === "string" && p.vendor.toLowerCase() === "vertexgemini" && p.vendor !== "vertexgemini") {
+    console.log("Normalising existing VertexGemini vendor casing (" + p.vendor + " -> vertexgemini)");
+    p.vendor = "vertexgemini";
+  }
+}
+if (providers.some(p => p && p.vendor === "vertexgemini")) {
+  contributes.languageModelChatProviders = providers;
+  pkg.contributes = contributes;
+  fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+  console.log("VertexGemini vendor already declared, ensured lowercase");
+  process.exit(0);
+}
+const geminiIdx = providers.findIndex(p => p && p.vendor === "gemini");
+const entry = {
+  vendor: "vertexgemini",
+  displayName: "Google Gemini (Vertex AI)",
+  configuration: {
+    properties: {
+      apiKey: {
+        type: "string",
+        secret: true,
+        description: "Google Cloud service-account JSON or access token for the Vertex AI project that hosts the Gemini model family.",
+        title: "Vertex AI credentials"
+      }
+    },
+    required: ["apiKey"]
+  }
+};
+if (geminiIdx >= 0) {
+  providers.splice(geminiIdx + 1, 0, entry);
+} else {
+  providers.push(entry);
+}
+contributes.languageModelChatProviders = providers;
+pkg.contributes = contributes;
+fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+console.log("Patched: VertexGemini vendor declared in package.json");
+PATCH28_EOF
+
+# Patch 29: VertexGeminiModels setting in configurationService.ts
+node << 'PATCH29_EOF'
+const fs = require("fs");
+const f = "src/platform/configuration/common/configurationService.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("VertexGeminiModels")) {
+  console.log("VertexGeminiModels setting already present, skipping");
+  process.exit(0);
+}
+
+// Append the new setting right after VertexAnthropicModels so related Vertex
+// knobs live together. Anchor on the VertexAnthropicModels export line —
+// shortest stable anchor upstream is unlikely to touch, since it's guarded by
+// Patch 12 and only exists in this fork.
+const anchor = "\texport const VertexAnthropicModels = defineSetting<Record<string, { name: string; projectId: string; locationId: string; maxInputTokens?: number; maxOutputTokens?: number }>>('chat.vertexAnthropicModels', ConfigType.Simple, {});";
+const replacement = anchor + "\n\n\t/**\n\t * BYOK custom setting. Maps Vertex Gemini model ids to per-model config\n\t * (GCP project/location + optional context + vision overrides). Keyed by\n\t * the Vertex model id (e.g. `gemini-3.1-pro-preview`). Parallels\n\t * {@link VertexAnthropicModels}.\n\t */\n\texport const VertexGeminiModels = defineSetting<Record<string, { name: string; projectId: string; locationId: string; maxInputTokens?: number; maxOutputTokens?: number; vision?: boolean }>>('chat.vertexGeminiModels', ConfigType.Simple, {});";
+if (!code.includes(anchor)) {
+  console.warn("WARN: VertexAnthropicModels setting anchor not found — skipping patch 29 (depends on patch 12)");
+  process.exit(0);
+}
+code = code.replace(anchor, replacement);
+
+fs.writeFileSync(f, code);
+console.log("Patched: VertexGeminiModels setting");
+PATCH29_EOF

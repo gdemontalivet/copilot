@@ -65,18 +65,33 @@ function classifyRetryableGeminiError(err: unknown): 'rate-limit' | 'unavailable
 
 export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvider {
 
-	public static readonly providerName = 'Gemini';
+	// ─── BYOK CUSTOM PATCH: subclassable providerName ──────────────────────────
+	// Typed as `string` so subclasses (e.g. VertexGeminiLMProvider) can override
+	// with a different literal value without TypeScript narrowing complaining.
+	public static readonly providerName: string = 'Gemini';
+	// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────
 
 	constructor(
 		knownModels: BYOKKnownModels | undefined,
 		byokStorageService: IBYOKStorageService,
 		@ILogService logService: ILogService,
-		@IRequestLogger private readonly _requestLogger: IRequestLogger,
-		@ITelemetryService private readonly _telemetryService: ITelemetryService,
-		@IOTelService private readonly _otelService: IOTelService,
+		@IRequestLogger protected readonly _requestLogger: IRequestLogger,
+		@ITelemetryService protected readonly _telemetryService: ITelemetryService,
+		@IOTelService protected readonly _otelService: IOTelService,
 	) {
 		super(GeminiNativeBYOKLMProvider.providerName.toLowerCase(), GeminiNativeBYOKLMProvider.providerName, knownModels, byokStorageService, logService);
 	}
+
+	// ─── BYOK CUSTOM PATCH: createClient hook ──────────────────────────────────
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Factors out `new GoogleGenAI({ apiKey })` so subclasses (e.g.
+	// VertexGeminiLMProvider) can return a differently-configured client
+	// (Vertex endpoint, service-account auth) without re-implementing the
+	// entire streaming + OTel pipeline in `provideLanguageModelChatResponse`.
+	protected createClient(apiKey: string, _model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>): GoogleGenAI {
+		return new GoogleGenAI({ apiKey });
+	}
+	// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────
 
 	protected async getAllModels(silent: boolean, apiKey: string | undefined): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
 		if (!apiKey && silent) {
@@ -133,7 +148,9 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				throw new Error('API key not found for the model');
 			}
 
-			const client = new GoogleGenAI({ apiKey });
+			// BYOK CUSTOM PATCH: route through createClient() hook so subclasses
+			// (VertexGeminiLMProvider) can swap in a Vertex-configured client.
+			const client = this.createClient(apiKey, model);
 			// Convert the messages from the API format into messages that we can use against Gemini
 			const { contents, systemInstruction } = apiMessageToGeminiMessage(messages as LanguageModelChatMessage[]);
 
