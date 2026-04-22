@@ -10,7 +10,7 @@ import { IAuthenticationService } from '../../../platform/authentication/common/
 import { CopilotToken } from '../../../platform/authentication/common/copilotToken';
 import { FetchStreamRecorder, IChatMLFetcher, IFetchMLOptions, Source } from '../../../platform/chat/common/chatMLFetcher';
 import { IChatQuotaService } from '../../../platform/chat/common/chatQuotaService';
-import { ChatFetchError, ChatFetchResponseType, ChatFetchRetriableError, ChatLocation, ChatResponse, ChatResponses, RESPONSE_CONTAINED_NO_CHOICES } from '../../../platform/chat/common/commonTypes';
+import { ChatFetchError, ChatFetchResponseType, ChatFetchRetriableError, ChatLocation, ChatResponse, ChatResponses, RESPONSE_CONTAINED_NO_CHOICES, RESPONSE_EMPTY_STOP } from '../../../platform/chat/common/commonTypes';
 import { IConversationOptions } from '../../../platform/chat/common/conversationOptions';
 import { getTextPart, toTextParts } from '../../../platform/chat/common/globalStringUtils';
 import { IInteractionService } from '../../../platform/chat/common/interactionService';
@@ -1759,7 +1759,33 @@ export class ChatMLFetcherImpl extends AbstractChatMLFetcher {
 			}
 		}
 		const successFinishReasons = new Set([FinishedCompletionReason.Stop, FinishedCompletionReason.ClientTrimmed, FinishedCompletionReason.FunctionCall, FinishedCompletionReason.ToolCalls]);
-		const successfulCompletions = completions.filter(c => successFinishReasons.has(c.finishReason));
+		// ─── BYOK CUSTOM PATCH: reject empty-stop completions ────────────────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Some models (Qwen3.5-122b and other MoE models under load) occasionally
+		// emit `finishReason=Stop` with no text AND no tool calls. Upstream
+		// treats that as a successful response and the agent loop falls through
+		// with nothing to show, surfacing as "Sorry, no response was returned"
+		// with no actionable recovery. Reject those so the fallthrough path
+		// below returns Unknown/RESPONSE_EMPTY_STOP, which (a) gets a clearer
+		// user-facing error message, and (b) is retriable by the
+		// toolCallingLoop auto-retry logic in autoApprove/autopilot modes.
+		const isEmptyStopCompletion = (c: ChatCompletion): boolean => {
+			if (c.finishReason !== FinishedCompletionReason.Stop) {
+				return false;
+			}
+			const text = getTextPart(c.message.content) ?? '';
+			if (text.trim().length > 0) {
+				return false;
+			}
+			const toolCalls = (c.message as Raw.AssistantChatMessage).toolCalls;
+			if (toolCalls && toolCalls.length > 0) {
+				return false;
+			}
+			return true;
+		};
+		const hasOnlyEmptyStops = completions.length > 0 && completions.every(isEmptyStopCompletion);
+		const successfulCompletions = completions.filter(c => successFinishReasons.has(c.finishReason) && !isEmptyStopCompletion(c));
+		// ─── END BYOK CUSTOM PATCH ───────────────────────────────
 		if (successfulCompletions.length >= 1) {
 			return {
 				type: ChatFetchResponseType.Success,
@@ -1800,6 +1826,19 @@ export class ChatMLFetcherImpl extends AbstractChatMLFetcher {
 					streamError: result.error
 				};
 		}
+		// ─── BYOK CUSTOM PATCH: empty-stop reason tag ─────────────────────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Distinguish "model returned an empty Stop" from the generic
+		// "no choices" case so the UI and retry logic can respond specifically.
+		if (hasOnlyEmptyStops) {
+			return {
+				type: ChatFetchResponseType.Unknown,
+				reason: RESPONSE_EMPTY_STOP,
+				requestId: requestId,
+				serverRequestId: result?.requestId.headerRequestId,
+			};
+		}
+		// ─── END BYOK CUSTOM PATCH ────────────────────────────────
 		return {
 			type: ChatFetchResponseType.Unknown,
 			reason: RESPONSE_CONTAINED_NO_CHOICES,

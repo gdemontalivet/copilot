@@ -2120,3 +2120,139 @@ code = code.replace(anchor, replacement);
 fs.writeFileSync(f, code);
 console.log("Patched: VertexGeminiModels setting");
 PATCH29_EOF
+
+# Patch 30: Install BYOK-only routing classifier files.
+# Three-tier cascade (Gemini Flash → Vertex Claude Haiku → regex heuristic)
+# used by the auto-router to cheaply pre-classify chat requests before picking
+# a response-generation model. Types + heuristic live under `byok/common`
+# (no SDK deps); the classifier itself uses @google/genai + @anthropic-ai/sdk
+# + google-auth-library so it lives under `byok/vscode-node`. Tests alongside
+# each file. See `.cursor/rules/byok-custom-patches.mdc` entry 30 for rationale.
+install_byok_file \
+  ".github/byok-patches/files/byokRoutingClassifier.types.ts" \
+  "src/extension/byok/common/byokRoutingClassifier.types.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/byokRoutingHeuristics.ts" \
+  "src/extension/byok/common/byokRoutingHeuristics.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/byokRoutingHeuristics.spec.ts" \
+  "src/extension/byok/common/test/byokRoutingHeuristics.spec.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/byokRoutingClassifier.ts" \
+  "src/extension/byok/vscode-node/byokRoutingClassifier.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/byokRoutingClassifier.spec.ts" \
+  "src/extension/byok/vscode-node/test/byokRoutingClassifier.spec.ts"
+
+# Patch 31: Empty-stop completion detection in chatMLFetcher + clearer message.
+# Some models (notably Qwen3.5-122b-a10b on GitHub CAPI, and MoE models under
+# load in general) occasionally return a streaming completion with
+# finishReason=Stop but zero text content AND zero tool calls. Upstream's
+# `processSuccessfulResponse` treats that as a successful response (Stop is in
+# the success finish-reason set), so the tool-calling loop falls through with
+# nothing to render. The user sees a generic "Sorry, no response was returned"
+# or "The model unexpectedly did not return a response" with no clue what to
+# do. This patch:
+#   1. Adds a `RESPONSE_EMPTY_STOP` constant to commonTypes.ts
+#   2. Branches `getErrorDetailsFromChatFetchError` on that reason to surface
+#      a clearer user-facing message that explicitly names the failure mode
+#      and suggests a fix (retry / switch model).
+#   3. Modifies `processSuccessfulResponse` in chatMLFetcher.ts to reject
+#      empty-stop completions from the success filter and return
+#      `Unknown`/`RESPONSE_EMPTY_STOP` instead, which enables the existing
+#      `toolCallingLoop.shouldAutoRetry` logic (Unknown !== Success) to
+#      auto-retry in autoApprove/autopilot modes.
+# All three edits are anchored on short, stable upstream strings and guarded
+# by sentinel comments, following the same shape as Patches 7/17/25.
+node << 'PATCH31_EOF'
+const fs = require("fs");
+
+// ─── Step A: commonTypes.ts — constant + message branch ──────────────────
+(function patchCommonTypes() {
+  const f = "src/platform/chat/common/commonTypes.ts";
+  let code = fs.readFileSync(f, "utf8");
+  let changed = false;
+
+  // A1: RESPONSE_EMPTY_STOP constant.
+  if (code.includes("BYOK CUSTOM PATCH: empty-stop detection")) {
+    console.log("commonTypes empty-stop constant already present, skipping A1");
+  } else {
+    const anchor = "export const RESPONSE_CONTAINED_NO_CHOICES = 'Response contained no choices.';";
+    const replacement = anchor + "\n\n// \u2500\u2500\u2500 BYOK CUSTOM PATCH: empty-stop detection \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n// Some models (notably Qwen3.5-122b and other mixture-of-experts models under\n// load) occasionally emit a streaming completion with finishReason=Stop but\n// no text content and no tool calls. Upstream's chatMLFetcher treats that as\n// a successful response, which bubbles up as the generic \"no response was\n// returned\" error with no actionable guidance. This constant tags those\n// completions so getErrorDetailsFromChatFetchError can surface a clearer\n// message and the toolCallingLoop's auto-retry logic can kick in.\nexport const RESPONSE_EMPTY_STOP = 'Model returned an empty stop completion.';\n// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+    if (!code.includes(anchor)) {
+      console.warn("WARN: RESPONSE_CONTAINED_NO_CHOICES anchor not found — skipping patch 31 A1");
+    } else {
+      code = code.replace(anchor, replacement);
+      changed = true;
+    }
+  }
+
+  // A2: clearer Unknown-case error message when reason === RESPONSE_EMPTY_STOP.
+  if (code.includes("BYOK CUSTOM PATCH: empty-stop message")) {
+    console.log("commonTypes empty-stop message branch already present, skipping A2");
+  } else {
+    const anchor = "\t\tcase ChatFetchResponseType.Unknown:\n\t\t\tdetails = { message: l10n.t(`Sorry, no response was returned.`) };\n\t\t\tbreak;";
+    const replacement = "\t\tcase ChatFetchResponseType.Unknown:\n\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: empty-stop message \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t\tif (fetchResult.reason === RESPONSE_EMPTY_STOP) {\n\t\t\t\tdetails = { message: l10n.t(`The model returned an empty response (stop with no content). This is a known flakiness in some models under load \u2014 please try again, or switch to a different model.`) };\n\t\t\t} else {\n\t\t\t\tdetails = { message: l10n.t(`Sorry, no response was returned.`) };\n\t\t\t}\n\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\tbreak;";
+    if (!code.includes(anchor)) {
+      console.warn("WARN: Unknown case anchor not found — skipping patch 31 A2");
+    } else {
+      code = code.replace(anchor, replacement);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    fs.writeFileSync(f, code);
+  }
+})();
+
+// ─── Step B: chatMLFetcher.ts — reject empty-stop completions ────────────
+(function patchChatMLFetcher() {
+  const f = "src/extension/prompt/node/chatMLFetcher.ts";
+  let code = fs.readFileSync(f, "utf8");
+
+  if (code.includes("BYOK CUSTOM PATCH: reject empty-stop completions")) {
+    console.log("chatMLFetcher empty-stop rejection already present, skipping B");
+    return;
+  }
+
+  // B1: widen the commonTypes import to include RESPONSE_EMPTY_STOP.
+  const importAnchor = "import { ChatFetchError, ChatFetchResponseType, ChatFetchRetriableError, ChatLocation, ChatResponse, ChatResponses, RESPONSE_CONTAINED_NO_CHOICES } from '../../../platform/chat/common/commonTypes';";
+  const importReplacement = "import { ChatFetchError, ChatFetchResponseType, ChatFetchRetriableError, ChatLocation, ChatResponse, ChatResponses, RESPONSE_CONTAINED_NO_CHOICES, RESPONSE_EMPTY_STOP } from '../../../platform/chat/common/commonTypes';";
+  if (!code.includes(importAnchor) && !code.includes("RESPONSE_EMPTY_STOP")) {
+    console.warn("WARN: chatMLFetcher commonTypes import anchor not found — skipping patch 31 B1");
+    return;
+  }
+  if (code.includes(importAnchor)) {
+    code = code.replace(importAnchor, importReplacement);
+  }
+
+  // B2: replace the success filter with one that rejects empty-stop completions.
+  const filterAnchor = "\t\tconst successFinishReasons = new Set([FinishedCompletionReason.Stop, FinishedCompletionReason.ClientTrimmed, FinishedCompletionReason.FunctionCall, FinishedCompletionReason.ToolCalls]);\n\t\tconst successfulCompletions = completions.filter(c => successFinishReasons.has(c.finishReason));";
+  const filterReplacement = "\t\tconst successFinishReasons = new Set([FinishedCompletionReason.Stop, FinishedCompletionReason.ClientTrimmed, FinishedCompletionReason.FunctionCall, FinishedCompletionReason.ToolCalls]);\n\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: reject empty-stop completions \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t// Some models (Qwen3.5-122b and other MoE models under load) occasionally\n\t\t// emit `finishReason=Stop` with no text AND no tool calls. Upstream\n\t\t// treats that as a successful response and the agent loop falls through\n\t\t// with nothing to show, surfacing as \"Sorry, no response was returned\"\n\t\t// with no actionable recovery. Reject those so the fallthrough path\n\t\t// below returns Unknown/RESPONSE_EMPTY_STOP, which (a) gets a clearer\n\t\t// user-facing error message, and (b) is retriable by the\n\t\t// toolCallingLoop auto-retry logic in autoApprove/autopilot modes.\n\t\tconst isEmptyStopCompletion = (c: ChatCompletion): boolean => {\n\t\t\tif (c.finishReason !== FinishedCompletionReason.Stop) {\n\t\t\t\treturn false;\n\t\t\t}\n\t\t\tconst text = getTextPart(c.message.content) ?? '';\n\t\t\tif (text.trim().length > 0) {\n\t\t\t\treturn false;\n\t\t\t}\n\t\t\tconst toolCalls = (c.message as Raw.AssistantChatMessage).toolCalls;\n\t\t\tif (toolCalls && toolCalls.length > 0) {\n\t\t\t\treturn false;\n\t\t\t}\n\t\t\treturn true;\n\t\t};\n\t\tconst hasOnlyEmptyStops = completions.length > 0 && completions.every(isEmptyStopCompletion);\n\t\tconst successfulCompletions = completions.filter(c => successFinishReasons.has(c.finishReason) && !isEmptyStopCompletion(c));\n\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+  if (!code.includes(filterAnchor)) {
+    console.warn("WARN: chatMLFetcher success filter anchor not found — skipping patch 31 B2");
+    fs.writeFileSync(f, code);
+    return;
+  }
+  code = code.replace(filterAnchor, filterReplacement);
+
+  // B3: inject the empty-stop Unknown return before the generic fallthrough.
+  const returnAnchor = "\t\treturn {\n\t\t\ttype: ChatFetchResponseType.Unknown,\n\t\t\treason: RESPONSE_CONTAINED_NO_CHOICES,";
+  const returnReplacement = "\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: empty-stop reason tag \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t// Distinguish \"model returned an empty Stop\" from the generic\n\t\t// \"no choices\" case so the UI and retry logic can respond specifically.\n\t\tif (hasOnlyEmptyStops) {\n\t\t\treturn {\n\t\t\t\ttype: ChatFetchResponseType.Unknown,\n\t\t\t\treason: RESPONSE_EMPTY_STOP,\n\t\t\t\trequestId: requestId,\n\t\t\t\tserverRequestId: result?.requestId.headerRequestId,\n\t\t\t};\n\t\t}\n\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\treturn {\n\t\t\ttype: ChatFetchResponseType.Unknown,\n\t\t\treason: RESPONSE_CONTAINED_NO_CHOICES,";
+  if (!code.includes(returnAnchor)) {
+    console.warn("WARN: chatMLFetcher RESPONSE_CONTAINED_NO_CHOICES return anchor not found — skipping patch 31 B3");
+    fs.writeFileSync(f, code);
+    return;
+  }
+  code = code.replace(returnAnchor, returnReplacement);
+
+  fs.writeFileSync(f, code);
+})();
+
+console.log("Patched: empty-stop completion detection (chatMLFetcher + commonTypes)");
+PATCH31_EOF

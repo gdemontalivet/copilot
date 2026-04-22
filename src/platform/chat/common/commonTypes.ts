@@ -115,6 +115,18 @@ export enum ChatFetchResponseType {
 
 export const RESPONSE_CONTAINED_NO_CHOICES = 'Response contained no choices.';
 
+// ─── BYOK CUSTOM PATCH: empty-stop detection ──────────────────────────
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Some models (notably Qwen3.5-122b and other mixture-of-experts models under
+// load) occasionally emit a streaming completion with finishReason=Stop but
+// no text content and no tool calls. Upstream's chatMLFetcher treats that as
+// a successful response, which bubbles up as the generic "no response was
+// returned" error with no actionable guidance. This constant tags those
+// completions so getErrorDetailsFromChatFetchError can surface a clearer
+// message and the toolCallingLoop's auto-retry logic can kick in.
+export const RESPONSE_EMPTY_STOP = 'Model returned an empty stop completion.';
+// ─── END BYOK CUSTOM PATCH ────────────────────────────
+
 export type ChatFetchError =
 	/**
 	 * We requested conversation, but the message was deemed off topic by the intent classifier.
@@ -406,7 +418,14 @@ function getErrorDetailsFromChatFetchErrorInner(fetchResult: ChatFetchError, cop
 			details = { message: l10n.t('Sorry, the resource was not found.') };
 			break;
 		case ChatFetchResponseType.Unknown:
-			details = { message: l10n.t(`Sorry, no response was returned.`) };
+			// ─── BYOK CUSTOM PATCH: empty-stop message ────────────────────
+			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			if (fetchResult.reason === RESPONSE_EMPTY_STOP) {
+				details = { message: l10n.t(`The model returned an empty response (stop with no content). This is a known flakiness in some models under load — please try again, or switch to a different model.`) };
+			} else {
+				details = { message: l10n.t(`Sorry, no response was returned.`) };
+			}
+			// ─── END BYOK CUSTOM PATCH ────────────────────────────
 			break;
 		case ChatFetchResponseType.ExtensionBlocked:
 			details = { message: l10n.t(`Sorry, something went wrong.`) };
