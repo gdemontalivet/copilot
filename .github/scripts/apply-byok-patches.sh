@@ -2285,15 +2285,15 @@ let code = fs.readFileSync(f, "utf8");
 
 const sentinel = "BYOK CUSTOM PATCH: guard every proposed-API member";
 if (code.includes(sentinel)) {
-\tconsole.log("codeBlockProcessor guards already present, skipping");
-\tprocess.exit(0);
+	console.log("codeBlockProcessor guards already present, skipping");
+	process.exit(0);
 }
 
 const anchor = "\tconfirmation = this.forward(this._wrapped.confirmation.bind(this._wrapped));\n\twarning = this.forward(this._wrapped.warning.bind(this._wrapped));\n\tinfo = this.forward(this._wrapped.info.bind(this._wrapped));\n\thookProgress = this.forward(this._wrapped.hookProgress.bind(this._wrapped));\n\treference2 = this.forward(this._wrapped.reference2.bind(this._wrapped));\n\tcodeCitation = this.forward(this._wrapped.codeCitation.bind(this._wrapped));\n\tanchor = this.forward(this._wrapped.anchor.bind(this._wrapped));\n\texternalEdit = this.forward(this._wrapped.externalEdit.bind(this._wrapped));\n\tbeginToolInvocation = this.forward(this._wrapped.beginToolInvocation.bind(this._wrapped));\n\tupdateToolInvocation = this.forward(this._wrapped.updateToolInvocation.bind(this._wrapped));\n\tusage = this.forward(this._wrapped.usage.bind(this._wrapped));";
 
 if (!code.includes(anchor)) {
-\tconsole.warn("WARN: codeBlockProcessor proposed-API block anchor not found — skipping patch 32");
-\tprocess.exit(0);
+	console.warn("WARN: codeBlockProcessor proposed-API block anchor not found — skipping patch 32");
+	process.exit(0);
 }
 
 const replacement = "\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: guard every proposed-API member \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 32). Do not remove.\n\t// VS Code versions that haven't finalised a given proposed method (e.g.\n\t// `info` is absent on 1.117.0 Stable when the host strips the\n\t// chatParticipantAdditions proposal) otherwise throw\n\t// \"Cannot read properties of undefined (reading 'bind')\" from this\n\t// constructor and kill every tool-calling turn. Mirrors the existing\n\t// `workspaceEdit` defensive pattern on the line above.\n\tconfirmation = this.forward(this._wrapped.confirmation?.bind(this._wrapped) || (() => { }));\n\twarning = this.forward(this._wrapped.warning?.bind(this._wrapped) || (() => { }));\n\tinfo = this.forward(this._wrapped.info?.bind(this._wrapped) || (() => { }));\n\thookProgress = this.forward(this._wrapped.hookProgress?.bind(this._wrapped) || (() => { }));\n\treference2 = this.forward(this._wrapped.reference2?.bind(this._wrapped) || (() => { }));\n\tcodeCitation = this.forward(this._wrapped.codeCitation?.bind(this._wrapped) || (() => { }));\n\tanchor = this.forward(this._wrapped.anchor?.bind(this._wrapped) || (() => { }));\n\texternalEdit = this.forward(this._wrapped.externalEdit?.bind(this._wrapped) || (() => { }));\n\tbeginToolInvocation = this.forward(this._wrapped.beginToolInvocation?.bind(this._wrapped) || (() => { }));\n\tupdateToolInvocation = this.forward(this._wrapped.updateToolInvocation?.bind(this._wrapped) || (() => { }));\n\tusage = this.forward(this._wrapped.usage?.bind(this._wrapped) || (() => { }));\n\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
@@ -2303,3 +2303,160 @@ code = code.replace(anchor, () => replacement);
 fs.writeFileSync(f, code);
 console.log("Patched: CodeBlockTrackingChatResponseStream proposed-API guards");
 PATCH32_EOF
+
+# Patch 33: Tunnel BYOK token usage to the context-window ring indicator.
+#
+# BYOK providers (Anthropic, VertexAnthropic, Gemini, VertexGemini) already
+# compute real `prompt_tokens`/`completion_tokens` per request, but upstream's
+# `ExtensionContributedChatEndpoint` (extChatEndpoint.ts) hardcodes the
+# returned `usage` to zeros when consuming the VS Code language model stream.
+# Net effect: the context-window ring indicator in the chat UI stays empty
+# across every BYOK turn — the visual cue users rely on to know when
+# auto-compaction is about to fire is always "0%".
+#
+# This patch wires up a dedicated `TokenUsage` LanguageModelDataPart:
+#   * `endpointTypes.ts`          — declare the new mime type constant.
+#   * `anthropicProvider.ts`      — emit `result.usage` as a DataPart after
+#     each successful request (also covers VertexAnthropic via inheritance).
+#   * `geminiNativeProvider.ts`   — same, plus the required imports since
+#     upstream doesn't already bring them in (also covers VertexGemini).
+#   * `extChatEndpoint.ts`        — capture the DataPart mid-stream and
+#     return it instead of the hardcoded zero-usage record.
+#
+# This exact change shipped as commit c240d53a8 on Apr 14 but was never
+# codified as a patch, so the Apr 17 nightly upstream sync reverted it.
+# All four edits are idempotent (sentinel + anchor checks), and missing
+# anchors degrade to `exit 0` with a warning rather than failing the sync.
+node << 'PATCH33_EOF'
+const fs = require("fs");
+
+// 33a. endpointTypes — declare TokenUsage constant.
+(() => {
+	const f = "src/platform/endpoint/common/endpointTypes.ts";
+	let code = fs.readFileSync(f, "utf8");
+	if (code.includes("BYOK CUSTOM PATCH: token-usage data part") || code.includes("TokenUsage = 'token_usage'")) {
+		console.log("endpointTypes TokenUsage already present, skipping 33a");
+		return;
+	}
+	const anchor = "\texport const ContextManagement = 'context_management';\n\texport const PhaseData = 'phase_data';\n}";
+	if (!code.includes(anchor)) {
+		console.warn("WARN: endpointTypes anchor not found \u2014 skipping patch 33a");
+		return;
+	}
+	const replacement = "\texport const ContextManagement = 'context_management';\n\texport const PhaseData = 'phase_data';\n\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: token-usage data part \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t// Carries the per-request `usage` payload from BYOK providers\n\t// (Anthropic, VertexAnthropic, Gemini, VertexGemini) to\n\t// `extChatEndpoint.ts`, which forwards it to the toolCallingLoop\n\t// so the context-window ring indicator can render real numbers\n\t// instead of the hardcoded zeros upstream falls back to.\n\texport const TokenUsage = 'token_usage';\n\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n}";
+	code = code.replace(anchor, () => replacement);
+	fs.writeFileSync(f, code);
+	console.log("Patched: endpointTypes TokenUsage constant (33a)");
+})();
+
+// 33b. extChatEndpoint — capture TokenUsage mid-stream + replace hardcoded zero usage.
+(() => {
+	const f = "src/platform/endpoint/vscode-node/extChatEndpoint.ts";
+	let code = fs.readFileSync(f, "utf8");
+	const sentinel = "BYOK CUSTOM PATCH: context-window usage tunnel";
+	if (code.includes(sentinel)) {
+		console.log("extChatEndpoint usage tunnel already present, skipping 33b");
+		return;
+	}
+
+	// B1: declare the `tokenUsage` local right after `const requestId = ourRequestId;`.
+	const localAnchor = "\t\t\tlet text = '';\n\t\t\tlet numToolsCalled = 0;\n\t\t\tconst requestId = ourRequestId;\n";
+	const localReplacement = "\t\t\tlet text = '';\n\t\t\tlet numToolsCalled = 0;\n\t\t\tconst requestId = ourRequestId;\n\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: context-window usage tunnel \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t\t\t// BYOK providers (Anthropic, VertexAnthropic, Gemini, VertexGemini)\n\t\t\t// emit a `TokenUsage` LanguageModelDataPart mid-stream carrying\n\t\t\t// their real token counts. We capture it here so the return below\n\t\t\t// reports actual usage instead of the hardcoded zeros upstream\n\t\t\t// falls back to \u2014 without this the context-window ring in the\n\t\t\t// chat UI stays empty even though the providers know the answer.\n\t\t\tlet tokenUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number; prompt_tokens_details: { cached_tokens: number } } | undefined;\n\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n";
+	if (!code.includes(localAnchor)) {
+		console.warn("WARN: extChatEndpoint tokenUsage local anchor not found \u2014 skipping patch 33b");
+		return;
+	}
+	code = code.replace(localAnchor, () => localReplacement);
+
+	// B2: handle TokenUsage mimeType inside the LanguageModelDataPart switch.
+	const handlerAnchor = "\t\t\t\t\t} else if (chunk.mimeType === CustomDataPartMimeTypes.ContextManagement) {\n\t\t\t\t\t\tconst contextManagement = JSON.parse(new TextDecoder().decode(chunk.data)) as ContextManagementResponse;\n\t\t\t\t\t\tawait streamRecorder.callback?.(text, 0, { text: '', contextManagement });\n\t\t\t\t\t}";
+	const handlerReplacement = "\t\t\t\t\t} else if (chunk.mimeType === CustomDataPartMimeTypes.ContextManagement) {\n\t\t\t\t\t\tconst contextManagement = JSON.parse(new TextDecoder().decode(chunk.data)) as ContextManagementResponse;\n\t\t\t\t\t\tawait streamRecorder.callback?.(text, 0, { text: '', contextManagement });\n\t\t\t\t\t} else if (chunk.mimeType === CustomDataPartMimeTypes.TokenUsage) {\n\t\t\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: context-window usage tunnel \u2500\u2500\u2500\u2500\u2500\n\t\t\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t\t\t\t\t\ttry {\n\t\t\t\t\t\t\tconst parsed = JSON.parse(new TextDecoder().decode(chunk.data));\n\t\t\t\t\t\t\ttokenUsage = {\n\t\t\t\t\t\t\t\tprompt_tokens: parsed.prompt_tokens ?? 0,\n\t\t\t\t\t\t\t\tcompletion_tokens: parsed.completion_tokens ?? 0,\n\t\t\t\t\t\t\t\ttotal_tokens: parsed.total_tokens ?? ((parsed.prompt_tokens ?? 0) + (parsed.completion_tokens ?? 0)),\n\t\t\t\t\t\t\t\tprompt_tokens_details: { cached_tokens: parsed.prompt_tokens_details?.cached_tokens ?? 0 },\n\t\t\t\t\t\t\t};\n\t\t\t\t\t\t} catch { /* ignore malformed usage data */ }\n\t\t\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t\t\t}";
+	if (!code.includes(handlerAnchor)) {
+		console.warn("WARN: extChatEndpoint ContextManagement handler anchor not found \u2014 skipping patch 33b handler");
+		fs.writeFileSync(f, code);
+		return;
+	}
+	code = code.replace(handlerAnchor, () => handlerReplacement);
+
+	// B3: replace the hardcoded zero-usage record with `tokenUsage ?? fallback`.
+	const usageAnchor = "\t\t\t\t\tusage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } },";
+	const usageReplacement = "\t\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: context-window usage tunnel (Patch 33) \u2500\u2500\u2500\n\t\t\t\t\tusage: tokenUsage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } },";
+	if (!code.includes(usageAnchor)) {
+		console.warn("WARN: extChatEndpoint hardcoded zero-usage anchor not found \u2014 skipping patch 33b usage swap");
+		fs.writeFileSync(f, code);
+		return;
+	}
+	code = code.replace(usageAnchor, () => usageReplacement);
+
+	fs.writeFileSync(f, code);
+	console.log("Patched: extChatEndpoint usage tunnel (33b)");
+})();
+
+// 33c. anthropicProvider — emit result.usage as a TokenUsage DataPart.
+(() => {
+	const f = "src/extension/byok/vscode-node/anthropicProvider.ts";
+	let code = fs.readFileSync(f, "utf8");
+	const sentinel = "BYOK CUSTOM PATCH: emit TokenUsage to context-window ring";
+	if (code.includes(sentinel)) {
+		console.log("anthropicProvider TokenUsage emission already present, skipping 33c");
+		return;
+	}
+	const anchor = "\t\t\t\tconst result = await this._makeRequest(anthropicClient, wrappedProgress, params, betas, token, issuedTime);\n\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\tconst responseDeltas: IResponseDelta[] = wrappedProgress.items.map((i): IResponseDelta => {";
+	if (!code.includes(anchor)) {
+		console.warn("WARN: anthropicProvider _makeRequest anchor not found \u2014 skipping patch 33c");
+		return;
+	}
+	const replacement = "\t\t\t\tconst result = await this._makeRequest(anthropicClient, wrappedProgress, params, betas, token, issuedTime);\n\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: emit TokenUsage to context-window ring \u2500\u2500\u2500\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t\t\t\t// The LM API host (extChatEndpoint.ts) otherwise hardcodes usage\n\t\t\t\t// to zeros, leaving the UI ring indicator empty on every BYOK turn.\n\t\t\t\tif (result.usage) {\n\t\t\t\t\tprogress.report(new LanguageModelDataPart(\n\t\t\t\t\t\tnew TextEncoder().encode(JSON.stringify(result.usage)),\n\t\t\t\t\t\tCustomDataPartMimeTypes.TokenUsage\n\t\t\t\t\t));\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t\tconst responseDeltas: IResponseDelta[] = wrappedProgress.items.map((i): IResponseDelta => {";
+	code = code.replace(anchor, () => replacement);
+	fs.writeFileSync(f, code);
+	console.log("Patched: anthropicProvider TokenUsage emission (33c)");
+})();
+
+// 33d. geminiNativeProvider — emit result.usage, plus add the imports it needs.
+(() => {
+	const f = "src/extension/byok/vscode-node/geminiNativeProvider.ts";
+	let code = fs.readFileSync(f, "utf8");
+	const sentinel = "BYOK CUSTOM PATCH: emit TokenUsage to context-window ring";
+	if (code.includes(sentinel)) {
+		console.log("geminiNativeProvider TokenUsage emission already present, skipping 33d");
+		return;
+	}
+
+	// D1: add `LanguageModelDataPart` to the vscode named-imports (if missing).
+	if (!code.includes("LanguageModelDataPart,") && !code.includes(", LanguageModelDataPart")) {
+		const importAnchor = "LanguageModelChatMessage2, LanguageModelResponsePart2";
+		const importReplacement = "LanguageModelChatMessage2, LanguageModelDataPart, LanguageModelResponsePart2";
+		if (!code.includes(importAnchor)) {
+			console.warn("WARN: geminiNativeProvider vscode import anchor not found \u2014 skipping patch 33d import");
+			return;
+		}
+		code = code.replace(importAnchor, () => importReplacement);
+	}
+
+	// D2: add the CustomDataPartMimeTypes import directly below the ChatFetchResponseType import.
+	if (!code.includes("from '../../../platform/endpoint/common/endpointTypes'")) {
+		const typesImportAnchor = "import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';\n";
+		const typesImportReplacement = "import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';\nimport { CustomDataPartMimeTypes } from '../../../platform/endpoint/common/endpointTypes';\n";
+		if (!code.includes(typesImportAnchor)) {
+			console.warn("WARN: geminiNativeProvider commonTypes import anchor not found \u2014 skipping patch 33d CustomDataPartMimeTypes import");
+			return;
+		}
+		code = code.replace(typesImportAnchor, () => typesImportReplacement);
+	}
+
+	// D3: emit the DataPart after markTimeToFirstToken, before pendingLoggedChatRequest.resolve.
+	const anchor = "\t\t\t\tconst result = await this._makeRequest(client, wrappedProgress, params, token, issuedTime);\n\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\tpendingLoggedChatRequest.resolve({";
+	if (!code.includes(anchor)) {
+		console.warn("WARN: geminiNativeProvider _makeRequest anchor not found \u2014 skipping patch 33d emission");
+		fs.writeFileSync(f, code);
+		return;
+	}
+	const replacement = "\t\t\t\tconst result = await this._makeRequest(client, wrappedProgress, params, token, issuedTime);\n\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: emit TokenUsage to context-window ring \u2500\u2500\u2500\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t\t\t\t// The LM API host (extChatEndpoint.ts) otherwise hardcodes usage\n\t\t\t\t// to zeros, leaving the UI ring indicator empty on every BYOK turn.\n\t\t\t\tif (result.usage) {\n\t\t\t\t\tprogress.report(new LanguageModelDataPart(\n\t\t\t\t\t\tnew TextEncoder().encode(JSON.stringify(result.usage)),\n\t\t\t\t\t\tCustomDataPartMimeTypes.TokenUsage\n\t\t\t\t\t));\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t\tpendingLoggedChatRequest.resolve({";
+	code = code.replace(anchor, () => replacement);
+	fs.writeFileSync(f, code);
+	console.log("Patched: geminiNativeProvider TokenUsage emission (33d)");
+})();
+
+console.log("Patched: TokenUsage tunneling for context-window ring (33)");
+PATCH33_EOF
+

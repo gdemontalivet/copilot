@@ -4,8 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { ApiError, GenerateContentParameters, GoogleGenAI, Tool, Type } from '@google/genai';
-import { CancellationToken, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelResponsePart2, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
+import { CancellationToken, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelDataPart, LanguageModelResponsePart2, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
 import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';
+import { CustomDataPartMimeTypes } from '../../../platform/endpoint/common/endpointTypes';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IResponseDelta, OpenAiFunctionTool } from '../../../platform/networking/common/fetch';
 import { APIUsage } from '../../../platform/networking/common/openai';
@@ -229,6 +230,17 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				if (result.ttft) {
 					pendingLoggedChatRequest.markTimeToFirstToken(result.ttft);
 				}
+				// ─── BYOK CUSTOM PATCH: emit TokenUsage to context-window ring ───
+				// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).
+				// The LM API host (extChatEndpoint.ts) otherwise hardcodes usage
+				// to zeros, leaving the UI ring indicator empty on every BYOK turn.
+				if (result.usage) {
+					progress.report(new LanguageModelDataPart(
+						new TextEncoder().encode(JSON.stringify(result.usage)),
+						CustomDataPartMimeTypes.TokenUsage
+					));
+				}
+				// ─── END BYOK CUSTOM PATCH ───────────────────────────────
 				pendingLoggedChatRequest.resolve({
 					type: ChatFetchResponseType.Success,
 					requestId,

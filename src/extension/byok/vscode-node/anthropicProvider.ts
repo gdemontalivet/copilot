@@ -566,6 +566,17 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				if (result.ttft) {
 					pendingLoggedChatRequest.markTimeToFirstToken(result.ttft);
 				}
+				// ─── BYOK CUSTOM PATCH: emit TokenUsage to context-window ring ───
+				// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).
+				// The LM API host (extChatEndpoint.ts) otherwise hardcodes usage
+				// to zeros, leaving the UI ring indicator empty on every BYOK turn.
+				if (result.usage) {
+					progress.report(new LanguageModelDataPart(
+						new TextEncoder().encode(JSON.stringify(result.usage)),
+						CustomDataPartMimeTypes.TokenUsage
+					));
+				}
+				// ─── END BYOK CUSTOM PATCH ───────────────────────────────
 				const responseDeltas: IResponseDelta[] = wrappedProgress.items.map((i): IResponseDelta => {
 					if (i instanceof LanguageModelTextPart) {
 						return { text: i.value };
