@@ -894,6 +894,15 @@ export namespace ConfigKey {
 	 */
 	export const VertexGeminiModels = defineSetting<Record<string, { name: string; projectId: string; locationId: string; maxInputTokens?: number; maxOutputTokens?: number; vision?: boolean }>>('chat.vertexGeminiModels', ConfigType.Simple, {});
 
+	/**
+	 * BYOK Auto (Patch 35). Target model the BYOK "Auto" picker entry
+	 * delegates to, formatted as `vendor/modelId` (e.g.
+	 * `vertexgemini/gemini-3.1-pro-preview`). Empty string falls back to the
+	 * provider's compiled-in default so a fresh install still resolves
+	 * something.
+	 */
+	export const ByokAutoDefaultModel = defineSetting<string>('chat.byok.auto.defaultModel', ConfigType.Simple, '');
+
 	/** Failover policy for the Anthropic (direct) BYOK provider. */
 	export const ByokAnthropicFallbackEnabled = defineSetting<boolean>('chat.byok.anthropic.fallback.enabled', ConfigType.Simple, false);
 	/** Anthropic model id → Vertex model id override. */

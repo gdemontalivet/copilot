@@ -2460,3 +2460,154 @@ const fs = require("fs");
 console.log("Patched: TokenUsage tunneling for context-window ring (33)");
 PATCH33_EOF
 
+# Patch 34: BYOK Auto language-model provider.
+#
+# Upstream's `copilot/auto` pseudo-model is resolved by `AutomodeService`,
+# which POSTs the user's Copilot session token to the CAPI `auto_mode`
+# endpoint to pick a concrete model. In BYOK we substitute a fake token
+# (Patch 1) so that call fails with "Language model unavailable" on every
+# turn whenever the user selects Auto. There is no upstream hook to swap
+# the resolver; the picker expects the vendor to be `copilot`.
+#
+# Our solution is a parallel `byokauto` vendor exposing a single `auto`
+# model. On each request the provider reads `chat.byok.auto.defaultModel`
+# (Patch 35), resolves the target via `vscode.lm.selectChatModels`, and
+# forwards the call through `model.sendRequest` — which re-enters the VS
+# Code LM API and dispatches to the actual BYOK provider.
+#
+# Step A: reinstall the canonical provider file (wiped by the sync
+#         `rsync --delete`).
+# Step B: register the provider in `byokContribution.ts` alongside the
+#         other BYOK vendors.
+
+install_byok_file \
+  ".github/byok-patches/files/byokAutoProvider.ts" \
+  "src/extension/byok/vscode-node/byokAutoProvider.ts"
+
+node << 'PATCH34_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/byokContribution.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOKAutoLMProvider.vendorId")) {
+  console.log("byokContribution BYOK Auto registration already present, skipping 34");
+  process.exit(0);
+}
+
+// Step A: add the import alongside the other provider imports.
+if (!code.includes("import { BYOKAutoLMProvider }")) {
+  const importAnchor = "import { AzureBYOKModelProvider } from './azureProvider';";
+  if (!code.includes(importAnchor)) {
+    console.warn("WARN: byokContribution azure import anchor not found — skipping patch 34 import");
+    process.exit(0);
+  }
+  code = code.replace(
+    importAnchor,
+    `${importAnchor}\nimport { BYOKAutoLMProvider } from './byokAutoProvider';`
+  );
+}
+
+// Step B: register the provider in the providers map.
+const registerAnchor = "this._providers.set(CustomOAIBYOKModelProvider.providerName.toLowerCase(), instantiationService.createInstance(CustomOAIBYOKModelProvider, this._byokStorageService));";
+if (!code.includes(registerAnchor)) {
+  console.warn("WARN: byokContribution CustomOAI register anchor not found — skipping patch 34 registration");
+  fs.writeFileSync(f, code);
+  process.exit(0);
+}
+const registerReplacement = `${registerAnchor}
+
+\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: BYOK Auto provider (Patch 34) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+\t\t\t// Upstream's \`copilot/auto\` pseudo-model hits CAPI with the Copilot
+\t\t\t// token to pick a real model \u2014 that flow dies under the BYOK
+\t\t\t// fake-token bypass and surfaces as "Language model unavailable".
+\t\t\t// Register a BYOK-native Auto provider that delegates to whichever
+\t\t\t// model the user configures in \`chat.byok.auto.defaultModel\`.
+\t\t\t// See byokAutoProvider.ts for the full rationale.
+\t\t\tthis._providers.set(
+\t\t\t\tBYOKAutoLMProvider.vendorId,
+\t\t\t\tinstantiationService.createInstance(BYOKAutoLMProvider),
+\t\t\t);
+\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`;
+code = code.replace(registerAnchor, () => registerReplacement);
+
+fs.writeFileSync(f, code);
+console.log("Patched: byokContribution BYOK Auto registration (34)");
+PATCH34_EOF
+
+# Patch 35: Declare `chat.byok.auto.defaultModel` setting.
+#
+# Consumed by `BYOKAutoLMProvider` (Patch 34) to pick the delegation target.
+# Empty string means "use the provider's compiled-in default", so new
+# installs still work without configuration provided the default vendor
+# (`vertexgemini`) is wired up.
+
+node << 'PATCH35_EOF'
+const fs = require("fs");
+const f = "src/platform/configuration/common/configurationService.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("ByokAutoDefaultModel")) {
+  console.log("ByokAutoDefaultModel setting already present, skipping 35");
+  process.exit(0);
+}
+
+const anchor = "\t/** Failover policy for the Anthropic (direct) BYOK provider. */\n\texport const ByokAnthropicFallbackEnabled = defineSetting<boolean>('chat.byok.anthropic.fallback.enabled', ConfigType.Simple, false);";
+if (!code.includes(anchor)) {
+  console.warn("WARN: ByokAnthropicFallbackEnabled anchor not found \u2014 skipping patch 35");
+  process.exit(0);
+}
+
+const replacement = "\t/**\n\t * BYOK Auto (Patch 35). Target model the BYOK \"Auto\" picker entry\n\t * delegates to, formatted as `vendor/modelId` (e.g.\n\t * `vertexgemini/gemini-3.1-pro-preview`). Empty string falls back to the\n\t * provider's compiled-in default so a fresh install still resolves\n\t * something.\n\t */\n\texport const ByokAutoDefaultModel = defineSetting<string>('chat.byok.auto.defaultModel', ConfigType.Simple, '');\n\n\t/** Failover policy for the Anthropic (direct) BYOK provider. */\n\texport const ByokAnthropicFallbackEnabled = defineSetting<boolean>('chat.byok.anthropic.fallback.enabled', ConfigType.Simple, false);";
+
+code = code.replace(anchor, () => replacement);
+fs.writeFileSync(f, code);
+console.log("Patched: ByokAutoDefaultModel setting (35)");
+PATCH35_EOF
+
+# Patch 36: Defensive auto-endpoint resolution in languageModelAccess.ts.
+#
+# `_provideLanguageModelChatInfo` unconditionally calls
+# `AutomodeService.resolveAutoModeEndpoint`, which (a) throws
+# "No auto mode endpoints provided" when `allEndpoints` is empty (typical
+# under BYOK because Patch 5 neutralises the CAPI models fetch) and (b)
+# 401s on the CAPI auto-mode session-token request when `allEndpoints` is
+# non-empty (because our token is fake). Either failure nukes the entire
+# copilot-vendor model listing, leaving the picker with only whatever the
+# BYOK providers have cached.
+#
+# Wrap the call in a try/catch, and apply the same guard to
+# `_getEndpointForModel` for the case where a stale picker UI still has
+# `copilot/auto` selected.
+
+node << 'PATCH36_EOF'
+const fs = require("fs");
+const f = "src/extension/conversation/vscode-node/languageModelAccess.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: defensive auto endpoint resolution")) {
+  console.log("languageModelAccess defensive autoEndpoint guard already present, skipping 36");
+  process.exit(0);
+}
+
+// Step A: guard the resolve call in _provideLanguageModelChatInfo.
+const listAnchor = "\t\tconst chatEndpoints = allEndpoints.filter(e => e.showInModelPicker || e.model === 'gpt-4o-mini');\n\t\tconst autoEndpoint = await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);\n\t\tchatEndpoints.push(autoEndpoint);\n\t\tlet defaultChatEndpoint: IChatEndpoint;";
+if (!code.includes(listAnchor)) {
+  console.warn("WARN: languageModelAccess autoEndpoint listing anchor not found \u2014 skipping patch 36A");
+} else {
+  const listReplacement = "\t\tconst chatEndpoints = allEndpoints.filter(e => e.showInModelPicker || e.model === 'gpt-4o-mini');\n\n\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: defensive auto endpoint resolution (Patch 36) \u2500\n\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t// In BYOK mode the upstream `copilot/auto` path depends on a CAPI\n\t\t// session token that `AutomodeService.resolveAutoModeEndpoint` exchanges\n\t\t// via `capiClientService.makeRequest(..., RequestType.AutoModels)`. The\n\t\t// fake token from Patch 1 is rejected, the call throws, and the throw\n\t\t// propagates out of `_provideLanguageModelChatInfo` \u2014 killing *all*\n\t\t// copilot-vendor listings. It also throws synchronously when\n\t\t// `allEndpoints` is empty (also typical in BYOK because the CAPI\n\t\t// `models` fetch is neutralised by Patch 5). The BYOK-native Auto\n\t\t// entry is registered by `BYOKAutoLMProvider` (Patch 34) under a\n\t\t// separate vendor, so omitting the upstream `copilot/auto` here is\n\t\t// correct and user-visible behaviour is preserved.\n\t\tlet autoEndpoint: IChatEndpoint | undefined;\n\t\tif (allEndpoints.length > 0) {\n\t\t\ttry {\n\t\t\t\tautoEndpoint = await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);\n\t\t\t\tchatEndpoints.push(autoEndpoint);\n\t\t\t} catch (err) {\n\t\t\t\tthis._logService.warn(`[LanguageModelAccess] Auto endpoint resolution failed, omitting copilot/auto: ${(err as Error).message}`);\n\t\t\t}\n\t\t}\n\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n\t\tlet defaultChatEndpoint: IChatEndpoint | undefined;";
+  code = code.replace(listAnchor, () => listReplacement);
+}
+
+// Step B: guard the resolve call in _getEndpointForModel.
+const getAnchor = "\tprivate async _getEndpointForModel(model: vscode.LanguageModelChatInformation) {\n\t\tif (model.id === AutoChatEndpoint.pseudoModelId) {\n\t\t\tconst allEndpoints = await this._endpointProvider.getAllChatEndpoints();\n\t\t\treturn await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);\n\t\t}";
+if (!code.includes(getAnchor)) {
+  console.warn("WARN: languageModelAccess _getEndpointForModel anchor not found \u2014 skipping patch 36B");
+} else {
+  const getReplacement = "\tprivate async _getEndpointForModel(model: vscode.LanguageModelChatInformation) {\n\t\tif (model.id === AutoChatEndpoint.pseudoModelId) {\n\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: guard CAPI-bound auto resolve (Patch 36) \u2500\u2500\n\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t\t// `resolveAutoModeEndpoint` POSTs to the CAPI `auto_mode` endpoint\n\t\t\t// with the Copilot session token. In BYOK that token is the fake\n\t\t\t// sentinel from Patch 1, so the call 401s and surfaces as\n\t\t\t// \"Language model unavailable\" to the user with no actionable\n\t\t\t// hint. Prefer a clear error that points to BYOK Auto.\n\t\t\tconst allEndpoints = await this._endpointProvider.getAllChatEndpoints();\n\t\t\tif (allEndpoints.length === 0) {\n\t\t\t\tthrow new Error(\n\t\t\t\t\t'Copilot Auto is unavailable in BYOK mode. Pick \"BYOK Auto\" from the model picker (vendor `byokauto`), ' +\n\t\t\t\t\t'or choose any configured BYOK model directly.',\n\t\t\t\t);\n\t\t\t}\n\t\t\ttry {\n\t\t\t\treturn await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);\n\t\t\t} catch (err) {\n\t\t\t\tthrow new Error(\n\t\t\t\t\t`Copilot Auto is unavailable: ${(err as Error).message}. ` +\n\t\t\t\t\t'Switch to \"BYOK Auto\" (vendor `byokauto`) or pick a concrete model.',\n\t\t\t\t);\n\t\t\t}\n\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t}";
+  code = code.replace(getAnchor, () => getReplacement);
+}
+
+fs.writeFileSync(f, code);
+console.log("Patched: languageModelAccess defensive autoEndpoint guards (36)");
+PATCH36_EOF

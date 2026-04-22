@@ -14,6 +14,7 @@ import { BYOKKnownModels, isBYOKEnabled } from '../../byok/common/byokProvider';
 import { IExtensionContribution } from '../../common/contributions';
 import { AnthropicLMProvider } from './anthropicProvider';
 import { AzureBYOKModelProvider } from './azureProvider';
+import { BYOKAutoLMProvider } from './byokAutoProvider';
 import { BYOKStorageService, IBYOKStorageService } from './byokStorageService';
 import { CustomOAIBYOKModelProvider } from './customOAIProvider';
 import { GeminiNativeBYOKLMProvider } from './geminiNativeProvider';
@@ -85,6 +86,20 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 			this._providers.set(OpenRouterLMProvider.providerName.toLowerCase(), instantiationService.createInstance(OpenRouterLMProvider, this._byokStorageService));
 			this._providers.set(AzureBYOKModelProvider.providerName.toLowerCase(), instantiationService.createInstance(AzureBYOKModelProvider, this._byokStorageService));
 			this._providers.set(CustomOAIBYOKModelProvider.providerName.toLowerCase(), instantiationService.createInstance(CustomOAIBYOKModelProvider, this._byokStorageService));
+
+			// ─── BYOK CUSTOM PATCH: BYOK Auto provider (Patch 34) ─────────────
+			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			// Upstream's `copilot/auto` pseudo-model hits CAPI with the Copilot
+			// token to pick a real model — that flow dies under the BYOK
+			// fake-token bypass and surfaces as "Language model unavailable".
+			// Register a BYOK-native Auto provider that delegates to whichever
+			// model the user configures in `chat.byok.auto.defaultModel`.
+			// See byokAutoProvider.ts for the full rationale.
+			this._providers.set(
+				BYOKAutoLMProvider.vendorId,
+				instantiationService.createInstance(BYOKAutoLMProvider),
+			);
+			// ─── END BYOK CUSTOM PATCH ──────────────────────────────
 
 			for (const [providerName, provider] of this._providers) {
 				this._byokRegistrations.add(lm.registerLanguageModelChatProvider(providerName, provider));

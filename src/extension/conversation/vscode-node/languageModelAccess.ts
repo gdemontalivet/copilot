@@ -245,9 +245,32 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 		const models: vscode.LanguageModelChatInformation[] = [];
 		const allEndpoints = await this._endpointProvider.getAllChatEndpoints();
 		const chatEndpoints = allEndpoints.filter(e => e.showInModelPicker || e.model === 'gpt-4o-mini');
-		const autoEndpoint = await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);
-		chatEndpoints.push(autoEndpoint);
-		let defaultChatEndpoint: IChatEndpoint;
+
+		// ─── BYOK CUSTOM PATCH: defensive auto endpoint resolution (Patch 36) ─
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// In BYOK mode the upstream `copilot/auto` path depends on a CAPI
+		// session token that `AutomodeService.resolveAutoModeEndpoint` exchanges
+		// via `capiClientService.makeRequest(..., RequestType.AutoModels)`. The
+		// fake token from Patch 1 is rejected, the call throws, and the throw
+		// propagates out of `_provideLanguageModelChatInfo` — killing *all*
+		// copilot-vendor listings. It also throws synchronously when
+		// `allEndpoints` is empty (also typical in BYOK because the CAPI
+		// `models` fetch is neutralised by Patch 5). The BYOK-native Auto
+		// entry is registered by `BYOKAutoLMProvider` (Patch 34) under a
+		// separate vendor, so omitting the upstream `copilot/auto` here is
+		// correct and user-visible behaviour is preserved.
+		let autoEndpoint: IChatEndpoint | undefined;
+		if (allEndpoints.length > 0) {
+			try {
+				autoEndpoint = await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);
+				chatEndpoints.push(autoEndpoint);
+			} catch (err) {
+				this._logService.warn(`[LanguageModelAccess] Auto endpoint resolution failed, omitting copilot/auto: ${(err as Error).message}`);
+			}
+		}
+		// ─── END BYOK CUSTOM PATCH ──────────────────────────────────
+
+		let defaultChatEndpoint: IChatEndpoint | undefined;
 		const defaultExpModel = this._expService.getTreatmentVariable<string>('chat.defaultLanguageModel')?.replace('copilot/', '');
 		if (this._authenticationService.copilotToken?.isNoAuthUser || !defaultExpModel || defaultExpModel === AutoChatEndpoint.pseudoModelId) {
 			// No auth, no experiment, and exp that sets auto to default all get default model
@@ -365,8 +388,29 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 
 	private async _getEndpointForModel(model: vscode.LanguageModelChatInformation) {
 		if (model.id === AutoChatEndpoint.pseudoModelId) {
+			// ─── BYOK CUSTOM PATCH: guard CAPI-bound auto resolve (Patch 36) ──
+			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			// `resolveAutoModeEndpoint` POSTs to the CAPI `auto_mode` endpoint
+			// with the Copilot session token. In BYOK that token is the fake
+			// sentinel from Patch 1, so the call 401s and surfaces as
+			// "Language model unavailable" to the user with no actionable
+			// hint. Prefer a clear error that points to BYOK Auto.
 			const allEndpoints = await this._endpointProvider.getAllChatEndpoints();
-			return await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);
+			if (allEndpoints.length === 0) {
+				throw new Error(
+					'Copilot Auto is unavailable in BYOK mode. Pick "BYOK Auto" from the model picker (vendor `byokauto`), ' +
+					'or choose any configured BYOK model directly.',
+				);
+			}
+			try {
+				return await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);
+			} catch (err) {
+				throw new Error(
+					`Copilot Auto is unavailable: ${(err as Error).message}. ` +
+					'Switch to "BYOK Auto" (vendor `byokauto`) or pick a concrete model.',
+				);
+			}
+			// ─── END BYOK CUSTOM PATCH ────────────────────────────────
 		}
 		return this._chatEndpoints.find(e => e.model === ModelAliasRegistry.resolveAlias(model.id));
 	}
