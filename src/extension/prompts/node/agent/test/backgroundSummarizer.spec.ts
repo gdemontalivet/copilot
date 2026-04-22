@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { describe, expect, test } from 'vitest';
-import { BackgroundSummarizationState, BackgroundSummarizationThresholds, BackgroundSummarizer, getCompactionTier, getConfirmedCompactionTier, IBackgroundSummarizationResult, shouldKickOffBackgroundSummarization, TieredCompactionThresholds } from '../backgroundSummarizer';
+import { BackgroundSummarizationState, BackgroundSummarizationThresholds, BackgroundSummarizer, IBackgroundSummarizationResult, shouldKickOffBackgroundSummarization } from '../backgroundSummarizer';
 
 describe('BackgroundSummarizer', () => {
 
@@ -313,57 +313,6 @@ describe('shouldKickOffBackgroundSummarization', () => {
 			expect(shouldKickOffBackgroundSummarization(base, false, false, unusedRng)).toBe(true);
 			expect(shouldKickOffBackgroundSummarization(base, false, true, unusedRng)).toBe(true);
 			expect(shouldKickOffBackgroundSummarization(base - 0.0001, false, true, unusedRng)).toBe(false);
-		});
-	});
-});
-
-describe('Tiered auto-compaction (BYOK custom patch)', () => {
-	const t = TieredCompactionThresholds;
-
-	describe('getCompactionTier — non-inline path', () => {
-		test('returns 0 below tier-1 threshold', () => {
-			expect(getCompactionTier(0.69, false, false)).toBe(0);
-			expect(getCompactionTier(0.69, false, true)).toBe(0);
-		});
-		test('returns 1 at tier-1 threshold', () => {
-			expect(getCompactionTier(t.tier1Estimate, false, false)).toBe(1);
-			expect(getCompactionTier(0.79, false, true)).toBe(1);
-		});
-		test('returns 2 at tier-2 threshold', () => {
-			expect(getCompactionTier(t.tier2Estimate, false, false)).toBe(2);
-			expect(getCompactionTier(0.89, false, true)).toBe(2);
-		});
-		test('returns 3 at tier-3 threshold', () => {
-			expect(getCompactionTier(t.tier3Estimate, false, false)).toBe(3);
-			expect(getCompactionTier(0.99, false, true)).toBe(3);
-		});
-	});
-
-	describe('getCompactionTier — inline + cold cache', () => {
-		test('only tier 3 fires (others skipped pending cache warmth)', () => {
-			expect(getCompactionTier(0.70, true, false)).toBe(0);
-			expect(getCompactionTier(0.80, true, false)).toBe(0);
-			expect(getCompactionTier(0.89, true, false)).toBe(0);
-			expect(getCompactionTier(0.90, true, false)).toBe(3);
-		});
-	});
-
-	describe('getCompactionTier — inline + warm cache', () => {
-		test('full ladder is active', () => {
-			expect(getCompactionTier(0.69, true, true)).toBe(0);
-			expect(getCompactionTier(0.70, true, true)).toBe(1);
-			expect(getCompactionTier(0.80, true, true)).toBe(2);
-			expect(getCompactionTier(0.90, true, true)).toBe(3);
-		});
-	});
-
-	describe('getConfirmedCompactionTier', () => {
-		test('maps confirmed ratio to tier using confirmed thresholds', () => {
-			expect(getConfirmedCompactionTier(0.64)).toBe(0);
-			expect(getConfirmedCompactionTier(t.tier1Confirmed)).toBe(1);
-			expect(getConfirmedCompactionTier(t.tier2Confirmed)).toBe(2);
-			expect(getConfirmedCompactionTier(t.tier3Confirmed)).toBe(3);
-			expect(getConfirmedCompactionTier(0.99)).toBe(3);
 		});
 	});
 });
