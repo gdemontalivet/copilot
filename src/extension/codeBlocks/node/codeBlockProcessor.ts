@@ -123,17 +123,25 @@ export class CodeBlockTrackingChatResponseStream implements ChatResponseStream {
 	textEdit = this.forward(this._wrapped.textEdit.bind(this._wrapped));
 	notebookEdit = this.forward(this._wrapped.notebookEdit.bind(this._wrapped));
 	workspaceEdit = this.forward(this._wrapped.workspaceEdit?.bind(this._wrapped) || (() => { }));
-	confirmation = this.forward(this._wrapped.confirmation.bind(this._wrapped));
-	warning = this.forward(this._wrapped.warning.bind(this._wrapped));
-	info = this.forward(this._wrapped.info.bind(this._wrapped));
-	hookProgress = this.forward(this._wrapped.hookProgress.bind(this._wrapped));
-	reference2 = this.forward(this._wrapped.reference2.bind(this._wrapped));
-	codeCitation = this.forward(this._wrapped.codeCitation.bind(this._wrapped));
-	anchor = this.forward(this._wrapped.anchor.bind(this._wrapped));
-	externalEdit = this.forward(this._wrapped.externalEdit.bind(this._wrapped));
-	beginToolInvocation = this.forward(this._wrapped.beginToolInvocation.bind(this._wrapped));
-	updateToolInvocation = this.forward(this._wrapped.updateToolInvocation.bind(this._wrapped));
-	usage = this.forward(this._wrapped.usage.bind(this._wrapped));
+	// BYOK CUSTOM PATCH: guard every proposed-API member behind `?.` with a
+	// no-op fallback. VS Code versions that haven't finalised a given
+	// proposed method (e.g. `info` is absent on 1.117.0 Stable when the host
+	// strips the chatParticipantAdditions proposal) otherwise throw
+	// "Cannot read properties of undefined (reading 'bind')" from this
+	// constructor and kill every tool-calling turn. Mirrors the existing
+	// `workspaceEdit` defensive pattern on the line above. Preserved by
+	// .github/scripts/apply-byok-patches.sh (Patch 32). Do not inline.
+	confirmation = this.forward(this._wrapped.confirmation?.bind(this._wrapped) || (() => { }));
+	warning = this.forward(this._wrapped.warning?.bind(this._wrapped) || (() => { }));
+	info = this.forward(this._wrapped.info?.bind(this._wrapped) || (() => { }));
+	hookProgress = this.forward(this._wrapped.hookProgress?.bind(this._wrapped) || (() => { }));
+	reference2 = this.forward(this._wrapped.reference2?.bind(this._wrapped) || (() => { }));
+	codeCitation = this.forward(this._wrapped.codeCitation?.bind(this._wrapped) || (() => { }));
+	anchor = this.forward(this._wrapped.anchor?.bind(this._wrapped) || (() => { }));
+	externalEdit = this.forward(this._wrapped.externalEdit?.bind(this._wrapped) || (() => { }));
+	beginToolInvocation = this.forward(this._wrapped.beginToolInvocation?.bind(this._wrapped) || (() => { }));
+	updateToolInvocation = this.forward(this._wrapped.updateToolInvocation?.bind(this._wrapped) || (() => { }));
+	usage = this.forward(this._wrapped.usage?.bind(this._wrapped) || (() => { }));
 
 	questionCarousel(questions: ChatQuestion[], allowSkip?: boolean): Thenable<Record<string, unknown> | undefined> {
 		this._codeBlockProcessor.flush();

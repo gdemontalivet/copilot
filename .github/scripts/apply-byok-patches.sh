@@ -2256,3 +2256,50 @@ const fs = require("fs");
 
 console.log("Patched: empty-stop completion detection (chatMLFetcher + commonTypes)");
 PATCH31_EOF
+
+# Patch 32: Guard ChatResponseStream proposed-API bind calls.
+#
+# `CodeBlockTrackingChatResponseStream` (codeBlockProcessor.ts) forwards every
+# ChatResponseStream method by doing `this._wrapped.X.bind(this._wrapped)`
+# unconditionally. When VS Code Stable doesn't wire a proposed API method
+# onto the stream for a given host version (e.g. 1.117.0 Stable does not
+# expose `info` on the runtime stream even though `vscode.d.ts` still
+# declares it), the raw `.bind` throws at construction time:
+#
+#   TypeError: Cannot read properties of undefined (reading 'bind')
+#     at new CodeBlockTrackingChatResponseStream (codeBlockProcessor.ts)
+#     at createInstance
+#     ... runWithToolCalling → getResult
+#
+# and every tool-calling turn dies before a single tool runs. Upstream
+# guards `workspaceEdit` with `?.bind(...) || (() => { })` for exactly
+# this reason; we extend the same defensive pattern to the rest of the
+# proposed / recently-finalised methods so the extension keeps working
+# across VS Code version drift. No-op fallbacks are safe because the
+# methods are only consumers of the raw part; skipping a call just means
+# that UI feature is silently unavailable on that VS Code version.
+node << 'PATCH32_EOF'
+const fs = require("fs");
+const f = "src/extension/codeBlocks/node/codeBlockProcessor.ts";
+let code = fs.readFileSync(f, "utf8");
+
+const sentinel = "BYOK CUSTOM PATCH: guard every proposed-API member";
+if (code.includes(sentinel)) {
+\tconsole.log("codeBlockProcessor guards already present, skipping");
+\tprocess.exit(0);
+}
+
+const anchor = "\tconfirmation = this.forward(this._wrapped.confirmation.bind(this._wrapped));\n\twarning = this.forward(this._wrapped.warning.bind(this._wrapped));\n\tinfo = this.forward(this._wrapped.info.bind(this._wrapped));\n\thookProgress = this.forward(this._wrapped.hookProgress.bind(this._wrapped));\n\treference2 = this.forward(this._wrapped.reference2.bind(this._wrapped));\n\tcodeCitation = this.forward(this._wrapped.codeCitation.bind(this._wrapped));\n\tanchor = this.forward(this._wrapped.anchor.bind(this._wrapped));\n\texternalEdit = this.forward(this._wrapped.externalEdit.bind(this._wrapped));\n\tbeginToolInvocation = this.forward(this._wrapped.beginToolInvocation.bind(this._wrapped));\n\tupdateToolInvocation = this.forward(this._wrapped.updateToolInvocation.bind(this._wrapped));\n\tusage = this.forward(this._wrapped.usage.bind(this._wrapped));";
+
+if (!code.includes(anchor)) {
+\tconsole.warn("WARN: codeBlockProcessor proposed-API block anchor not found — skipping patch 32");
+\tprocess.exit(0);
+}
+
+const replacement = "\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: guard every proposed-API member \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 32). Do not remove.\n\t// VS Code versions that haven't finalised a given proposed method (e.g.\n\t// `info` is absent on 1.117.0 Stable when the host strips the\n\t// chatParticipantAdditions proposal) otherwise throw\n\t// \"Cannot read properties of undefined (reading 'bind')\" from this\n\t// constructor and kill every tool-calling turn. Mirrors the existing\n\t// `workspaceEdit` defensive pattern on the line above.\n\tconfirmation = this.forward(this._wrapped.confirmation?.bind(this._wrapped) || (() => { }));\n\twarning = this.forward(this._wrapped.warning?.bind(this._wrapped) || (() => { }));\n\tinfo = this.forward(this._wrapped.info?.bind(this._wrapped) || (() => { }));\n\thookProgress = this.forward(this._wrapped.hookProgress?.bind(this._wrapped) || (() => { }));\n\treference2 = this.forward(this._wrapped.reference2?.bind(this._wrapped) || (() => { }));\n\tcodeCitation = this.forward(this._wrapped.codeCitation?.bind(this._wrapped) || (() => { }));\n\tanchor = this.forward(this._wrapped.anchor?.bind(this._wrapped) || (() => { }));\n\texternalEdit = this.forward(this._wrapped.externalEdit?.bind(this._wrapped) || (() => { }));\n\tbeginToolInvocation = this.forward(this._wrapped.beginToolInvocation?.bind(this._wrapped) || (() => { }));\n\tupdateToolInvocation = this.forward(this._wrapped.updateToolInvocation?.bind(this._wrapped) || (() => { }));\n\tusage = this.forward(this._wrapped.usage?.bind(this._wrapped) || (() => { }));\n\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+
+// Function-form replacement so `$` in the payload isn't treated as a back-reference.
+code = code.replace(anchor, () => replacement);
+fs.writeFileSync(f, code);
+console.log("Patched: CodeBlockTrackingChatResponseStream proposed-API guards");
+PATCH32_EOF
