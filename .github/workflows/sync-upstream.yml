@@ -29,10 +29,21 @@ jobs:
           cd /tmp/vscode
           git sparse-checkout set extensions/copilot
           cd -
+          # `rsync --delete` mirrors upstream, meaning anything in ./ that
+          # doesn't exist in upstream's tree gets wiped. Exclude fork-specific
+          # top-level directories that MUST survive the mirror:
+          #   - `.git` / `.github` / `node_modules`: obvious build/VCS scaffolding
+          #   - `.cursor`:   Cursor IDE workspace rules, incl. the BYOK patch log
+          #                  (`.cursor/rules/byok-custom-patches.mdc`)
+          #   - `.agents`:   fork-custom agent skills (anthropic-sdk-upgrader,
+          #                  github-copilot-upgrader, launch, …) consumed by
+          #                  Cursor's agent runtime
           rsync -a --delete \
             --exclude='node_modules' \
             --exclude='.git' \
             --exclude='.github' \
+            --exclude='.cursor' \
+            --exclude='.agents' \
             /tmp/vscode/extensions/copilot/ ./
 
       - name: Setup Node.js
