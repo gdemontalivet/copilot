@@ -1158,7 +1158,12 @@ export function sanitizeAnthropicToolId(id: string): string {
 
 `;
 
-code = code.replace(fnAnchor, helper + fnAnchor);
+// NOTE: we pass a function as the replacement to replace() so that the `$`
+// characters inside `helper` (regex literals like `^[a-zA-Z0-9_-]+$`) are
+// NOT interpreted as `String.prototype.replace` back-references ($`, $',
+// $&, $n). Using a string replacement silently corrupted the file on
+// previous runs by expanding `$'` into "the suffix after the match".
+code = code.replace(fnAnchor, () => helper + fnAnchor);
 
 // Step 2: wrap the tool_use id passthrough.
 const toolUseAnchor = "type: 'tool_use',\n\t\t\t\tid: part.callId,";
@@ -1167,7 +1172,7 @@ if (!code.includes(toolUseAnchor)) {
 } else {
   code = code.replace(
     toolUseAnchor,
-    "type: 'tool_use',\n\t\t\t\tid: sanitizeAnthropicToolId(part.callId),"
+    () => "type: 'tool_use',\n\t\t\t\tid: sanitizeAnthropicToolId(part.callId),"
   );
 }
 
@@ -1178,7 +1183,7 @@ if (!code.includes(toolResultAnchor)) {
 } else {
   code = code.replace(
     toolResultAnchor,
-    "type: 'tool_result',\n\t\t\t\ttool_use_id: sanitizeAnthropicToolId(part.callId),"
+    () => "type: 'tool_result',\n\t\t\t\ttool_use_id: sanitizeAnthropicToolId(part.callId),"
   );
 }
 
