@@ -62,15 +62,53 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 	public static readonly modelId: string = 'auto';
 
 	/**
-	 * Default fallback when `chat.byok.auto.defaultModel` is not configured.
+	 * Vendor preference order for auto-discovery (Patch 39). When
+	 * `chat.byok.auto.defaultModel` is unset, we walk this list and pick
+	 * the first vendor that has at least one registered model. Rationale:
 	 *
-	 * Chosen because the Vertex Gemini provider (Patch 26-29) is present in
-	 * every BYOK install that enables this provider, has the widest context
-	 * window in the free-tier, and supports vision + tools. If the user has
-	 * not provisioned Vertex access, resolution will fail with a clear error
-	 * telling them which setting to populate.
+	 *   1. `gemini` — the user's primary BYOK key. Wide context, cheap,
+	 *      vision + tool calling. This is the default "just works" target.
+	 *   2. `vertexgemini` — same model family via GCP service account, used
+	 *      when the direct Gemini key isn't configured.
+	 *   3. `anthropic` — Claude direct API (BYOK Anthropic provider).
+	 *   4. `vertexanthropic` — Claude on Vertex, used as the Anthropic
+	 *      failover target (Patch 21) and the classifier fallback (Patch 30).
+	 *   5. Anything else (OpenAI / xAI / OpenRouter / etc.) — last resort
+	 *      so Auto still resolves on BYOK installs that don't run Gemini
+	 *      or Anthropic.
+	 *
+	 * The old compiled-in default (`vertexgemini/gemini-3.1-pro-preview`)
+	 * assumed every install had Vertex configured, which is false — most
+	 * users have the direct `gemini` vendor instead. That mismatch is what
+	 * surfaced as "Language model unavailable" before Patch 39.
 	 */
-	private static readonly DEFAULT_TARGET = 'vertexgemini/gemini-3.1-pro-preview';
+	private static readonly AUTO_DISCOVERY_VENDOR_PRIORITY: readonly string[] = [
+		'gemini',
+		'vertexgemini',
+		'anthropic',
+		'vertexanthropic',
+	];
+
+	/**
+	 * Within a vendor, prefer models that look "capable enough for agent
+	 * work" over tiny/legacy variants. Matching is case-insensitive and
+	 * uses substring containment on the model's `id` and `family`. Order
+	 * matters: the first match wins. If nothing matches, we fall back to
+	 * the first model the vendor advertised (VS Code typically lists the
+	 * newest/default first anyway).
+	 */
+	private static readonly AUTO_DISCOVERY_MODEL_PREFERENCE: readonly string[] = [
+		'gemini-3.1-pro',
+		'gemini-3-pro',
+		'gemini-3-flash',
+		'gemini-2.5-pro',
+		'gemini-2.0-flash',
+		'claude-sonnet-4',
+		'claude-opus-4',
+		'claude-haiku',
+		'gpt-5',
+		'gpt-4.1',
+	];
 
 	private readonly _onDidChange = new vscode.EventEmitter<void>();
 	public readonly onDidChangeLanguageModelChatInformation = this._onDidChange.event;
@@ -184,36 +222,134 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 	 * `LanguageModelChat`. Exposed as a protected seam so the future B3
 	 * patch can override with classifier-driven selection without touching
 	 * the rest of the provider.
+	 *
+	 * Resolution order (Patch 39):
+	 *   1. If the setting is a well-formed `vendor/modelId` string, try it
+	 *      first. On hit → use it. On miss (no matching model registered)
+	 *      we fall through to auto-discovery rather than throwing, so a
+	 *      stale user setting (e.g. pointing at a vendor they later
+	 *      disabled) never bricks Auto mode.
+	 *   2. If the setting is empty/malformed OR step 1 missed, walk
+	 *      `AUTO_DISCOVERY_VENDOR_PRIORITY` and pick the first vendor with
+	 *      at least one registered model. Within that vendor, prefer a
+	 *      model from `AUTO_DISCOVERY_MODEL_PREFERENCE`; fall back to the
+	 *      first one advertised.
+	 *   3. Only if *no* non-`byokauto` model is registered at all do we
+	 *      throw with an actionable message.
 	 */
 	protected async _resolveTargetModel(_token: CancellationToken): Promise<LanguageModelChat> {
 		const raw = this._readDefaultModelSetting();
-		const parsed = this._parseTargetSpec(raw);
-		if (!parsed) {
-			throw new Error(
-				`BYOK Auto: \`chat.byok.auto.defaultModel\` is not a valid 'vendor/modelId' string (got: ${JSON.stringify(raw)}). ` +
-				`Example: "vertexgemini/gemini-3.1-pro-preview".`,
+		const parsed = raw ? this._parseTargetSpec(raw) : undefined;
+
+		if (parsed) {
+			if (parsed.vendor === BYOKAutoLMProvider.vendorId) {
+				// Catch the obvious infinite-loop trap. The picker lists
+				// BYOK Auto itself, so a user typo like `byokauto/auto`
+				// would otherwise dispatch back to this provider and blow
+				// the stack.
+				throw new Error(
+					`BYOK Auto: cannot route to itself. Set \`chat.byok.auto.defaultModel\` to a concrete model like 'gemini/gemini-3.1-pro-preview', or clear the setting to let BYOK Auto pick one for you.`,
+				);
+			}
+
+			const explicit = await vscode.lm.selectChatModels({ vendor: parsed.vendor, id: parsed.id });
+			if (explicit.length > 0) {
+				return explicit[0];
+			}
+
+			// Setting points at a model that isn't currently registered.
+			// Rather than failing the turn, log and fall through to
+			// auto-discovery. This keeps BYOK Auto resilient to users who
+			// rotate vendors without clearing the setting.
+			this._logService.warn(
+				`[BYOKAutoLMProvider] Configured target '${parsed.vendor}/${parsed.id}' is not registered; falling back to auto-discovery.`,
+			);
+		} else if (raw) {
+			this._logService.warn(
+				`[BYOKAutoLMProvider] \`chat.byok.auto.defaultModel\` is not a valid 'vendor/modelId' (got: ${JSON.stringify(raw)}); using auto-discovery.`,
 			);
 		}
 
-		const { vendor, id } = parsed;
-		if (vendor === BYOKAutoLMProvider.vendorId) {
-			// Catch the obvious infinite-loop trap. The picker lists
-			// BYOK Auto itself, so a user typo like `byokauto/auto` in the
-			// setting would otherwise dispatch back to this provider and
-			// blow the stack.
-			throw new Error(
-				`BYOK Auto: cannot route to itself. Set \`chat.byok.auto.defaultModel\` to a concrete model like 'vertexgemini/gemini-3.1-pro-preview'.`,
-			);
+		const discovered = await this._autoDiscoverTarget();
+		if (discovered) {
+			return discovered;
 		}
 
-		const candidates = await vscode.lm.selectChatModels({ vendor, id });
-		if (candidates.length === 0) {
-			throw new Error(
-				`BYOK Auto: no chat model matches vendor='${vendor}', id='${id}'. ` +
-				`Check that the BYOK provider is enabled and the model id is spelled correctly in \`chat.byok.auto.defaultModel\`.`,
-			);
+		throw new Error(
+			`BYOK Auto: no BYOK models are registered. Enable at least one BYOK provider (Gemini, Anthropic, OpenAI, …) from the model picker, or set \`chat.byok.auto.defaultModel\` to 'vendor/modelId'.`,
+		);
+	}
+
+	/**
+	 * Walk `AUTO_DISCOVERY_VENDOR_PRIORITY` and return the first viable
+	 * target. Separated from `_resolveTargetModel` so the B3 classifier
+	 * patch can reuse it as its "prompt class had no rule → use default"
+	 * path without re-implementing the vendor preference logic.
+	 */
+	protected async _autoDiscoverTarget(): Promise<LanguageModelChat | undefined> {
+		// One unfiltered call rather than N filtered calls — cheaper, and
+		// matches how the model picker itself enumerates providers.
+		let all: LanguageModelChat[];
+		try {
+			all = await vscode.lm.selectChatModels();
+		} catch (err) {
+			this._logService.warn(`[BYOKAutoLMProvider] auto-discovery enumeration failed: ${(err as Error).message}`);
+			return undefined;
 		}
-		return candidates[0];
+
+		const byVendor = new Map<string, LanguageModelChat[]>();
+		for (const model of all) {
+			if (model.vendor === BYOKAutoLMProvider.vendorId) {
+				continue;
+			}
+			const bucket = byVendor.get(model.vendor) ?? [];
+			bucket.push(model);
+			byVendor.set(model.vendor, bucket);
+		}
+
+		const visited = new Set<string>();
+		const orderedVendors: string[] = [];
+		for (const preferred of BYOKAutoLMProvider.AUTO_DISCOVERY_VENDOR_PRIORITY) {
+			if (byVendor.has(preferred)) {
+				orderedVendors.push(preferred);
+				visited.add(preferred);
+			}
+		}
+		for (const vendor of byVendor.keys()) {
+			if (!visited.has(vendor)) {
+				orderedVendors.push(vendor);
+			}
+		}
+
+		for (const vendor of orderedVendors) {
+			const models = byVendor.get(vendor)!;
+			const picked = this._pickPreferredModel(models);
+			if (picked) {
+				this._logService.trace(
+					`[BYOKAutoLMProvider] auto-discovered target ${picked.vendor}/${picked.id} (${picked.name}) from ${models.length} ${vendor} model(s).`,
+				);
+				return picked;
+			}
+		}
+
+		return undefined;
+	}
+
+	private _pickPreferredModel(models: readonly LanguageModelChat[]): LanguageModelChat | undefined {
+		if (models.length === 0) {
+			return undefined;
+		}
+		for (const needle of BYOKAutoLMProvider.AUTO_DISCOVERY_MODEL_PREFERENCE) {
+			const hit = models.find(m => {
+				const id = (m.id ?? '').toLowerCase();
+				const family = (m.family ?? '').toLowerCase();
+				return id.includes(needle) || family.includes(needle);
+			});
+			if (hit) {
+				return hit;
+			}
+		}
+		return models[0];
 	}
 
 	private _readShowRoutingHint(): boolean {
@@ -229,10 +365,12 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 	}
 
 	private _readDefaultModelSetting(): string {
-		// Use the ConfigurationService (Patch 35 setting). Falls back to the
-		// compiled-in default when the user hasn't set anything, so a fresh
-		// BYOK install still has a working Auto out of the box (provided the
-		// Vertex Gemini provider is configured).
+		// Patch 39: return '' when unset. Resolution now falls through to
+		// auto-discovery (`_autoDiscoverTarget`) instead of a hard-coded
+		// vendor/id. Returning a stale compiled-in default here would
+		// short-circuit auto-discovery and re-introduce the "no chat model
+		// matches vendor='vertexgemini'" failure on installs that only
+		// run the direct `gemini` vendor.
 		try {
 			const value = this._configurationService.getConfig(ConfigKey.ByokAutoDefaultModel);
 			if (typeof value === 'string' && value.trim().length > 0) {
@@ -241,7 +379,7 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 		} catch {
 			// ConfigKey might not exist in unit-test stubs; fall through.
 		}
-		return BYOKAutoLMProvider.DEFAULT_TARGET;
+		return '';
 	}
 
 	private _parseTargetSpec(raw: string): { vendor: string; id: string } | undefined {
@@ -265,9 +403,15 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 
 	private _describeConfiguredTarget(): string {
 		const raw = this._readDefaultModelSetting();
+		if (!raw) {
+			// Patch 39: when unset we auto-discover. Signal that in the
+			// picker so users know Auto isn't broken — it just picks a
+			// vendor dynamically.
+			return '→ auto-discovered (prefers Gemini)';
+		}
 		const parsed = this._parseTargetSpec(raw);
 		if (!parsed) {
-			return 'no default configured';
+			return 'invalid configuration';
 		}
 		return `→ ${parsed.vendor}/${parsed.id}`;
 	}

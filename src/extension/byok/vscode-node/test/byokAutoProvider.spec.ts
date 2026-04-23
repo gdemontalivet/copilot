@@ -213,9 +213,22 @@ describe('BYOKAutoLMProvider', () => {
 			expect(reported).toEqual([{ type: 'text', value: 'hi' }]);
 		});
 
-		it('falls back to the compiled-in default when the setting is empty', async () => {
+		it('auto-discovers a target via unfiltered selectChatModels when the setting is empty (Patch 39)', async () => {
+			// Patch 39 replaced the compiled-in default with vendor-priority
+			// auto-discovery. An unset setting must call
+			// `selectChatModels()` with NO filter so the provider can rank
+			// vendors itself — a filtered call by vendor/id would skip the
+			// discovery step entirely.
+			const geminiModel = {
+				vendor: 'gemini',
+				id: 'gemini-3.1-pro-preview',
+				family: 'gemini',
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			};
 			mockSelectChatModels.mockResolvedValue([
-				{ vendor: 'vertexgemini', id: 'gemini-3.1-pro-preview', sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }) },
+				{ vendor: 'openai', id: 'gpt-4.1', family: 'gpt' } as any,
+				geminiModel,
+				{ vendor: 'anthropic', id: 'claude-sonnet-4' } as any,
 			]);
 			const provider = makeProvider({ setting: '' });
 
@@ -227,10 +240,134 @@ describe('BYOKAutoLMProvider', () => {
 				stubToken,
 			);
 
-			expect(mockSelectChatModels).toHaveBeenCalledWith({
+			expect(mockSelectChatModels).toHaveBeenCalledWith();
+			// `gemini` wins over `openai` and `anthropic` because it's the
+			// highest-priority vendor in AUTO_DISCOVERY_VENDOR_PRIORITY.
+			expect(geminiModel.sendRequest).toHaveBeenCalledTimes(1);
+		});
+
+		it('auto-discovery prefers vertexgemini over anthropic when gemini is unavailable', async () => {
+			const vertexGemini = {
+				vendor: 'vertexgemini',
+				id: 'gemini-3.1-pro-preview',
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			};
+			mockSelectChatModels.mockResolvedValue([
+				{ vendor: 'anthropic', id: 'claude-sonnet-4' } as any,
+				vertexGemini,
+				{ vendor: 'openai', id: 'gpt-4.1' } as any,
+			]);
+			const provider = makeProvider({ setting: '' });
+
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[],
+				{} as any,
+				{ report: () => { /* no-op */ } } as any,
+				stubToken,
+			);
+
+			expect(vertexGemini.sendRequest).toHaveBeenCalledTimes(1);
+		});
+
+		it('auto-discovery falls through to non-priority vendors when no preferred vendor is registered', async () => {
+			const openaiModel = {
+				vendor: 'openai',
+				id: 'gpt-4.1',
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			};
+			mockSelectChatModels.mockResolvedValue([openaiModel]);
+			const provider = makeProvider({ setting: '' });
+
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[],
+				{} as any,
+				{ report: () => { /* no-op */ } } as any,
+				stubToken,
+			);
+
+			expect(openaiModel.sendRequest).toHaveBeenCalledTimes(1);
+		});
+
+		it('auto-discovery within a vendor prefers capable models over the first advertised', async () => {
+			// Vendor returns a small model FIRST (simulating a provider
+			// that lists models alphabetically). The pro-preview entry
+			// should still win because it matches the model-preference
+			// list. Prevents a regression where Auto picked a tiny legacy
+			// Gemini model just because the provider sorted it first.
+			const proPreview = {
+				vendor: 'gemini',
+				id: 'gemini-3.1-pro-preview',
+				family: 'gemini',
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			};
+			mockSelectChatModels.mockResolvedValue([
+				{ vendor: 'gemini', id: 'gemini-1.0-pro', family: 'gemini' } as any,
+				proPreview,
+				{ vendor: 'gemini', id: 'gemini-embedding-001', family: 'gemini' } as any,
+			]);
+			const provider = makeProvider({ setting: '' });
+
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[],
+				{} as any,
+				{ report: () => { /* no-op */ } } as any,
+				stubToken,
+			);
+
+			expect(proPreview.sendRequest).toHaveBeenCalledTimes(1);
+		});
+
+		it('falls back to auto-discovery when the configured target is no longer registered', async () => {
+			// User configured `vertexgemini/...` but later rotated to the
+			// direct `gemini` vendor. Patch 39 must not fail the turn —
+			// it logs a warning and discovers the next best target.
+			const fallback = {
+				vendor: 'gemini',
+				id: 'gemini-3.1-pro-preview',
+				family: 'gemini',
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			};
+			mockSelectChatModels
+				.mockResolvedValueOnce([]) // explicit lookup misses
+				.mockResolvedValueOnce([fallback]); // discovery finds gemini
+
+			const provider = makeProvider({ setting: 'vertexgemini/gemini-3.1-pro-preview' });
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[],
+				{} as any,
+				{ report: () => { /* no-op */ } } as any,
+				stubToken,
+			);
+
+			expect(mockSelectChatModels).toHaveBeenNthCalledWith(1, {
 				vendor: 'vertexgemini',
 				id: 'gemini-3.1-pro-preview',
 			});
+			expect(mockSelectChatModels).toHaveBeenNthCalledWith(2);
+			expect(fallback.sendRequest).toHaveBeenCalledTimes(1);
+		});
+
+		it('raises an actionable error only when no non-byokauto model exists anywhere', async () => {
+			mockSelectChatModels.mockResolvedValue([
+				// The provider should skip its own entry to avoid
+				// infinite recursion, so this must NOT be picked.
+				{ vendor: 'byokauto', id: 'auto' } as any,
+			]);
+			const provider = makeProvider({ setting: '' });
+
+			await expect(
+				provider.provideLanguageModelChatResponse(
+					{ id: 'auto' } as any,
+					[],
+					{} as any,
+					{ report: () => { /* no-op */ } } as any,
+					stubToken,
+				),
+			).rejects.toThrow(/no BYOK models are registered/);
 		});
 
 		it('stops reporting once cancellation is requested', async () => {
@@ -287,31 +424,26 @@ describe('BYOKAutoLMProvider', () => {
 			expect(mockSelectChatModels).not.toHaveBeenCalled();
 		});
 
-		it('raises an actionable error when the target model is not registered', async () => {
-			mockSelectChatModels.mockResolvedValue([]);
-			const provider = makeProvider({ setting: 'vertexgemini/does-not-exist' });
-			await expect(
-				provider.provideLanguageModelChatResponse(
-					{ id: 'auto' } as any,
-					[],
-					{} as any,
-					{ report: () => { /* no-op */ } } as any,
-					stubToken,
-				),
-			).rejects.toThrow(/no chat model matches/);
-		});
+		it('falls back to auto-discovery for malformed setting strings instead of throwing', async () => {
+			// Before Patch 39 a malformed setting threw
+			// `.../vendor\/modelId/`. Now we warn and auto-discover so a
+			// typo never bricks the picker.
+			const fallback = {
+				vendor: 'gemini',
+				id: 'gemini-3.1-pro-preview',
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			};
+			mockSelectChatModels.mockResolvedValue([fallback]);
 
-		it('rejects malformed setting strings with a hint about the expected format', async () => {
 			const provider = makeProvider({ setting: 'no-slash-here' });
-			await expect(
-				provider.provideLanguageModelChatResponse(
-					{ id: 'auto' } as any,
-					[],
-					{} as any,
-					{ report: () => { /* no-op */ } } as any,
-					stubToken,
-				),
-			).rejects.toThrow(/vendor\/modelId/);
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[],
+				{} as any,
+				{ report: () => { /* no-op */ } } as any,
+				stubToken,
+			);
+			expect(fallback.sendRequest).toHaveBeenCalledTimes(1);
 		});
 
 		it('preserves slashes inside the model id portion (for openrouter-style ids)', async () => {
@@ -351,6 +483,10 @@ describe('BYOKAutoLMProvider', () => {
 		});
 
 		it('falls back to a 4-chars-per-token heuristic when resolution throws', async () => {
+			// Both the explicit lookup AND auto-discovery must return
+			// nothing for resolution to truly throw. Patch 39 made the
+			// provider much more forgiving, so simulate a totally empty
+			// BYOK registry here.
 			mockSelectChatModels.mockResolvedValue([]);
 			const provider = makeProvider({ setting: 'v/missing' });
 			const count = await provider.provideTokenCount(
@@ -363,10 +499,16 @@ describe('BYOKAutoLMProvider', () => {
 	});
 
 	describe('setting read resilience', () => {
-		it('uses the compiled-in default when getConfig throws (e.g. test stub without the key)', async () => {
-			mockSelectChatModels.mockResolvedValue([
-				{ sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }) } as any,
-			]);
+		it('still resolves via auto-discovery when getConfig throws (e.g. test stub without the key)', async () => {
+			// Patch 39 made an empty/throwing config equivalent — both go
+			// straight to unfiltered `selectChatModels()`. Stubs that
+			// don't know the ConfigKey must therefore see a no-arg call.
+			const fallback = {
+				vendor: 'gemini',
+				id: 'gemini-3.1-pro-preview',
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			} as any;
+			mockSelectChatModels.mockResolvedValue([fallback]);
 			const provider = makeProvider({ throwOnRead: true });
 			await provider.provideLanguageModelChatResponse(
 				{ id: 'auto' } as any,
@@ -375,10 +517,8 @@ describe('BYOKAutoLMProvider', () => {
 				{ report: () => { /* no-op */ } } as any,
 				{ isCancellationRequested: false } as any,
 			);
-			expect(mockSelectChatModels).toHaveBeenCalledWith({
-				vendor: 'vertexgemini',
-				id: 'gemini-3.1-pro-preview',
-			});
+			expect(mockSelectChatModels).toHaveBeenCalledWith();
+			expect(fallback.sendRequest).toHaveBeenCalledTimes(1);
 		});
 	});
 });
