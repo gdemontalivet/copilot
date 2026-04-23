@@ -2748,3 +2748,95 @@ code = code.replace(anchor, () => replacement);
 fs.writeFileSync(f, code);
 console.log("Patched: ByokAutoRoutingMode + ByokAutoRoutingTable settings (40)");
 PATCH40_EOF
+
+# Patch 41: Unlock the CustomOAI BYOK vendor on VS Code Stable.
+#
+# Upstream ships the `customoai` languageModelChatProviders entry with
+#   "when": "productQualityType != 'stable'"
+# which hides the "OpenAI Compatible" option from the "Add Models..." picker
+# on VS Code Stable (still visible on Insiders). Since this fork is
+# predominantly consumed on Stable, gating the most generic escape hatch
+# for OAI-compatible third-party providers (DeepSeek, Groq, Together,
+# Fireworks, local llama.cpp servers, ...) behind Insiders defeats the
+# point of shipping CustomOAI at all.
+#
+# Drops the `when` clause so the vendor is universally visible. The
+# provider implementation itself (`customOAIProvider.ts`) is already
+# unconditionally registered in `byokContribution.ts` and works fine on
+# Stable — only the manifest-level `when` was gating the UI entry.
+#
+# Idempotency: bail out early if the entry has already been unlocked
+# (no `when` field, or `when` not referencing productQualityType).
+node << 'PATCH41_EOF'
+const fs = require("fs");
+const f = "package.json";
+const pkg = JSON.parse(fs.readFileSync(f, "utf8"));
+const providers = pkg.contributes && pkg.contributes.languageModelChatProviders;
+if (!Array.isArray(providers)) {
+  console.log("languageModelChatProviders missing, skipping customoai unlock (41)");
+  process.exit(0);
+}
+const entry = providers.find(p => p && p.vendor === "customoai");
+if (!entry) {
+  console.warn("WARN: customoai vendor entry not found \u2014 skipping patch 41");
+  process.exit(0);
+}
+if (!entry.when) {
+  console.log("customoai vendor already unlocked (no 'when' clause), skipping 41");
+  process.exit(0);
+}
+if (!/productQualityType/.test(entry.when)) {
+  console.log("customoai 'when' does not reference productQualityType, leaving alone (41)");
+  process.exit(0);
+}
+delete entry.when;
+fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+console.log("Patched: customoai vendor unlocked on Stable (41)");
+PATCH41_EOF
+
+# Patch 42: Cache BYOK `getAllModels` result to survive picker refresh storms.
+#
+# Context. Upstream's `AbstractLanguageModelChatProvider.provideLanguageModelChatInformation`
+# calls `this.getAllModels(...)` on every single invocation — and VS Code
+# fires that method on every chat model picker refresh, up to 10-15 times
+# per second in normal UI activity. Every BYOK provider whose `getAllModels`
+# is backed by a live HTTP call — `GeminiNativeBYOKLMProvider`
+# (`client.models.list()`), `AnthropicLMProvider` (`anthropic.models.list()`)
+# — ends up hammering the vendor's "list models" endpoint at 600-900
+# requests per minute. Google AI Studio's quota is 200/min/region; the
+# bucket blows out within seconds, subsequent calls 429 with
+# `RESOURCE_EXHAUSTED`, and "Language model unavailable" surfaces in chat.
+#
+# Fix. Memoise `getAllModels` on the abstract provider class so every
+# concrete BYOK vendor inherits the cache for free. Cache key is
+# `(providerId, apiKey-hash, silent, configuration-JSON)` so rotating
+# keys or changing config naturally invalidates. Successful results
+# live 24h; failures cache for 30s (negative cache) so transient 429s
+# recover on the next picker refresh without re-triggering the storm.
+# An in-flight dedup table coalesces parallel callers onto the same
+# promise so a burst of refreshes resolves with one network call.
+#
+# Idempotency: sentinel on the in-class class-level cache constant.
+node << 'PATCH42_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/abstractLanguageModelChatProvider.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("_BYOK_MODEL_LIST_TTL_MS")) {
+  console.log("BYOK getAllModels cache already present, skipping 42");
+  process.exit(0);
+}
+
+const methodAnchor = "\tasync provideLanguageModelChatInformation({ silent, configuration }: PrepareLanguageModelChatModelOptions, token: CancellationToken): Promise<T[]> {\n\t\tlet apiKey: string | undefined = (configuration as C)?.apiKey;\n\t\tif (!apiKey) {\n\t\t\tapiKey = await this.configureDefaultGroupWithApiKeyOnly();\n\t\t}\n\n\t\tconst models = await this.getAllModels(silent, apiKey, configuration as C);\n\t\treturn models.map(model => ({\n\t\t\t...model,\n\t\t\tapiKey,\n\t\t\tconfiguration\n\t\t}));\n\t}";
+
+const methodReplacement = "\tasync provideLanguageModelChatInformation({ silent, configuration }: PrepareLanguageModelChatModelOptions, token: CancellationToken): Promise<T[]> {\n\t\tlet apiKey: string | undefined = (configuration as C)?.apiKey;\n\t\tif (!apiKey) {\n\t\t\tapiKey = await this.configureDefaultGroupWithApiKeyOnly();\n\t\t}\n\n\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: cache getAllModels to survive picker refresh storms \u2500\u2500\n\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 42). Do not remove.\n\t\t// See class-level state block below for rationale.\n\t\tconst cacheKey = this._byokModelListCacheKey(apiKey, !!silent, configuration);\n\t\tconst now = Date.now();\n\t\tconst cached = this._byokModelListCache.get(cacheKey);\n\t\tif (cached && cached.expiresAt > now) {\n\t\t\tif ('models' in cached) {\n\t\t\t\treturn cached.models.map(model => ({ ...model, apiKey, configuration }));\n\t\t\t}\n\t\t\tthrow cached.error;\n\t\t}\n\t\tlet inflight = this._byokModelListInFlight.get(cacheKey);\n\t\tif (!inflight) {\n\t\t\tinflight = (async () => {\n\t\t\t\ttry {\n\t\t\t\t\tconst result = await this.getAllModels(silent, apiKey, configuration as C);\n\t\t\t\t\tthis._byokModelListCache.set(cacheKey, {\n\t\t\t\t\t\tmodels: result,\n\t\t\t\t\t\texpiresAt: Date.now() + AbstractLanguageModelChatProvider._BYOK_MODEL_LIST_TTL_MS,\n\t\t\t\t\t});\n\t\t\t\t\treturn result;\n\t\t\t\t} catch (err) {\n\t\t\t\t\tthis._byokModelListCache.set(cacheKey, {\n\t\t\t\t\t\terror: err,\n\t\t\t\t\t\texpiresAt: Date.now() + AbstractLanguageModelChatProvider._BYOK_MODEL_LIST_NEGATIVE_TTL_MS,\n\t\t\t\t\t});\n\t\t\t\t\tthrow err;\n\t\t\t\t} finally {\n\t\t\t\t\tthis._byokModelListInFlight.delete(cacheKey);\n\t\t\t\t}\n\t\t\t})();\n\t\t\tthis._byokModelListInFlight.set(cacheKey, inflight);\n\t\t}\n\t\tconst models = await inflight;\n\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n\t\treturn models.map(model => ({\n\t\t\t...model,\n\t\t\tapiKey,\n\t\t\tconfiguration\n\t\t}));\n\t}\n\n\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: model-list cache state (Patch 42) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// Upstream calls `getAllModels` on every `provideLanguageModelChatInformation`\n\t// with zero caching; VS Code fires `provideLanguageModelChatInformation`\n\t// 10-15\u00D7/second on picker refresh; every Gemini/Anthropic `models.list`\n\t// call then hits the wire and blows Google's 200/min quota within seconds.\n\t// 24h TTL is safe because vendors ship new models at most monthly.\n\t// Negative cache (30s) prevents transient 429s from causing a second storm.\n\t// Cache lives on the instance, so disposing the provider (key rotation,\n\t// workspace reload) drops it.\n\tprivate static readonly _BYOK_MODEL_LIST_TTL_MS = 24 * 60 * 60 * 1000;\n\tprivate static readonly _BYOK_MODEL_LIST_NEGATIVE_TTL_MS = 30 * 1000;\n\tprivate readonly _byokModelListCache = new Map<string, { models: T[]; expiresAt: number } | { error: unknown; expiresAt: number }>();\n\tprivate readonly _byokModelListInFlight = new Map<string, Promise<T[]>>();\n\n\tprivate _byokHashApiKey(apiKey: string | undefined): string {\n\t\tif (!apiKey) { return 'noKey'; }\n\t\t// Cheap non-cryptographic fingerprint. Key never leaves memory.\n\t\tlet h = 0;\n\t\tfor (let i = 0; i < apiKey.length; i++) {\n\t\t\th = ((h << 5) - h + apiKey.charCodeAt(i)) | 0;\n\t\t}\n\t\treturn `${apiKey.length}_${(h >>> 0).toString(16)}`;\n\t}\n\n\tprivate _byokModelListCacheKey(apiKey: string | undefined, silent: boolean, configuration: unknown): string {\n\t\treturn `${this._id}::${this._byokHashApiKey(apiKey)}::${silent ? 's' : 'i'}::${JSON.stringify(configuration ?? {})}`;\n\t}\n\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+
+if (!code.includes(methodAnchor)) {
+  console.warn("WARN: AbstractLanguageModelChatProvider.provideLanguageModelChatInformation anchor not found \u2014 skipping patch 42");
+  process.exit(0);
+}
+
+code = code.replace(methodAnchor, () => methodReplacement);
+fs.writeFileSync(f, code);
+console.log("Patched: BYOK getAllModels 24h cache + in-flight dedup (42)");
+PATCH42_EOF
