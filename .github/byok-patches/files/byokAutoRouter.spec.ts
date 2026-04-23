@@ -164,14 +164,14 @@ describe('routeToTarget', () => {
 
 	describe('self-exclusion', () => {
 		it('excludes byokauto itself from candidates to prevent infinite recursion', () => {
-			const self = m('auto', { vendor: 'byokauto' });
+			const self = m('byok-auto', { vendor: 'byokauto' });
 			const gemini = m('models/gemini-3-flash');
 			const decision = routeToTarget(classify('trivial', 'chat'), [self, gemini]);
 			expect(decision?.target).toBe(gemini);
 		});
 
 		it('honours a custom selfVendorId override', () => {
-			const self = m('auto', { vendor: 'my-custom-auto' });
+			const self = m('byok-auto', { vendor: 'my-custom-auto' });
 			const gemini = m('models/gemini-3-flash');
 			const decision = routeToTarget(
 				classify('trivial', 'chat'),

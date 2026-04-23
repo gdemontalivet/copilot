@@ -109,9 +109,31 @@ describe('BYOKAutoLMProvider', () => {
 				{ isCancellationRequested: false } as any,
 			);
 			expect(info).toHaveLength(1);
-			expect(info[0].id).toBe('auto');
+			// Must NOT be `'auto'` — that id is reserved by upstream
+			// `copilot/auto` and VS Code's chat picker de-dupes by
+			// `metadata.id` across vendors, so colliding would hide
+			// our entry from the in-chat model selector.
+			expect(info[0].id).toBe('byok-auto');
 			expect(info[0].name).toBe('BYOK Auto');
 			expect(info[0].family).toBe('byok-auto');
+		});
+
+		it('never advertises `id: "auto"` because VS Code\'s chat picker de-dupes by bare metadata.id (Patch 40 fix)', async () => {
+			// Regression guard for the "shows up under Language Models
+			// but missing from the in-chat picker" bug. VS Code's model
+			// picker at the bottom of the chat box builds a blocked-set
+			// keyed by `metadata.id` alone (no vendor qualifier) and
+			// seeds it with `copilot/auto`'s id (`"auto"`). Any other
+			// provider that also ships `id: "auto"` is silently filtered
+			// out of that picker while still appearing in the (fully
+			// qualified) Language Models settings panel. Shipping a
+			// distinct id prevents that collision.
+			const provider = makeProvider();
+			const [info] = await provider.provideLanguageModelChatInformation(
+				{ silent: true } as any,
+				{ isCancellationRequested: false } as any,
+			);
+			expect(info.id).not.toBe('auto');
 		});
 
 		it('marks the model `isUserSelectable: true` so the picker does not grey it out (Patch 40)', async () => {
@@ -175,7 +197,7 @@ describe('BYOKAutoLMProvider', () => {
 			const progress = { report: (p: unknown) => reported.push(p) };
 
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[{ role: 'user', content: 'hi' } as any],
 				{ modelOptions: { temperature: 0.3 } } as any,
 				progress as any,
@@ -212,7 +234,7 @@ describe('BYOKAutoLMProvider', () => {
 			const provider = makeProvider({ setting: 'vertexgemini/gemini-3.1-pro-preview' });
 			const reported: any[] = [];
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[],
 				{} as any,
 				{ report: (p: unknown) => reported.push(p) } as any,
@@ -243,7 +265,7 @@ describe('BYOKAutoLMProvider', () => {
 			const provider = makeProvider({ setting: 'vertexgemini/gemini-3.1-pro-preview', showRoutingHint: false });
 			const reported: any[] = [];
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[],
 				{} as any,
 				{ report: (p: unknown) => reported.push(p) } as any,
@@ -274,7 +296,7 @@ describe('BYOKAutoLMProvider', () => {
 			const provider = makeProvider({ setting: '' });
 
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[],
 				{} as any,
 				{ report: () => { /* no-op */ } } as any,
@@ -301,7 +323,7 @@ describe('BYOKAutoLMProvider', () => {
 			const provider = makeProvider({ setting: '' });
 
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[],
 				{} as any,
 				{ report: () => { /* no-op */ } } as any,
@@ -321,7 +343,7 @@ describe('BYOKAutoLMProvider', () => {
 			const provider = makeProvider({ setting: '' });
 
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[],
 				{} as any,
 				{ report: () => { /* no-op */ } } as any,
@@ -351,7 +373,7 @@ describe('BYOKAutoLMProvider', () => {
 			const provider = makeProvider({ setting: '' });
 
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[],
 				{} as any,
 				{ report: () => { /* no-op */ } } as any,
@@ -377,7 +399,7 @@ describe('BYOKAutoLMProvider', () => {
 
 			const provider = makeProvider({ setting: 'vertexgemini/gemini-3.1-pro-preview' });
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[],
 				{} as any,
 				{ report: () => { /* no-op */ } } as any,
@@ -396,13 +418,13 @@ describe('BYOKAutoLMProvider', () => {
 			mockSelectChatModels.mockResolvedValue([
 				// The provider should skip its own entry to avoid
 				// infinite recursion, so this must NOT be picked.
-				{ vendor: 'byokauto', id: 'auto' } as any,
+				{ vendor: 'byokauto', id: 'byok-auto' } as any,
 			]);
 			const provider = makeProvider({ setting: '' });
 
 			await expect(
 				provider.provideLanguageModelChatResponse(
-					{ id: 'auto' } as any,
+					{ id: 'byok-auto' } as any,
 					[],
 					{} as any,
 					{ report: () => { /* no-op */ } } as any,
@@ -436,7 +458,7 @@ describe('BYOKAutoLMProvider', () => {
 			const provider = makeProvider({ setting: 'vertexgemini/foo', showRoutingHint: false });
 			const reported: unknown[] = [];
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[],
 				{} as any,
 				{ report: (p: unknown) => reported.push(p) } as any,
@@ -455,7 +477,7 @@ describe('BYOKAutoLMProvider', () => {
 			const provider = makeProvider({ setting: 'byokauto/auto' });
 			await expect(
 				provider.provideLanguageModelChatResponse(
-					{ id: 'auto' } as any,
+					{ id: 'byok-auto' } as any,
 					[],
 					{} as any,
 					{ report: () => { /* no-op */ } } as any,
@@ -478,7 +500,7 @@ describe('BYOKAutoLMProvider', () => {
 
 			const provider = makeProvider({ setting: 'no-slash-here' });
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[],
 				{} as any,
 				{ report: () => { /* no-op */ } } as any,
@@ -495,7 +517,7 @@ describe('BYOKAutoLMProvider', () => {
 
 			const provider = makeProvider({ setting: 'openrouter/anthropic/claude-3.7-sonnet' });
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[],
 				{} as any,
 				{ report: () => { /* no-op */ } } as any,
@@ -515,7 +537,7 @@ describe('BYOKAutoLMProvider', () => {
 			mockSelectChatModels.mockResolvedValue([{ vendor: 'v', id: 'm', countTokens } as any]);
 			const provider = makeProvider({ setting: 'v/m' });
 			const count = await provider.provideTokenCount(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				'hello world',
 				{ isCancellationRequested: false } as any,
 			);
@@ -531,7 +553,7 @@ describe('BYOKAutoLMProvider', () => {
 			mockSelectChatModels.mockResolvedValue([]);
 			const provider = makeProvider({ setting: 'v/missing' });
 			const count = await provider.provideTokenCount(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				'1234567890ab', // 12 chars → 3 tokens at 4-chars/token
 				{ isCancellationRequested: false } as any,
 			);
@@ -552,7 +574,7 @@ describe('BYOKAutoLMProvider', () => {
 			mockSelectChatModels.mockResolvedValue([fallback]);
 			const provider = makeProvider({ throwOnRead: true });
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[],
 				{} as any,
 				{ report: () => { /* no-op */ } } as any,
@@ -641,7 +663,7 @@ describe('BYOKAutoLMProvider', () => {
 			});
 
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[{ role: 1, content: 'please refactor the router' }] as any,
 				{} as any,
 				{ report: () => { /* no-op */ } } as any,
@@ -674,7 +696,7 @@ describe('BYOKAutoLMProvider', () => {
 			});
 
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[{ role: 1, content: 'push to branch' }] as any,
 				{} as any,
 				{ report: (p: any) => reported.push(p) } as any,
@@ -714,7 +736,7 @@ describe('BYOKAutoLMProvider', () => {
 			// terminal behaviour when the user has no BYOK models.
 			await expect(
 				provider.provideLanguageModelChatResponse(
-					{ id: 'auto' } as any,
+					{ id: 'byok-auto' } as any,
 					[{ role: 1, content: 'hi there' }] as any,
 					{} as any,
 					{ report: () => { /* no-op */ } } as any,
@@ -755,7 +777,7 @@ describe('BYOKAutoLMProvider', () => {
 			}));
 
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[{ role: 1, content: 'hello' }] as any,
 				{} as any,
 				{ report: () => { /* no-op */ } } as any,
@@ -799,7 +821,7 @@ describe('BYOKAutoLMProvider', () => {
 			classifierInstance.classify = vi.fn().mockRejectedValue(new Error('classifier should not run'));
 
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[{ role: 1, content: 'push to branch' }] as any,
 				{} as any,
 				{ report: () => { /* no-op */ } } as any,
@@ -834,7 +856,7 @@ describe('BYOKAutoLMProvider', () => {
 			const classifySpy = vi.spyOn(classifierInstance, 'classify');
 
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[{
 					role: 1,
 					content: [
@@ -886,7 +908,7 @@ describe('BYOKAutoLMProvider', () => {
 			const provider = new BYOKAutoLMProvider(storageService, configService, logService);
 
 			await provider.provideLanguageModelChatResponse(
-				{ id: 'auto' } as any,
+				{ id: 'byok-auto' } as any,
 				[{ role: 1, content: 'hello' }] as any,
 				{} as any,
 				{ report: () => { /* no-op */ } } as any,

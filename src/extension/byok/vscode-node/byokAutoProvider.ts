@@ -74,7 +74,16 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 
 	public static readonly providerName: string = 'BYOKAuto';
 	public static readonly vendorId: string = 'byokauto';
-	public static readonly modelId: string = 'auto';
+	// IMPORTANT: must NOT be `'auto'`. VS Code's chat model picker at the
+	// bottom of the chat box de-duplicates the model list by `metadata.id`
+	// *without* vendor qualification. Upstream Copilot already reserves
+	// `id: 'auto'` (for `copilot/auto`), which means any other model that
+	// also advertises `id: 'auto'` is silently filtered out of the picker.
+	// The global Language Models settings panel uses the fully-qualified
+	// identifier (`vendor/group/id`) and is unaffected — that asymmetry is
+	// exactly what was observed: the entry showed up under "Language Models"
+	// but never appeared in the in-chat selector.
+	public static readonly modelId: string = 'byok-auto';
 
 	/**
 	 * Vendor preference order for auto-discovery (Patch 39). When
