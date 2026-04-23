@@ -114,6 +114,21 @@ describe('BYOKAutoLMProvider', () => {
 			expect(info[0].family).toBe('byok-auto');
 		});
 
+		it('marks the model `isUserSelectable: true` so the picker does not grey it out (Patch 40)', async () => {
+			// Regression guard: without this flag VS Code's model
+			// picker renders the entry but refuses clicks. The exact
+			// symptom users reported as "I see BYOK Auto in the list
+			// but cannot select it". Every other BYOK model sets this
+			// via `byokKnownModelToAPIInfo`, upstream's `copilot/auto`
+			// sets it in `buildAutoModel` — we must too.
+			const provider = makeProvider();
+			const [info] = await provider.provideLanguageModelChatInformation(
+				{ silent: true } as any,
+				{ isCancellationRequested: false } as any,
+			);
+			expect((info as any).isUserSelectable).toBe(true);
+		});
+
 		it('advertises tool-calling and image-input capabilities so the UI does not hide them', async () => {
 			const provider = makeProvider();
 			const [info] = await provider.provideLanguageModelChatInformation(

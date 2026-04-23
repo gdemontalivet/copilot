@@ -177,6 +177,19 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 			tooltip: 'Routes to the model configured in `chat.byok.auto.defaultModel`. Future versions will classify each prompt and pick the cheapest capable model.',
 			detail: this._describeConfiguredTarget(),
 			category: { label: '', order: Number.MIN_SAFE_INTEGER },
+			// `isUserSelectable: true` is REQUIRED for VS Code's chat
+			// model picker to enable the entry for selection. Without
+			// it the picker renders the model in the list but greys it
+			// out / ignores clicks — the exact symptom reported when
+			// "BYOK Auto" shows up but can't be chosen. Every other
+			// BYOK model sets this via `byokKnownModelToAPIInfo` in
+			// `byokProvider.ts`; upstream's `copilot/auto` sets it in
+			// `copilotCli.ts`'s `buildAutoModel`.
+			isUserSelectable: true,
+			// `multiplierNumeric: 0` marks this as "not metered" so the
+			// picker doesn't render the "X × pricing" chip (we're not a
+			// billable first-party model). Matches `byokKnownModelToAPIInfo`.
+			multiplierNumeric: 0,
 			capabilities: {
 				toolCalling: true,
 				imageInput: true,
