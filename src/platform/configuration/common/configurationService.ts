@@ -905,6 +905,15 @@ export namespace ConfigKey {
 	 */
 	export const ByokAutoDefaultModel = defineSetting<string>('chat.byok.auto.defaultModel', ConfigType.Simple, '');
 
+	/**
+	 * BYOK Auto (Patch 38). When enabled, `BYOKAutoLMProvider` prepends a
+	 * one-line italic markdown hint to every response showing the concrete
+	 * `vendor/modelId` the request was routed to. Useful once the B3
+	 * classifier starts picking different targets per prompt — otherwise the
+	 * picker just reads "BYOK Auto" with no indication of the actual model.
+	 */
+	export const ByokAutoShowRoutingHint = defineSetting<boolean>('chat.byok.auto.showRoutingHint', ConfigType.Simple, true);
+
 	/** Failover policy for the Anthropic (direct) BYOK provider. */
 	export const ByokAnthropicFallbackEnabled = defineSetting<boolean>('chat.byok.anthropic.fallback.enabled', ConfigType.Simple, false);
 	/** Anthropic model id → Vertex model id override. */

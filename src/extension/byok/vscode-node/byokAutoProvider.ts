@@ -14,6 +14,7 @@ import {
 	LanguageModelChatMessage2,
 	LanguageModelChatProvider,
 	LanguageModelResponsePart2,
+	LanguageModelTextPart,
 	PrepareLanguageModelChatModelOptions,
 	Progress,
 	ProvideLanguageModelChatResponseOptions,
@@ -119,6 +120,21 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 	): Promise<void> {
 		const target = await this._resolveTargetModel(token);
 		this._logService.trace(`[BYOKAutoLMProvider] Delegating to ${target.vendor}/${target.id} (${target.name})`);
+
+		// Emit a one-line routing hint as the very first stream part so the
+		// user can see which concrete model Auto picked for this turn. The
+		// picker header stays "BYOK Auto" regardless of where we route, which
+		// is actively confusing once the B3 classifier starts picking
+		// different models per prompt. A text part here renders as markdown
+		// in the chat UI and is cheap: one line, ~6 tokens, and costs zero
+		// extra LLM calls. Gated behind `chat.byok.auto.showRoutingHint`
+		// (default on) so users who want their chat transcript pristine can
+		// turn it off without losing routing visibility — the same info is
+		// still written to the log at trace level.
+		if (this._readShowRoutingHint()) {
+			progress.report(new LanguageModelTextPart(`_via \`${target.vendor}/${target.id}\`_\n\n`));
+		}
+
 		const response = await target.sendRequest(
 			messages,
 			{
@@ -198,6 +214,18 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 			);
 		}
 		return candidates[0];
+	}
+
+	private _readShowRoutingHint(): boolean {
+		// Setting defaults to `true` (Patch 38). Any non-false value enables
+		// the hint; unit-test stubs that don't know the key fall through and
+		// we default to enabled so it's visible out of the box.
+		try {
+			const value = this._configurationService.getConfig(ConfigKey.ByokAutoShowRoutingHint);
+			return value !== false;
+		} catch {
+			return true;
+		}
 	}
 
 	private _readDefaultModelSetting(): string {

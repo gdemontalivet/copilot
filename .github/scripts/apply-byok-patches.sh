@@ -2665,3 +2665,36 @@ pkg.contributes = contributes;
 fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
 console.log("Patched: byokauto vendor declared in package.json (37)");
 PATCH37_EOF
+
+# Patch 38: Declare `chat.byok.auto.showRoutingHint` setting in
+# configurationService.ts. Consumed by BYOKAutoLMProvider to decide whether
+# to prepend a one-line italic markdown hint ("_via `vendor/modelId`_") to
+# each response, so users can see which concrete model Auto actually routed
+# to. Default on. Inserted immediately after ByokAutoDefaultModel (Patch 35)
+# so the two Auto settings sit together and the `defineSetting` boilerplate
+# stays localised.
+node << 'PATCH38_EOF'
+const fs = require("fs");
+const f = "src/platform/configuration/common/configurationService.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("ByokAutoShowRoutingHint")) {
+  console.log("ByokAutoShowRoutingHint setting already present, skipping 38");
+  process.exit(0);
+}
+
+// Anchor on the literal declaration line from Patch 35 followed by the blank
+// line + Anthropic-fallback comment. This pinpoints a unique insertion point
+// even if future patches add more settings above or below.
+const anchor = "\texport const ByokAutoDefaultModel = defineSetting<string>('chat.byok.auto.defaultModel', ConfigType.Simple, '');\n\n\t/** Failover policy for the Anthropic (direct) BYOK provider. */";
+if (!code.includes(anchor)) {
+  console.warn("WARN: ByokAutoDefaultModel anchor not found \u2014 skipping patch 38 (Patch 35 must apply first)");
+  process.exit(0);
+}
+
+const replacement = "\texport const ByokAutoDefaultModel = defineSetting<string>('chat.byok.auto.defaultModel', ConfigType.Simple, '');\n\n\t/**\n\t * BYOK Auto (Patch 38). When enabled, `BYOKAutoLMProvider` prepends a\n\t * one-line italic markdown hint to every response showing the concrete\n\t * `vendor/modelId` the request was routed to. Useful once the B3\n\t * classifier starts picking different targets per prompt \u2014 otherwise the\n\t * picker just reads \"BYOK Auto\" with no indication of the actual model.\n\t */\n\texport const ByokAutoShowRoutingHint = defineSetting<boolean>('chat.byok.auto.showRoutingHint', ConfigType.Simple, true);\n\n\t/** Failover policy for the Anthropic (direct) BYOK provider. */";
+
+code = code.replace(anchor, () => replacement);
+fs.writeFileSync(f, code);
+console.log("Patched: ByokAutoShowRoutingHint setting (38)");
+PATCH38_EOF

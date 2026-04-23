@@ -24,6 +24,12 @@ vi.mock('vscode', () => ({
 		fire = vi.fn();
 		dispose = vi.fn();
 	},
+	// The provider `new`s `LanguageModelTextPart(string)` to emit the routing
+	// hint (Patch 38). Mock as a plain wrapper so tests can identify it by
+	// shape without pulling the real class in.
+	LanguageModelTextPart: class {
+		constructor(public value: string) { }
+	},
 }));
 
 // Must import the SUT AFTER `vi.mock` registration; it dereferences
@@ -33,11 +39,20 @@ import { BYOKAutoLMProvider } from '../byokAutoProvider';
 function makeProvider(opts: {
 	setting?: string;
 	throwOnRead?: boolean;
+	showRoutingHint?: boolean;
 } = {}) {
 	const configService = {
-		getConfig: vi.fn(() => {
+		// Two BYOK Auto settings now live in the ConfigurationService:
+		// `ByokAutoDefaultModel` (Patch 35, string) and `ByokAutoShowRoutingHint`
+		// (Patch 38, boolean). Dispatch on the key's `id` so tests can drive
+		// both independently without stubbing the whole ConfigKey namespace.
+		getConfig: vi.fn((key: any) => {
 			if (opts.throwOnRead) {
 				throw new Error('config read failed');
+			}
+			const id = key?.id ?? '';
+			if (id === 'chat.byok.auto.showRoutingHint') {
+				return opts.showRoutingHint ?? true;
 			}
 			return opts.setting ?? '';
 		}),
@@ -110,7 +125,11 @@ describe('BYOKAutoLMProvider', () => {
 			};
 			mockSelectChatModels.mockResolvedValue([targetModel]);
 
-			const provider = makeProvider({ setting: 'vertexgemini/gemini-3.1-pro-preview' });
+			// Disable the routing hint (Patch 38) here so the assertion below
+			// can pin down the forwarded-stream contract without the hint
+			// polluting the reported list. A dedicated test further down
+			// covers the hint behaviour itself.
+			const provider = makeProvider({ setting: 'vertexgemini/gemini-3.1-pro-preview', showRoutingHint: false });
 			const reported: unknown[] = [];
 			const progress = { report: (p: unknown) => reported.push(p) };
 
@@ -132,6 +151,66 @@ describe('BYOKAutoLMProvider', () => {
 				{ type: 'text', value: 'hello' },
 				{ type: 'text', value: 'world' },
 			]);
+		});
+
+		it('prepends a one-line routing hint by default that names the concrete target', async () => {
+			const targetModel = {
+				vendor: 'vertexgemini',
+				id: 'gemini-3.1-pro-preview',
+				name: 'Gemini 3.1 Pro',
+				sendRequest: vi.fn().mockResolvedValue({
+					stream: (async function* () {
+						yield { type: 'text', value: 'hi' };
+					})(),
+				}),
+			};
+			mockSelectChatModels.mockResolvedValue([targetModel]);
+
+			// showRoutingHint defaults to true — omit explicitly to prove the
+			// default-on behaviour.
+			const provider = makeProvider({ setting: 'vertexgemini/gemini-3.1-pro-preview' });
+			const reported: any[] = [];
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[],
+				{} as any,
+				{ report: (p: unknown) => reported.push(p) } as any,
+				stubToken,
+			);
+
+			expect(reported).toHaveLength(2);
+			// First part is the hint, a `LanguageModelTextPart` whose value
+			// must include the routed vendor/id pair so users can see where
+			// their prompt went — it's not enough to put this in the log.
+			expect(reported[0].value).toBe('_via `vertexgemini/gemini-3.1-pro-preview`_\n\n');
+			// Followed by the actual target stream, unchanged.
+			expect(reported[1]).toEqual({ type: 'text', value: 'hi' });
+		});
+
+		it('suppresses the routing hint when chat.byok.auto.showRoutingHint is false', async () => {
+			const targetModel = {
+				vendor: 'vertexgemini',
+				id: 'gemini-3.1-pro-preview',
+				sendRequest: vi.fn().mockResolvedValue({
+					stream: (async function* () {
+						yield { type: 'text', value: 'hi' };
+					})(),
+				}),
+			};
+			mockSelectChatModels.mockResolvedValue([targetModel]);
+
+			const provider = makeProvider({ setting: 'vertexgemini/gemini-3.1-pro-preview', showRoutingHint: false });
+			const reported: any[] = [];
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[],
+				{} as any,
+				{ report: (p: unknown) => reported.push(p) } as any,
+				stubToken,
+			);
+
+			// Only the downstream stream parts — no hint prefix.
+			expect(reported).toEqual([{ type: 'text', value: 'hi' }]);
 		});
 
 		it('falls back to the compiled-in default when the setting is empty', async () => {
@@ -172,7 +251,11 @@ describe('BYOKAutoLMProvider', () => {
 			};
 			mockSelectChatModels.mockResolvedValue([targetModel]);
 
-			const provider = makeProvider({ setting: 'vertexgemini/foo' });
+			// Suppress the routing hint so this test focuses solely on the
+			// cancellation-propagation contract. The hint is emitted
+			// synchronously before the stream starts, which would otherwise
+			// show up as `reported[0]` and make the assertion noisy.
+			const provider = makeProvider({ setting: 'vertexgemini/foo', showRoutingHint: false });
 			const reported: unknown[] = [];
 			await provider.provideLanguageModelChatResponse(
 				{ id: 'auto' } as any,
