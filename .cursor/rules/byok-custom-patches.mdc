@@ -183,9 +183,17 @@ Run tests with `npx vitest run src/extension/byok/common/test/byokRoutingHeurist
 The BYOK-native Auto provider from Patch 34 lives entirely in a BYOK-only file
 not present upstream:
 
-- Canonical copy: `.github/byok-patches/files/byokAutoProvider.ts`
-- Installed at: `src/extension/byok/vscode-node/byokAutoProvider.ts`
-  (via `install_byok_file` in Patch 34's section)
+- Canonical copies:
+  - `.github/byok-patches/files/byokAutoProvider.ts` — the provider class
+  - `.github/byok-patches/files/byokAutoProvider.spec.ts` — unit tests
+- Installed at:
+  - `src/extension/byok/vscode-node/byokAutoProvider.ts`
+  - `src/extension/byok/vscode-node/test/byokAutoProvider.spec.ts`
+  (both via `install_byok_file` in Patch 34's section)
+
+The spec file **must** go through `install_byok_file`: the nightly sync's
+`rsync --delete` wiped the un-canonicalised version once already (commit
+`ec57dd30f`), erasing 301 test lines overnight.
 
 Edit the canonical copy and re-run `apply-byok-patches.sh`. The provider
 exposes a single protected seam, `_resolveTargetModel(token)`, designed for

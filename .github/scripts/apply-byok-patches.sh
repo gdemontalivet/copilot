@@ -2484,6 +2484,14 @@ install_byok_file \
   ".github/byok-patches/files/byokAutoProvider.ts" \
   "src/extension/byok/vscode-node/byokAutoProvider.ts"
 
+# The test file lives under `test/` like every other spec — rsync --delete in
+# the nightly sync has no way to know it's ours, so if we don't canonicalise
+# + reinstall it here it gets wiped on every upstream refresh (observed in
+# commit ec57dd30f where 301 spec lines disappeared overnight).
+install_byok_file \
+  ".github/byok-patches/files/byokAutoProvider.spec.ts" \
+  "src/extension/byok/vscode-node/test/byokAutoProvider.spec.ts"
+
 node << 'PATCH34_EOF'
 const fs = require("fs");
 const f = "src/extension/byok/vscode-node/byokContribution.ts";
