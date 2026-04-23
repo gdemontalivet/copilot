@@ -2611,3 +2611,49 @@ if (!code.includes(getAnchor)) {
 fs.writeFileSync(f, code);
 console.log("Patched: languageModelAccess defensive autoEndpoint guards (36)");
 PATCH36_EOF
+
+# Patch 37: Declare `byokauto` as a known languageModelChatProviders vendor.
+# Without this entry the VS Code runtime refuses our registration with
+# "Chat model provider uses UNKNOWN vendor byokauto" — the picker simply
+# never sees the "BYOK Auto" model and users get "model not available".
+# Mirrors Patch 14 (vertexanthropic) and Patch 28 (vertexgemini): manifest-
+# level vendor contribution; no configuration block because the provider
+# has no credentials of its own (it delegates to whichever BYOK provider
+# `chat.byok.auto.defaultModel` points at).
+node << 'PATCH37_EOF'
+const fs = require("fs");
+const f = "package.json";
+const pkg = JSON.parse(fs.readFileSync(f, "utf8"));
+const contributes = pkg.contributes || {};
+const providers = contributes.languageModelChatProviders;
+if (!Array.isArray(providers)) {
+  console.log("languageModelChatProviders missing, skipping byokauto registration");
+  process.exit(0);
+}
+
+// Normalise any stray camelCase variants first — same defensive move as
+// Patch 28 for VertexGemini, in case a local edit landed with different
+// casing before the sync ran.
+for (const p of providers) {
+  if (p && typeof p.vendor === "string" && p.vendor.toLowerCase() === "byokauto" && p.vendor !== "byokauto") {
+    console.log("Normalising existing byokauto vendor casing (" + p.vendor + " -> byokauto)");
+    p.vendor = "byokauto";
+  }
+}
+if (providers.some(p => p && p.vendor === "byokauto")) {
+  contributes.languageModelChatProviders = providers;
+  pkg.contributes = contributes;
+  fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+  console.log("byokauto vendor already declared, ensured lowercase");
+  process.exit(0);
+}
+const entry = {
+  vendor: "byokauto",
+  displayName: "BYOK Auto"
+};
+providers.push(entry);
+contributes.languageModelChatProviders = providers;
+pkg.contributes = contributes;
+fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+console.log("Patched: byokauto vendor declared in package.json (37)");
+PATCH37_EOF
