@@ -2534,7 +2534,10 @@ const registerReplacement = `${registerAnchor}
 \t\t\t// See byokAutoProvider.ts for the full rationale.
 \t\t\tthis._providers.set(
 \t\t\t\tBYOKAutoLMProvider.vendorId,
-\t\t\t\tinstantiationService.createInstance(BYOKAutoLMProvider),
+\t\t\t\t// Patch 40 extended the constructor to take the shared
+\t\t\t\t// BYOK storage service so the classifier can read the
+\t\t\t\t// user's Gemini / Vertex keys without re-prompting.
+\t\t\t\tinstantiationService.createInstance(BYOKAutoLMProvider, this._byokStorageService),
 \t\t\t);
 \t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`;
 code = code.replace(registerAnchor, () => registerReplacement);

@@ -97,7 +97,12 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 			// See byokAutoProvider.ts for the full rationale.
 			this._providers.set(
 				BYOKAutoLMProvider.vendorId,
-				instantiationService.createInstance(BYOKAutoLMProvider),
+				// Patch 40: BYOKAutoLMProvider needs the shared
+				// storage service so the classifier can read the
+				// user's Gemini / Vertex keys. `IBYOKStorageService`
+				// isn't a DI decorator — mirror the explicit-arg
+				// pattern used by the other providers.
+				instantiationService.createInstance(BYOKAutoLMProvider, this._byokStorageService),
 			);
 			// ─── END BYOK CUSTOM PATCH ──────────────────────────────
 

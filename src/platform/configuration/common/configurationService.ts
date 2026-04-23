@@ -914,6 +914,33 @@ export namespace ConfigKey {
 	 */
 	export const ByokAutoShowRoutingHint = defineSetting<boolean>('chat.byok.auto.showRoutingHint', ConfigType.Simple, true);
 
+	/**
+	 * BYOK Auto (Patch 40). Selects the routing pipeline:
+	 *   - `'static'`     — resolve `chat.byok.auto.defaultModel` (or
+	 *                      vendor-priority auto-discovery) once per
+	 *                      turn. Every message goes to the same target.
+	 *   - `'classifier'` — classify each prompt via the Patch 30
+	 *                      3-tier cascade (Gemini Flash → Vertex Haiku
+	 *                      → regex heuristic) and route through the
+	 *                      `DEFAULT_ROUTING_TABLE` (merged with any
+	 *                      user override in {@link ByokAutoRoutingTable}).
+	 * Defaults to `'classifier'` — the router falls back to `'static'`
+	 * automatically when the classifier has no credentials configured,
+	 * so enabling it is safe even on a fresh install.
+	 */
+	export const ByokAutoRoutingMode = defineSetting<'static' | 'classifier'>('chat.byok.auto.routingMode', ConfigType.Simple, 'classifier');
+
+	/**
+	 * BYOK Auto (Patch 40). User override for the classifier-driven
+	 * router's preference table. Shape matches `RoutingTable` in
+	 * `src/extension/byok/common/byokAutoRouter.ts`:
+	 *   `{ [complexity]: { [task_type | '*']: string[] } }`
+	 * Individual cells override the baked-in defaults; unset cells are
+	 * inherited from `DEFAULT_ROUTING_TABLE`. Malformed values are
+	 * logged and ignored — a bad setting never blocks a chat turn.
+	 */
+	export const ByokAutoRoutingTable = defineSetting<Record<string, Record<string, string[]>>>('chat.byok.auto.routingTable', ConfigType.Simple, {});
+
 	/** Failover policy for the Anthropic (direct) BYOK provider. */
 	export const ByokAnthropicFallbackEnabled = defineSetting<boolean>('chat.byok.anthropic.fallback.enabled', ConfigType.Simple, false);
 	/** Anthropic model id → Vertex model id override. */

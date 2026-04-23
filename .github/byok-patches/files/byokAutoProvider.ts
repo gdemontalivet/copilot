@@ -21,6 +21,20 @@ import {
 } from 'vscode';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { ILogService } from '../../../platform/log/common/logService';
+import {
+	DEFAULT_ROUTING_TABLE,
+	mergeRoutingTable,
+	RoutableModel,
+	routeToTarget,
+	RoutingTable,
+} from '../common/byokAutoRouter';
+import type {
+	ClassificationInput,
+	ClassificationResult,
+	IByokRoutingClassifier,
+	VertexClassifierConfig,
+} from '../common/byokRoutingClassifier.types';
+import type { IBYOKStorageService } from './byokStorageService';
 
 /**
  * Synthetic "Auto" model that lives in the BYOK world.
@@ -113,13 +127,33 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 	private readonly _onDidChange = new vscode.EventEmitter<void>();
 	public readonly onDidChangeLanguageModelChatInformation = this._onDidChange.event;
 
+	/**
+	 * Lazily-constructed classifier shared across turns. Re-built when
+	 * credentials change (Gemini key rotation, Vertex config edit). The
+	 * shape `{ credentialFingerprint, classifier }` lets us invalidate
+	 * the cache cheaply without re-reading credentials on every hot-path
+	 * call — we only reach for storage/config again when the fingerprint
+	 * from the current read differs from the cached one.
+	 */
+	private _cachedClassifier: {
+		readonly credentialFingerprint: string;
+		readonly classifier: IByokRoutingClassifier;
+	} | undefined;
+
 	constructor(
+		// Positional non-DI params match the pattern used by the other
+		// BYOK providers (see `GeminiNativeBYOKLMProvider`,
+		// `AnthropicLMProvider`). `IBYOKStorageService` is not a DI
+		// decorator — `byokContribution.ts` constructs it once and
+		// passes it to every provider explicitly.
+		private readonly _byokStorageService: IBYOKStorageService,
 		@IConfigurationService private readonly _configurationService: IConfigurationService,
 		@ILogService private readonly _logService: ILogService,
 	) { }
 
 	dispose(): void {
 		this._onDidChange.dispose();
+		this._cachedClassifier = undefined;
 	}
 
 	async provideLanguageModelChatInformation(
@@ -156,7 +190,12 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 		progress: Progress<LanguageModelResponsePart2>,
 		token: CancellationToken,
 	): Promise<void> {
-		const target = await this._resolveTargetModel(token);
+		// Patch 40: routing mode selects between the static target
+		// (Patches 34–39) and the classifier-driven router. Resolution
+		// happens per-turn because the classifier's output depends on
+		// the message payload.
+		const resolution = await this._resolveRouting(messages, token);
+		const target = resolution.target;
 		this._logService.trace(`[BYOKAutoLMProvider] Delegating to ${target.vendor}/${target.id} (${target.name})`);
 
 		// Emit a one-line routing hint as the very first stream part so the
@@ -170,7 +209,7 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 		// turn it off without losing routing visibility — the same info is
 		// still written to the log at trace level.
 		if (this._readShowRoutingHint()) {
-			progress.report(new LanguageModelTextPart(`_via \`${target.vendor}/${target.id}\`_\n\n`));
+			progress.report(new LanguageModelTextPart(this._formatRoutingHint(resolution)));
 		}
 
 		const response = await target.sendRequest(
@@ -207,8 +246,15 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 		// If resolution fails, fall back to a 4-chars-per-token heuristic
 		// rather than throwing — token-count failures otherwise take down
 		// entire turns in callers that don't guard the call.
+		//
+		// `provideTokenCount` doesn't receive the message history, so we
+		// skip the classifier and resolve against the static path —
+		// token counting happens per-part and misrouting here would be
+		// expensive (every part would reclassify). The actual routing
+		// decision for the turn still runs in
+		// `provideLanguageModelChatResponse`.
 		try {
-			const target = await this._resolveTargetModel(token);
+			const target = await this._resolveStaticTarget(token);
 			return target.countTokens(text as LanguageModelChatMessage, token);
 		} catch (err) {
 			const s = typeof text === 'string' ? text : this._stringifyMessage(text);
@@ -218,10 +264,58 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 	}
 
 	/**
+	 * Patch 40 top-level resolution entry point. Dispatches on
+	 * `chat.byok.auto.routingMode`:
+	 *   - `'static'`     → Patch 39 static pipeline (setting or
+	 *                      vendor-priority auto-discovery).
+	 *   - `'classifier'` → Patch 40 classifier + router pipeline, with
+	 *                      the static path as a safety net if the
+	 *                      classifier is misconfigured or the router
+	 *                      can't find a target.
+	 *
+	 * Returns a {@link RoutingResolution} carrying enough metadata for
+	 * the routing hint (Patch 38 / 40) to describe *why* we picked the
+	 * target. That metadata is deliberately held here rather than
+	 * re-computed in the hint formatter so the trace log and the hint
+	 * line stay consistent.
+	 */
+	protected async _resolveRouting(
+		messages: ReadonlyArray<LanguageModelChatMessage | LanguageModelChatMessage2>,
+		token: CancellationToken,
+	): Promise<RoutingResolution> {
+		const mode = this._readRoutingMode();
+		if (mode === 'classifier') {
+			const classifier = await this._getOrCreateClassifier();
+			if (classifier) {
+				try {
+					const resolution = await this._resolveViaClassifier(classifier, messages, token);
+					if (resolution) {
+						return resolution;
+					}
+				} catch (err) {
+					// Anything escaping `_resolveViaClassifier` is a
+					// bug-or-degradation signal. Log it and fall
+					// through to static mode — the worst-case behaviour
+					// in classifier mode should never be worse than the
+					// static path.
+					this._logService.warn(
+						`[BYOKAutoLMProvider] Classifier routing failed, falling back to static path: ${(err as Error).message}`,
+					);
+				}
+			} else {
+				this._logService.trace(`[BYOKAutoLMProvider] Classifier mode enabled but no credentials available — using static path.`);
+			}
+		}
+
+		const target = await this._resolveStaticTarget(token);
+		return { target, mode: 'static' };
+	}
+
+	/**
 	 * Read `chat.byok.auto.defaultModel` and resolve the matching
-	 * `LanguageModelChat`. Exposed as a protected seam so the future B3
-	 * patch can override with classifier-driven selection without touching
-	 * the rest of the provider.
+	 * `LanguageModelChat`. Exposed as a protected seam so the classifier
+	 * mode (Patch 40) can fall back here when it can't produce a
+	 * routing decision.
 	 *
 	 * Resolution order (Patch 39):
 	 *   1. If the setting is a well-formed `vendor/modelId` string, try it
@@ -237,7 +331,7 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 	 *   3. Only if *no* non-`byokauto` model is registered at all do we
 	 *      throw with an actionable message.
 	 */
-	protected async _resolveTargetModel(_token: CancellationToken): Promise<LanguageModelChat> {
+	protected async _resolveStaticTarget(_token: CancellationToken): Promise<LanguageModelChat> {
 		const raw = this._readDefaultModelSetting();
 		const parsed = raw ? this._parseTargetSpec(raw) : undefined;
 
@@ -436,4 +530,241 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 		}
 		return '';
 	}
+
+	/* ─── Patch 40: classifier-driven routing ────────────────────── */
+
+	private _readRoutingMode(): 'static' | 'classifier' {
+		try {
+			const raw = this._configurationService.getConfig(ConfigKey.ByokAutoRoutingMode);
+			if (raw === 'static' || raw === 'classifier') {
+				return raw;
+			}
+		} catch {
+			// Setting may be absent in test stubs — fall through.
+		}
+		// Default to classifier mode now that the safety net (fallback
+		// to static on any error / missing credentials) is wired up.
+		// Users who want the cheap Patch 34 behaviour back can flip
+		// `chat.byok.auto.routingMode` to `'static'`.
+		return 'classifier';
+	}
+
+	private _readRoutingTable(): RoutingTable {
+		try {
+			const raw = this._configurationService.getConfig(ConfigKey.ByokAutoRoutingTable);
+			return mergeRoutingTable(raw);
+		} catch {
+			return DEFAULT_ROUTING_TABLE;
+		}
+	}
+
+	/**
+	 * Pull the user's Gemini key (from BYOK storage) + any Vertex
+	 * Anthropic config (from `chat.vertexAnthropicModels`) and build a
+	 * classifier. Returns `undefined` when *both* are missing — at
+	 * that point classifier mode cannot meaningfully run and we should
+	 * fall through to static routing.
+	 *
+	 * The cache is keyed by a cheap credential fingerprint so key
+	 * rotation reliably invalidates the cached instance without
+	 * per-call storage round-trips on every turn. Empty fingerprint
+	 * (no credentials present) is a distinct case — we return
+	 * `undefined` and make no classifier.
+	 */
+	protected async _getOrCreateClassifier(): Promise<IByokRoutingClassifier | undefined> {
+		const { options, fingerprint } = await this._buildClassifierOptions();
+		if (!fingerprint) {
+			return undefined;
+		}
+		if (this._cachedClassifier && this._cachedClassifier.credentialFingerprint === fingerprint) {
+			return this._cachedClassifier.classifier;
+		}
+		// Dynamic import keeps the `@google/genai` + `@anthropic-ai/sdk`
+		// load off the cold-start path for users on static mode.
+		const { ByokRoutingClassifier } = await import('./byokRoutingClassifier');
+		const classifier = new ByokRoutingClassifier(options, this._logService);
+		this._cachedClassifier = { credentialFingerprint: fingerprint, classifier };
+		return classifier;
+	}
+
+	private async _buildClassifierOptions(): Promise<{
+		options: {
+			geminiApiKey?: string;
+			vertexConfig?: VertexClassifierConfig;
+			primaryTimeoutMs?: number;
+			failoverTimeoutMs?: number;
+		};
+		fingerprint: string;
+	}> {
+		// Gemini key: provider-level storage. Lower-cased provider name
+		// matches `GeminiNativeBYOKLMProvider.providerName.toLowerCase()`.
+		let geminiApiKey: string | undefined;
+		try {
+			geminiApiKey = await this._byokStorageService.getAPIKey('gemini');
+		} catch (err) {
+			this._logService.trace(`[BYOKAutoLMProvider] Could not read Gemini key for classifier: ${(err as Error).message}`);
+		}
+
+		// Vertex config: pick the first entry in `chat.vertexAnthropicModels`.
+		// The classifier only needs *any* Vertex endpoint to call Haiku;
+		// we don't need the user's per-model map, just a project+location
+		// we can authenticate against. The stored API key lives under
+		// `vertexanthropic` provider storage (global key auth).
+		let vertexConfig: VertexClassifierConfig | undefined;
+		try {
+			const vertexModels = this._configurationService.getConfig(ConfigKey.VertexAnthropicModels);
+			const firstEntry = vertexModels && typeof vertexModels === 'object'
+				? Object.values(vertexModels as Record<string, { projectId?: string; locationId?: string }>)[0]
+				: undefined;
+			if (firstEntry?.projectId && firstEntry?.locationId) {
+				const vertexApiKey = await this._byokStorageService.getAPIKey('vertexanthropic');
+				if (vertexApiKey) {
+					vertexConfig = {
+						apiKey: vertexApiKey,
+						projectId: firstEntry.projectId,
+						// Haiku 3.5 lives in region-specific endpoints
+						// (us-east5 / us-central1). Honour whatever the
+						// user has configured rather than hardcoding.
+						locationId: firstEntry.locationId,
+					};
+				}
+			}
+		} catch (err) {
+			this._logService.trace(`[BYOKAutoLMProvider] Could not read Vertex config for classifier: ${(err as Error).message}`);
+		}
+
+		// Fingerprint only needs to change when *something* that would
+		// alter classifier behaviour changes. Hash-like concatenation
+		// of the relevant fields keeps it cheap and test-stable.
+		const fingerprintParts = [
+			geminiApiKey ? `g:${geminiApiKey.length}:${geminiApiKey.slice(0, 4)}` : '',
+			vertexConfig ? `v:${vertexConfig.projectId}:${vertexConfig.locationId}:${vertexConfig.apiKey.length}` : '',
+		];
+		const fingerprint = fingerprintParts.filter(Boolean).join('|');
+
+		return {
+			options: { geminiApiKey, vertexConfig },
+			fingerprint,
+		};
+	}
+
+	/**
+	 * Classifier + router pipeline. Returns `undefined` when the router
+	 * can't produce a decision (empty candidate pool) so the caller can
+	 * fall through to the static path.
+	 */
+	protected async _resolveViaClassifier(
+		classifier: IByokRoutingClassifier,
+		messages: ReadonlyArray<LanguageModelChatMessage | LanguageModelChatMessage2>,
+		_token: CancellationToken,
+	): Promise<RoutingResolution | undefined> {
+		const input = this._extractClassificationInput(messages);
+		const classification = await classifier.classify(input);
+		this._logService.trace(
+			`[BYOKAutoLMProvider] classification: complexity=${classification.complexity} task=${classification.task_type} ` +
+			`topic_changed=${classification.topic_changed} needs_vision=${classification.needs_vision} ` +
+			`source=${classification.source} latency=${classification.latencyMs}ms confidence=${classification.confidence}`,
+		);
+
+		const candidates = await vscode.lm.selectChatModels();
+		const decision = routeToTarget(
+			classification,
+			candidates as unknown as readonly RoutableModel[],
+			{ table: this._readRoutingTable(), selfVendorId: 'byokauto' },
+		);
+		if (!decision) {
+			return undefined;
+		}
+		// `routeToTarget` operates on the structural `RoutableModel`
+		// view; the returned target is the same runtime object we got
+		// from `selectChatModels()` so the cast back is safe.
+		return {
+			target: decision.target as unknown as LanguageModelChat,
+			mode: 'classifier',
+			classification,
+			rule: decision.rule,
+			matchedNeedle: decision.matchedNeedle,
+		};
+	}
+
+	/**
+	 * Extract the classifier input from a conversation. Slice B keeps
+	 * this intentionally minimal (last user message → prompt, everything
+	 * else stitched into `recentHistory`, skipping tool messages). Slice
+	 * C will refine reference counting and image detection.
+	 */
+	protected _extractClassificationInput(
+		messages: ReadonlyArray<LanguageModelChatMessage | LanguageModelChatMessage2>,
+	): ClassificationInput {
+		let lastUserIdx = -1;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const role = (messages[i] as { role?: unknown }).role;
+			// VS Code's `LanguageModelChatMessageRole.User` is enum value
+			// 1 — use the numeric check for compatibility with both
+			// `LanguageModelChatMessage` and `LanguageModelChatMessage2`.
+			if (role === 1 || role === 'user') {
+				lastUserIdx = i;
+				break;
+			}
+		}
+		const prompt = lastUserIdx >= 0 ? this._stringifyMessage(messages[lastUserIdx]) : '';
+		const historyMessages = lastUserIdx >= 0 ? messages.slice(Math.max(0, lastUserIdx - 4), lastUserIdx) : [];
+		const recentHistory = historyMessages
+			.map(m => this._stringifyMessage(m))
+			.filter(s => s.length > 0)
+			.join('\n---\n')
+			.slice(0, 2000) || undefined;
+		const hasImageAttachment = this._detectImageAttachment(lastUserIdx >= 0 ? messages[lastUserIdx] : undefined);
+		return {
+			prompt,
+			recentHistory,
+			hasImageAttachment,
+			referenceCount: 0, // Slice C refines this.
+		};
+	}
+
+	private _detectImageAttachment(msg: LanguageModelChatMessage | LanguageModelChatMessage2 | undefined): boolean {
+		if (!msg) {
+			return false;
+		}
+		const content = (msg as { content?: unknown }).content;
+		if (!Array.isArray(content)) {
+			return false;
+		}
+		// `LanguageModelDataPart` / `LanguageModelImagePart` carry an
+		// `data` / `mimeType` pair. Detection here is structural so we
+		// match both shapes without depending on the enum.
+		return content.some(p =>
+			p && typeof p === 'object' &&
+			('mimeType' in p && typeof (p as { mimeType: unknown }).mimeType === 'string' &&
+				(p as { mimeType: string }).mimeType.startsWith('image/'))
+		);
+	}
+
+	private _formatRoutingHint(resolution: RoutingResolution): string {
+		const target = `${resolution.target.vendor}/${resolution.target.id}`;
+		if (resolution.mode === 'static' || !resolution.classification) {
+			return `_via \`${target}\`_\n\n`;
+		}
+		const c = resolution.classification;
+		const ruleSuffix = resolution.rule ? ` • rule=${resolution.rule}` : '';
+		const topicSuffix = c.topic_changed ? ' • topic_changed' : '';
+		return (
+			`_via \`${target}\` • complexity=${c.complexity}, task=${c.task_type}, ` +
+			`source=${c.source} (${Math.round(c.latencyMs)}ms)${ruleSuffix}${topicSuffix}_\n\n`
+		);
+	}
+}
+
+/**
+ * Metadata returned by {@link BYOKAutoLMProvider._resolveRouting}.
+ * Carries enough information for the routing hint (Patch 38 / 40) to
+ * describe the decision without re-running any logic.
+ */
+export interface RoutingResolution {
+	readonly target: LanguageModelChat;
+	readonly mode: 'static' | 'classifier';
+	readonly classification?: ClassificationResult;
+	readonly rule?: 'table' | 'table-default' | 'fallback' | 'first-of-kind';
+	readonly matchedNeedle?: string;
 }

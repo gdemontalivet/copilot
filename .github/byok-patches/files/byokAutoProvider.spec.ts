@@ -40,12 +40,21 @@ function makeProvider(opts: {
 	setting?: string;
 	throwOnRead?: boolean;
 	showRoutingHint?: boolean;
+	routingMode?: 'static' | 'classifier';
 } = {}) {
 	const configService = {
-		// Two BYOK Auto settings now live in the ConfigurationService:
-		// `ByokAutoDefaultModel` (Patch 35, string) and `ByokAutoShowRoutingHint`
-		// (Patch 38, boolean). Dispatch on the key's `id` so tests can drive
-		// both independently without stubbing the whole ConfigKey namespace.
+		// Multiple BYOK Auto settings now live in the ConfigurationService:
+		// `ByokAutoDefaultModel` (Patch 35, string), `ByokAutoShowRoutingHint`
+		// (Patch 38, boolean), `ByokAutoRoutingMode` (Patch 40,
+		// `'static' | 'classifier'`), `ByokAutoRoutingTable` (Patch 40,
+		// record). Dispatch on the key's `id` so tests can drive each
+		// independently without stubbing the whole ConfigKey namespace.
+		//
+		// `routingMode` defaults to `'static'` in this suite so
+		// pre-Patch-40 tests don't accidentally exercise the classifier
+		// pipeline (which would then hit `selectChatModels` twice and
+		// break the mock accounting). Tests that care about classifier
+		// mode set it explicitly.
 		getConfig: vi.fn((key: any) => {
 			if (opts.throwOnRead) {
 				throw new Error('config read failed');
@@ -53,6 +62,15 @@ function makeProvider(opts: {
 			const id = key?.id ?? '';
 			if (id === 'chat.byok.auto.showRoutingHint') {
 				return opts.showRoutingHint ?? true;
+			}
+			if (id === 'chat.byok.auto.routingMode') {
+				return opts.routingMode ?? 'static';
+			}
+			if (id === 'chat.byok.auto.routingTable') {
+				return {};
+			}
+			if (id === 'chat.vertexAnthropicModels') {
+				return {};
 			}
 			return opts.setting ?? '';
 		}),
@@ -66,7 +84,15 @@ function makeProvider(opts: {
 		error: vi.fn(),
 	} as any;
 
-	return new BYOKAutoLMProvider(configService, logService);
+	// Patch 40 added `IBYOKStorageService` as the first positional
+	// constructor arg. Minimal mock — each suite that exercises the
+	// classifier path overrides `getAPIKey` in-place to simulate the
+	// presence/absence of credentials.
+	const storageService = {
+		getAPIKey: vi.fn(async () => undefined),
+	} as any;
+
+	return new BYOKAutoLMProvider(storageService, configService, logService);
 }
 
 describe('BYOKAutoLMProvider', () => {
@@ -519,6 +545,255 @@ describe('BYOKAutoLMProvider', () => {
 			);
 			expect(mockSelectChatModels).toHaveBeenCalledWith();
 			expect(fallback.sendRequest).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	/* ─────────────────── Patch 40: classifier routing ─────────────────── */
+
+	describe('classifier routing mode (Patch 40)', () => {
+		/**
+		 * Build a provider that exercises the classifier path WITHOUT
+		 * actually constructing `ByokRoutingClassifier` — we override
+		 * the protected seam `_getOrCreateClassifier` to return a stub
+		 * that resolves to whatever classification the test wants. This
+		 * keeps the test hermetic (no network, no SDK imports).
+		 */
+		function makeClassifierProvider(
+			classification: any,
+			opts: {
+				setting?: string;
+				showRoutingHint?: boolean;
+				routingTable?: any;
+			} = {},
+		): BYOKAutoLMProvider {
+			const configService = {
+				getConfig: vi.fn((key: any) => {
+					const id = key?.id ?? '';
+					if (id === 'chat.byok.auto.showRoutingHint') { return opts.showRoutingHint ?? true; }
+					if (id === 'chat.byok.auto.routingMode') { return 'classifier'; }
+					if (id === 'chat.byok.auto.routingTable') { return opts.routingTable ?? {}; }
+					if (id === 'chat.vertexAnthropicModels') { return {}; }
+					return opts.setting ?? '';
+				}),
+			} as any;
+			const logService = {
+				trace: vi.fn(), debug: vi.fn(), info: vi.fn(),
+				warn: vi.fn(), error: vi.fn(),
+			} as any;
+			const storageService = {
+				getAPIKey: vi.fn(async (name: string) => name === 'gemini' ? 'fake-gemini-key' : undefined),
+			} as any;
+
+			const provider = new BYOKAutoLMProvider(storageService, configService, logService);
+			// Subclassing around the instance via prototype override
+			// keeps the test from having to export a dedicated subclass.
+			(provider as any)._getOrCreateClassifier = vi.fn(async () => ({
+				classify: vi.fn(async () => classification),
+			}));
+			return provider;
+		}
+
+		it('classifies the last user message and routes via the table', async () => {
+			// User message is moderate code_gen ⇒ table should pick
+			// gemini-3.1-pro (first entry in the moderate.code_gen cell).
+			const pro = {
+				vendor: 'gemini',
+				id: 'models/gemini-3.1-pro-preview',
+				capabilities: { imageInput: true, toolCalling: true },
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			} as any;
+			const flash = {
+				vendor: 'gemini',
+				id: 'models/gemini-3-flash',
+				capabilities: { imageInput: true, toolCalling: true },
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			} as any;
+			mockSelectChatModels.mockResolvedValue([flash, pro]);
+
+			const provider = makeClassifierProvider({
+				complexity: 'moderate',
+				task_type: 'code_gen',
+				topic_changed: false,
+				needs_vision: false,
+				confidence: 0.9,
+				source: 'gemini-flash',
+				latencyMs: 120,
+			});
+
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[{ role: 1, content: 'please refactor the router' }] as any,
+				{} as any,
+				{ report: () => { /* no-op */ } } as any,
+				{ isCancellationRequested: false } as any,
+			);
+			// Pro should win the moderate.code_gen cell even though
+			// flash was advertised first in the candidate list.
+			expect(pro.sendRequest).toHaveBeenCalledTimes(1);
+			expect(flash.sendRequest).not.toHaveBeenCalled();
+		});
+
+		it('surfaces classifier info in the routing hint (Patch 40 extension of Patch 38)', async () => {
+			const reported: any[] = [];
+			const target = {
+				vendor: 'gemini',
+				id: 'models/gemini-3-flash',
+				capabilities: { imageInput: true, toolCalling: true },
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			} as any;
+			mockSelectChatModels.mockResolvedValue([target]);
+
+			const provider = makeClassifierProvider({
+				complexity: 'trivial',
+				task_type: 'shell',
+				topic_changed: false,
+				needs_vision: false,
+				confidence: 0.95,
+				source: 'heuristic',
+				latencyMs: 0,
+			});
+
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[{ role: 1, content: 'push to branch' }] as any,
+				{} as any,
+				{ report: (p: any) => reported.push(p) } as any,
+				{ isCancellationRequested: false } as any,
+			);
+			// The hint should carry complexity + task + source info —
+			// we want this visible so users can spot when the
+			// classifier routed to something cheaper than expected.
+			const hint = reported[0]?.value ?? '';
+			expect(hint).toContain('complexity=trivial');
+			expect(hint).toContain('task=shell');
+			expect(hint).toContain('source=heuristic');
+			expect(hint).toContain('gemini/models/gemini-3-flash');
+		});
+
+		it('falls back to static resolution when the router finds no candidates', async () => {
+			// Classifier says vision needed, but neither candidate has
+			// `imageInput: true`. The router's "all-or-nothing" vision
+			// guard reopens the pool, so a candidate still wins —
+			// *static fallback should not trigger* in that case. This
+			// test exercises the truly empty-pool path instead.
+			mockSelectChatModels.mockResolvedValue([]);
+
+			const provider = makeClassifierProvider({
+				complexity: 'simple',
+				task_type: 'chat',
+				topic_changed: false,
+				needs_vision: false,
+				confidence: 0.8,
+				source: 'gemini-flash',
+				latencyMs: 100,
+			});
+
+			// `selectChatModels()` returns [] for BOTH calls (classifier
+			// routing empties, then static fallback also empties) so
+			// the final resolution throws — that's the correct
+			// terminal behaviour when the user has no BYOK models.
+			await expect(
+				provider.provideLanguageModelChatResponse(
+					{ id: 'auto' } as any,
+					[{ role: 1, content: 'hi there' }] as any,
+					{} as any,
+					{ report: () => { /* no-op */ } } as any,
+					{ isCancellationRequested: false } as any,
+				),
+			).rejects.toThrow(/no BYOK models are registered/i);
+		});
+
+		it('falls back to static mode when the classifier throws', async () => {
+			const target = {
+				vendor: 'gemini',
+				id: 'models/gemini-3.1-pro-preview',
+				capabilities: { imageInput: true, toolCalling: true },
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			} as any;
+			mockSelectChatModels.mockResolvedValue([target]);
+
+			const configService = {
+				getConfig: vi.fn((key: any) => {
+					const id = key?.id ?? '';
+					if (id === 'chat.byok.auto.routingMode') { return 'classifier'; }
+					if (id === 'chat.byok.auto.showRoutingHint') { return false; }
+					if (id === 'chat.byok.auto.routingTable') { return {}; }
+					if (id === 'chat.vertexAnthropicModels') { return {}; }
+					return '';
+				}),
+			} as any;
+			const logService = {
+				trace: vi.fn(), debug: vi.fn(), info: vi.fn(),
+				warn: vi.fn(), error: vi.fn(),
+			} as any;
+			const storageService = {
+				getAPIKey: vi.fn(async () => 'fake-key'),
+			} as any;
+			const provider = new BYOKAutoLMProvider(storageService, configService, logService);
+			(provider as any)._getOrCreateClassifier = vi.fn(async () => ({
+				classify: vi.fn().mockRejectedValue(new Error('boom')),
+			}));
+
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[{ role: 1, content: 'hello' }] as any,
+				{} as any,
+				{ report: () => { /* no-op */ } } as any,
+				{ isCancellationRequested: false } as any,
+			);
+			// Classifier exploded, static path took over, target was
+			// still reachable through auto-discovery.
+			expect(target.sendRequest).toHaveBeenCalledTimes(1);
+			expect(logService.warn).toHaveBeenCalledWith(
+				expect.stringContaining('Classifier routing failed'),
+			);
+		});
+
+		it('skips classifier construction entirely when NO credentials are configured', async () => {
+			const target = {
+				vendor: 'gemini',
+				id: 'models/gemini-3.1-pro-preview',
+				capabilities: { imageInput: true, toolCalling: true },
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			} as any;
+			mockSelectChatModels.mockResolvedValue([target]);
+
+			const configService = {
+				getConfig: vi.fn((key: any) => {
+					const id = key?.id ?? '';
+					if (id === 'chat.byok.auto.routingMode') { return 'classifier'; }
+					if (id === 'chat.byok.auto.showRoutingHint') { return false; }
+					if (id === 'chat.byok.auto.routingTable') { return {}; }
+					if (id === 'chat.vertexAnthropicModels') { return {}; }
+					return '';
+				}),
+			} as any;
+			const logService = {
+				trace: vi.fn(), debug: vi.fn(), info: vi.fn(),
+				warn: vi.fn(), error: vi.fn(),
+			} as any;
+			// No Gemini, no Vertex — classifier construction must
+			// return undefined so we never attempt to import the heavy
+			// classifier module.
+			const storageService = {
+				getAPIKey: vi.fn(async () => undefined),
+			} as any;
+			const provider = new BYOKAutoLMProvider(storageService, configService, logService);
+
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[{ role: 1, content: 'hello' }] as any,
+				{} as any,
+				{ report: () => { /* no-op */ } } as any,
+				{ isCancellationRequested: false } as any,
+			);
+			// Static fallback kicked in; target still invoked.
+			expect(target.sendRequest).toHaveBeenCalledTimes(1);
+			// Log trace tells the user why classifier was skipped so
+			// misconfiguration is debuggable from the Output channel.
+			expect(logService.trace).toHaveBeenCalledWith(
+				expect.stringContaining('no credentials available'),
+			);
 		});
 	});
 });
