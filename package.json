@@ -2,7 +2,7 @@
 	"name": "copilot-chat",
 	"displayName": "Copilot Full BYOK",
 	"description": "AI chat features powered by Copilot — Full Bring Your Own Key edition",
-	"version": "0.46.16",
+	"version": "0.46.17",
 	"build": "1",
 	"internalAIKey": "1058ec22-3c95-4951-8443-f26c1f325911",
 	"completionsCoreVersion": "1.378.1799",

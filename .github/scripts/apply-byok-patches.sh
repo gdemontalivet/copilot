@@ -2701,3 +2701,50 @@ code = code.replace(anchor, () => replacement);
 fs.writeFileSync(f, code);
 console.log("Patched: ByokAutoShowRoutingHint setting (38)");
 PATCH38_EOF
+
+# Patch 40: classifier-driven BYOK Auto routing.
+#
+# Installs `byokAutoRouter.ts` (+ spec) and declares two new settings
+# (`ByokAutoRoutingMode`, `ByokAutoRoutingTable`) consumed by
+# `BYOKAutoLMProvider` to dispatch per-prompt routing via the Patch 30
+# classifier cascade. The provider edit itself (constructor now takes
+# `IBYOKStorageService`, `_resolveViaClassifier` etc.) lives in the
+# canonical `byokAutoProvider.ts` installed by Patch 34's
+# `install_byok_file`, so no additional source-edit step is needed here.
+
+# Step A: install the router + its spec. The router is in `common/`
+# because it's pure logic; the spec lives under `common/test/` to match
+# the convention used by `byokRoutingHeuristics.spec.ts`.
+install_byok_file \
+  ".github/byok-patches/files/byokAutoRouter.ts" \
+  "src/extension/byok/common/byokAutoRouter.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/byokAutoRouter.spec.ts" \
+  "src/extension/byok/common/test/byokAutoRouter.spec.ts"
+
+# Step B: declare the two new settings in configurationService.ts.
+# Anchored on the ByokAutoShowRoutingHint block from Patch 38 so the
+# BYOK Auto settings all sit together.
+node << 'PATCH40_EOF'
+const fs = require("fs");
+const f = "src/platform/configuration/common/configurationService.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("ByokAutoRoutingMode")) {
+  console.log("ByokAutoRoutingMode setting already present, skipping 40");
+  process.exit(0);
+}
+
+const anchor = "\texport const ByokAutoShowRoutingHint = defineSetting<boolean>('chat.byok.auto.showRoutingHint', ConfigType.Simple, true);\n\n\t/** Failover policy for the Anthropic (direct) BYOK provider. */";
+if (!code.includes(anchor)) {
+  console.warn("WARN: ByokAutoShowRoutingHint anchor not found \u2014 skipping patch 40 (Patch 38 must apply first)");
+  process.exit(0);
+}
+
+const replacement = "\texport const ByokAutoShowRoutingHint = defineSetting<boolean>('chat.byok.auto.showRoutingHint', ConfigType.Simple, true);\n\n\t/**\n\t * BYOK Auto (Patch 40). Selects the routing pipeline:\n\t *   - `'static'`     \u2014 resolve `chat.byok.auto.defaultModel` (or\n\t *                      vendor-priority auto-discovery) once per\n\t *                      turn. Every message goes to the same target.\n\t *   - `'classifier'` \u2014 classify each prompt via the Patch 30\n\t *                      3-tier cascade (Gemini Flash \u2192 Vertex Haiku\n\t *                      \u2192 regex heuristic) and route through the\n\t *                      `DEFAULT_ROUTING_TABLE` (merged with any\n\t *                      user override in {@link ByokAutoRoutingTable}).\n\t * Defaults to `'classifier'` \u2014 the router falls back to `'static'`\n\t * automatically when the classifier has no credentials configured,\n\t * so enabling it is safe even on a fresh install.\n\t */\n\texport const ByokAutoRoutingMode = defineSetting<'static' | 'classifier'>('chat.byok.auto.routingMode', ConfigType.Simple, 'classifier');\n\n\t/**\n\t * BYOK Auto (Patch 40). User override for the classifier-driven\n\t * router's preference table. Shape matches `RoutingTable` in\n\t * `src/extension/byok/common/byokAutoRouter.ts`:\n\t *   `{ [complexity]: { [task_type | '*']: string[] } }`\n\t * Individual cells override the baked-in defaults; unset cells are\n\t * inherited from `DEFAULT_ROUTING_TABLE`. Malformed values are\n\t * logged and ignored \u2014 a bad setting never blocks a chat turn.\n\t */\n\texport const ByokAutoRoutingTable = defineSetting<Record<string, Record<string, string[]>>>('chat.byok.auto.routingTable', ConfigType.Simple, {});\n\n\t/** Failover policy for the Anthropic (direct) BYOK provider. */";
+
+code = code.replace(anchor, () => replacement);
+fs.writeFileSync(f, code);
+console.log("Patched: ByokAutoRoutingMode + ByokAutoRoutingTable settings (40)");
+PATCH40_EOF
