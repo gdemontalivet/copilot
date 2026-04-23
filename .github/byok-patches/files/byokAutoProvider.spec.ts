@@ -587,9 +587,14 @@ describe('BYOKAutoLMProvider', () => {
 			const provider = new BYOKAutoLMProvider(storageService, configService, logService);
 			// Subclassing around the instance via prototype override
 			// keeps the test from having to export a dedicated subclass.
-			(provider as any)._getOrCreateClassifier = vi.fn(async () => ({
+			// `fixedClassifier` is a single shared stub so tests can
+			// assert on its spies after the turn runs (returning a new
+			// object each call would break `toHaveBeenCalled` because
+			// the in-flight call used a different instance).
+			const fixedClassifier = {
 				classify: vi.fn(async () => classification),
-			}));
+			};
+			(provider as any)._getOrCreateClassifier = vi.fn(async () => fixedClassifier);
 			return provider;
 		}
 
@@ -746,6 +751,91 @@ describe('BYOKAutoLMProvider', () => {
 			expect(target.sendRequest).toHaveBeenCalledTimes(1);
 			expect(logService.warn).toHaveBeenCalledWith(
 				expect.stringContaining('Classifier routing failed'),
+			);
+		});
+
+		it('skips Tier-1/2 classifier calls for trivial continuations', async () => {
+			// `KW.trivial` matches "push", "go", "yes", etc. For those
+			// prompts we should route via the heuristic ONLY — no
+			// network call. Assert by installing a classifier whose
+			// `classify` throws; if the router ever reaches it the
+			// test would fail.
+			const target = {
+				vendor: 'gemini',
+				id: 'models/gemini-3-flash',
+				capabilities: { imageInput: true, toolCalling: true },
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			} as any;
+			mockSelectChatModels.mockResolvedValue([target]);
+
+			const provider = makeClassifierProvider({
+				// This classification would be returned by the stubbed
+				// classifier if it was called — but for trivial prompts
+				// it should NEVER be called.
+				complexity: 'moderate',
+				task_type: 'code_gen',
+				topic_changed: false,
+				needs_vision: false,
+				confidence: 0.9,
+				source: 'gemini-flash',
+				latencyMs: 120,
+			});
+			const classifierInstance = await (provider as any)._getOrCreateClassifier();
+			classifierInstance.classify = vi.fn().mockRejectedValue(new Error('classifier should not run'));
+
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[{ role: 1, content: 'push to branch' }] as any,
+				{} as any,
+				{ report: () => { /* no-op */ } } as any,
+				{ isCancellationRequested: false } as any,
+			);
+			expect(classifierInstance.classify).not.toHaveBeenCalled();
+			expect(target.sendRequest).toHaveBeenCalledTimes(1);
+		});
+
+		it('counts references attached to the last user message', async () => {
+			// Structural detector: messages may carry file / symbol
+			// references either as `{ mimeType: 'vscode/reference...' }`
+			// parts or as `{ uri: ... }` parts. Both count.
+			const target = {
+				vendor: 'gemini',
+				id: 'models/gemini-3.1-pro-preview',
+				capabilities: { imageInput: true, toolCalling: true },
+				sendRequest: vi.fn().mockResolvedValue({ stream: (async function* () { /* empty */ })() }),
+			} as any;
+			mockSelectChatModels.mockResolvedValue([target]);
+
+			const provider = makeClassifierProvider({
+				complexity: 'moderate',
+				task_type: 'code_gen',
+				topic_changed: false,
+				needs_vision: false,
+				confidence: 0.9,
+				source: 'gemini-flash',
+				latencyMs: 50,
+			});
+			const classifierInstance = await (provider as any)._getOrCreateClassifier();
+			const classifySpy = vi.spyOn(classifierInstance, 'classify');
+
+			await provider.provideLanguageModelChatResponse(
+				{ id: 'auto' } as any,
+				[{
+					role: 1,
+					content: [
+						{ value: 'please look at these files' },
+						{ mimeType: 'vscode/reference.file', data: new Uint8Array() },
+						{ mimeType: 'vscode/reference.symbol', data: new Uint8Array() },
+						{ uri: { path: '/some/file.ts' } },
+					],
+				}] as any,
+				{} as any,
+				{ report: () => { /* no-op */ } } as any,
+				{ isCancellationRequested: false } as any,
+			);
+			// 2 mimeType refs + 1 uri ref = 3 total.
+			expect(classifySpy).toHaveBeenCalledWith(
+				expect.objectContaining({ referenceCount: 3 }),
 			);
 		});
 

@@ -34,6 +34,7 @@ import type {
 	IByokRoutingClassifier,
 	VertexClassifierConfig,
 } from '../common/byokRoutingClassifier.types';
+import { classifyByHeuristic, isTrivialPrompt } from '../common/byokRoutingHeuristics';
 import type { IBYOKStorageService } from './byokStorageService';
 
 /**
@@ -652,6 +653,15 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 	 * Classifier + router pipeline. Returns `undefined` when the router
 	 * can't produce a decision (empty candidate pool) so the caller can
 	 * fall through to the static path.
+	 *
+	 * Short continuations like "go" / "yes" / "push to branch" are
+	 * routed through the offline heuristic only — we skip the network
+	 * tiers entirely because (a) the user's VS Code history shows
+	 * ~30-40% of turns match this pattern, and (b) even a 120ms Gemini
+	 * Flash call is pure latency when the answer is deterministic from
+	 * regex. Users can force full classification by disabling the skip
+	 * via `chat.byok.auto.routingMode = 'static'` or by writing a
+	 * non-trivial prompt.
 	 */
 	protected async _resolveViaClassifier(
 		classifier: IByokRoutingClassifier,
@@ -659,7 +669,17 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 		_token: CancellationToken,
 	): Promise<RoutingResolution | undefined> {
 		const input = this._extractClassificationInput(messages);
-		const classification = await classifier.classify(input);
+		let classification: ClassificationResult;
+		if (isTrivialPrompt(input.prompt)) {
+			// Heuristic is instant — bypass the classifier plumbing.
+			const core = classifyByHeuristic(input);
+			classification = { ...core, source: 'heuristic', latencyMs: 0 };
+			this._logService.trace(
+				`[BYOKAutoLMProvider] trivial prompt — skipped Tier-1/2 classifiers`,
+			);
+		} else {
+			classification = await classifier.classify(input);
+		}
 		this._logService.trace(
 			`[BYOKAutoLMProvider] classification: complexity=${classification.complexity} task=${classification.task_type} ` +
 			`topic_changed=${classification.topic_changed} needs_vision=${classification.needs_vision} ` +
@@ -688,10 +708,12 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 	}
 
 	/**
-	 * Extract the classifier input from a conversation. Slice B keeps
-	 * this intentionally minimal (last user message → prompt, everything
-	 * else stitched into `recentHistory`, skipping tool messages). Slice
-	 * C will refine reference counting and image detection.
+	 * Extract the classifier input from a conversation. Pulls the last
+	 * user message's text (prompt), the previous 4 non-tool messages
+	 * (recentHistory, capped at 2000 chars so long-running chats don't
+	 * blow the classifier's token budget), the number of attached
+	 * references (file / symbol citations, counted structurally), and
+	 * whether any image part is present.
 	 */
 	protected _extractClassificationInput(
 		messages: ReadonlyArray<LanguageModelChatMessage | LanguageModelChatMessage2>,
@@ -707,20 +729,53 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 				break;
 			}
 		}
-		const prompt = lastUserIdx >= 0 ? this._stringifyMessage(messages[lastUserIdx]) : '';
+		const lastUser = lastUserIdx >= 0 ? messages[lastUserIdx] : undefined;
+		const prompt = lastUser ? this._stringifyMessage(lastUser) : '';
 		const historyMessages = lastUserIdx >= 0 ? messages.slice(Math.max(0, lastUserIdx - 4), lastUserIdx) : [];
 		const recentHistory = historyMessages
 			.map(m => this._stringifyMessage(m))
 			.filter(s => s.length > 0)
 			.join('\n---\n')
 			.slice(0, 2000) || undefined;
-		const hasImageAttachment = this._detectImageAttachment(lastUserIdx >= 0 ? messages[lastUserIdx] : undefined);
 		return {
 			prompt,
 			recentHistory,
-			hasImageAttachment,
-			referenceCount: 0, // Slice C refines this.
+			hasImageAttachment: this._detectImageAttachment(lastUser),
+			referenceCount: this._countReferences(lastUser),
 		};
+	}
+
+	/**
+	 * Count file/symbol references attached to the message. The VS
+	 * Code LM API carries these as `LanguageModelDataPart` entries
+	 * with a `mimeType` starting `vscode/reference` or as bare objects
+	 * with a `uri` field. We only need a rough count — the heuristic
+	 * classifier bumps complexity above 5 / 10 refs — so a permissive
+	 * structural detector is enough.
+	 */
+	private _countReferences(msg: LanguageModelChatMessage | LanguageModelChatMessage2 | undefined): number {
+		if (!msg) {
+			return 0;
+		}
+		const content = (msg as { content?: unknown }).content;
+		if (!Array.isArray(content)) {
+			return 0;
+		}
+		let count = 0;
+		for (const p of content) {
+			if (!p || typeof p !== 'object') {
+				continue;
+			}
+			const mimeType = (p as { mimeType?: unknown }).mimeType;
+			if (typeof mimeType === 'string' && mimeType.startsWith('vscode/reference')) {
+				count++;
+				continue;
+			}
+			if ('uri' in p && (p as { uri: unknown }).uri) {
+				count++;
+			}
+		}
+		return count;
 	}
 
 	private _detectImageAttachment(msg: LanguageModelChatMessage | LanguageModelChatMessage2 | undefined): boolean {

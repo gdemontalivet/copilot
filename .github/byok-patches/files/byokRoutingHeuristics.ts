@@ -59,6 +59,24 @@ function lengthBucket(len: number): TaskComplexity {
 	return 'complex';
 }
 
+/**
+ * Patch 40: cheap check used by `BYOKAutoLMProvider` to skip the
+ * classifier's Gemini Flash / Vertex Haiku tiers for obvious
+ * continuations like "go", "yes", "continue", "push to branch".
+ *
+ * When this returns true, the provider still runs the heuristic
+ * classifier so the router has a valid `ClassificationResult`, but no
+ * network call is made. In the user's VS Code history roughly 30–40%
+ * of turns match this pattern so the savings are meaningful.
+ *
+ * NOT exported as `KW.trivial.test` directly because the regex is
+ * anchored to the full prompt (`^...$`) — callers would otherwise
+ * have to know that and pre-trim, which is error-prone.
+ */
+export function isTrivialPrompt(prompt: string): boolean {
+	return KW.trivial.test(prompt.trim());
+}
+
 /** Decide the task type from the prompt. First matching signal wins. */
 export function heuristicTaskType(prompt: string): TaskType {
 	if (KW.plan.test(prompt)) { return 'plan'; }
