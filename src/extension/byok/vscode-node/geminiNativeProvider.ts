@@ -5,7 +5,7 @@
 
 import { ApiError, GenerateContentParameters, GoogleGenAI, Tool, Type } from '@google/genai';
 import { CancellationToken, LanguageModelChatInformation, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelDataPart, LanguageModelResponsePart2, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
-import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';
+import { ChatFetchResponseType, ChatLocation, RESPONSE_TOOL_HISTORY_INVALID } from '../../../platform/chat/common/commonTypes';
 import { CustomDataPartMimeTypes } from '../../../platform/endpoint/common/endpointTypes';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IResponseDelta, OpenAiFunctionTool } from '../../../platform/networking/common/fetch';
@@ -43,6 +43,49 @@ function extractReadableGeminiMessage(err: unknown): string {
 	return toErrorMessage(err);
 }
 // ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
+
+// ─── BYOK CUSTOM PATCH: detect Gemini tool-history INVALID_ARGUMENT errors ──
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Gemini returns HTTP 400 with status="INVALID_ARGUMENT" when the
+// transcript's functionCall / functionResponse contract is violated
+// (count mismatch, name mismatch, orphan tool-results, etc.). Patch 43
+// repairs the common cases in the message converter; this helper flags
+// the residual ones so the chat UI can surface a specific, actionable
+// error instead of the generic "Sorry, no response was returned.".
+// The wording "function response parts" is the Gemini API's own phrasing
+// and is stable across gemini-2.x and gemini-3.x; we also match the
+// broader status string so future wording changes in the `message` field
+// don't regress detection.
+export function isGeminiToolHistoryInvalidError(err: unknown): boolean {
+	if (!(err instanceof ApiError)) {
+		return false;
+	}
+	if (err.status !== 400) {
+		return false;
+	}
+	try {
+		const parsed = JSON.parse(err.message);
+		const innerStatus: unknown = parsed?.error?.status;
+		const innerMessage: unknown = parsed?.error?.message;
+		if (innerStatus !== 'INVALID_ARGUMENT') {
+			return false;
+		}
+		// Be conservative: only flag errors whose inner message mentions
+		// the tool-history contract phrases. Other INVALID_ARGUMENT causes
+		// (malformed generation config, bad model name, bad schema, etc.)
+		// keep falling through to the generic "no response" branch so we
+		// don't mislead users with a tool-history message for unrelated
+		// 400s. The two phrases below are the stable fragments Google has
+		// used across gemini-2.x and gemini-3.x rejections.
+		if (typeof innerMessage !== 'string') {
+			return false;
+		}
+		return /function\s+response\s+parts|function\s+call\s+parts/i.test(innerMessage);
+	} catch {
+		return false;
+	}
+}
+// ─── END BYOK CUSTOM PATCH ──────────────────────────────
 
 // ─── BYOK CUSTOM PATCH: Gemini retry resilience ─────────────────────────────
 // Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
@@ -380,11 +423,23 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 			} catch (err) {
 				this._logService.error(`BYOK GeminiNative error: ${toErrorMessage(err, true)}`);
 				const readableReason = token.isCancellationRequested ? 'cancelled' : extractReadableGeminiMessage(err);
+				// ─── BYOK CUSTOM PATCH: tag tool-history INVALID_ARGUMENT ─────
+				// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+				// When the error is a Gemini 400 INVALID_ARGUMENT specifically
+				// about tool call / response contract violation, swap the
+				// raw message for RESPONSE_TOOL_HISTORY_INVALID so
+				// getErrorDetailsFromChatFetchError renders the specific
+				// user-visible message added alongside this patch. The raw
+				// readableReason is still logged above via this._logService.error.
+				const taggedReason = !token.isCancellationRequested && isGeminiToolHistoryInvalidError(err)
+					? RESPONSE_TOOL_HISTORY_INVALID
+					: readableReason;
+				// ─── END BYOK CUSTOM PATCH ────────────────────
 				pendingLoggedChatRequest.resolve({
 					type: token.isCancellationRequested ? ChatFetchResponseType.Canceled : ChatFetchResponseType.Unknown,
 					requestId,
 					serverRequestId: requestId,
-					reason: readableReason
+					reason: taggedReason
 				}, wrappedProgress.items.map((i): IResponseDelta => {
 					return {
 						text: i instanceof LanguageModelTextPart ? i.value : '',

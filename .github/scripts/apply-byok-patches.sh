@@ -2840,3 +2840,806 @@ code = code.replace(methodAnchor, () => methodReplacement);
 fs.writeFileSync(f, code);
 console.log("Patched: BYOK getAllModels 24h cache + in-flight dedup (42)");
 PATCH42_EOF
+
+# Patch 43: Resolve cross-provider tool names when converting transcripts to Gemini.
+#
+# Context. When a chat session is started with Anthropic (Sonnet) and then
+# the user switches model to a Gemini BYOK provider mid-conversation, the
+# existing Gemini message converter fails with HTTP 400 INVALID_ARGUMENT:
+# "Please ensure that the number of function response parts is equal to
+# the number of function call parts of the function call turn."
+#
+# Root cause. Anthropic's tool_use.id is `toolu_01ABCdefGHI...` (no tool
+# name encoded). When the chat history gets converted to
+# `LanguageModelToolResultPart`, only the callId survives. The Gemini
+# converter then does `callId.split('_')[0]` to guess the function name,
+# which works for Gemini's own `functionName_timestamp` ids but collapses
+# every Anthropic tool response to `name: 'toolu'`. Gemini requires each
+# functionResponse.name to match a preceding functionCall.name, so the
+# 3-parallel-read_file assistant turn (names = ['read_file','read_file',
+# 'read_file']) vs the user turn (names = ['toolu','toolu','toolu']) is
+# rejected. OpenAI's `call_XYZ` ids hit the same bug.
+#
+# Fix. Pre-walk the transcript in `apiMessageToGeminiMessage` and build a
+# `callId -> name` map from every `LanguageModelToolCallPart`. Thread the
+# map through `apiContentToGeminiContent` and resolve the tool name via
+# `resolveToolName(callId, map)`; fall back to the legacy split heuristic
+# only when the map has no entry (partial transcripts).
+#
+# Idempotency: sentinel on the exported `resolveToolName` helper.
+node << 'PATCH43_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/common/geminiMessageConverter.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("export function resolveToolName")) {
+  console.log("Patch 43 (cross-provider tool-name resolution) already present, skipping");
+  process.exit(0);
+}
+
+// 1) Insert resolveToolName helper after the imports and widen
+//    apiContentToGeminiContent's signature to accept a callId->name map.
+const helperAnchor = "function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelToolCallPart | LanguageModelDataPart | LanguageModelThinkingPart)[]): Part[] {";
+const helperReplacement = "// \u2500\u2500\u2500 BYOK CUSTOM PATCH: resolve tool names across providers (Patch 43) \u2500\u2500\u2500\u2500\u2500\n// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n// When a conversation contains tool calls produced by *another* provider\n// (typically Anthropic, where tool_use.id looks like `toolu_01ABCdef\u2026`),\n// the callId carries no tool name. The legacy `callId.split('_')[0]`\n// heuristic was designed for Gemini-native ids (`functionName_timestamp`)\n// and collapses every Anthropic tool response to `name: 'toolu'`. Gemini\n// then 400s with \"the number of function response parts is equal to the\n// number of function call parts of the function call turn\" because\n// functionResponse.name no longer matches any preceding functionCall.name.\n// Fix: pre-walk the transcript, build a callId\u2192name map from every\n// LanguageModelToolCallPart, and resolve names from it first; fall back to\n// the legacy split-on-underscore heuristic only when the map has no entry\n// (e.g. partial transcript where the tool_call part was truncated out).\nexport function resolveToolName(callId: string | undefined, callIdToName: Map<string, string>): string {\n\tif (callId) {\n\t\tconst tracked = callIdToName.get(callId);\n\t\tif (tracked) { return tracked; }\n\t}\n\treturn callId?.split('_')[0] || 'unknown_function';\n}\n// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\nfunction apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelToolCallPart | LanguageModelDataPart | LanguageModelThinkingPart)[], callIdToName: Map<string, string> = new Map()): Part[] {";
+
+if (!code.includes(helperAnchor)) {
+  console.warn("WARN: apiContentToGeminiContent signature anchor not found \u2014 skipping patch 43");
+  process.exit(0);
+}
+code = code.replace(helperAnchor, () => helperReplacement);
+
+// 2) Swap the legacy split heuristic for the shared resolveToolName() call.
+const nameAnchor = "\t\t\t// extraction: functionName_timestamp => split on first underscore\n\t\t\tconst functionName = part.callId?.split('_')[0] || 'unknown_function';";
+const nameReplacement = "\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: resolve tool name via callId\u2192name map (Patch 43) \u2500\n\t\t\t// Falls back to the legacy `functionName_timestamp` split for\n\t\t\t// Gemini-native ids when no mapping is available. See resolveToolName().\n\t\t\tconst functionName = resolveToolName(part.callId, callIdToName);\n\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+if (!code.includes(nameAnchor)) {
+  console.warn("WARN: legacy functionName split anchor not found \u2014 skipping patch 43 (partial)");
+  process.exit(0);
+}
+code = code.replace(nameAnchor, () => nameReplacement);
+
+// 3) Build the callId->name map once in apiMessageToGeminiMessage and
+//    thread it through both the Assistant and User apiContentToGeminiContent
+//    calls.
+const mapAnchor = "\t// Track tool calls to match with their responses\n\tconst pendingToolCalls = new Map<string, FunctionCall>();\n\n\tfor (const message of messages) {\n\t\tif (message.role === LanguageModelChatMessageRole.System) {";
+const mapReplacement = "\t// Track tool calls to match with their responses\n\tconst pendingToolCalls = new Map<string, FunctionCall>();\n\n\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: callId\u2192name map for cross-provider transcripts (Patch 43) \u2500\n\t// Pre-walk every message and harvest (callId \u2192 tool name) from\n\t// LanguageModelToolCallPart so that subsequent tool-result parts can\n\t// resolve the real tool name even when the callId was minted by another\n\t// provider (Anthropic `toolu_\u2026`, OpenAI `call_\u2026`, etc.). This map is\n\t// the single source of truth for `functionResponse.name` below.\n\tconst callIdToName = new Map<string, string>();\n\tfor (const message of messages) {\n\t\tfor (const part of message.content) {\n\t\t\tif (part instanceof LanguageModelToolCallPart && part.callId && part.name) {\n\t\t\t\tcallIdToName.set(part.callId, part.name);\n\t\t\t}\n\t\t}\n\t}\n\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n\tfor (const message of messages) {\n\t\tif (message.role === LanguageModelChatMessageRole.System) {";
+if (!code.includes(mapAnchor)) {
+  console.warn("WARN: apiMessageToGeminiMessage pendingToolCalls anchor not found \u2014 skipping patch 43 (partial)");
+  process.exit(0);
+}
+code = code.replace(mapAnchor, () => mapReplacement);
+
+// Thread the map into both apiContentToGeminiContent() callers inside
+// apiMessageToGeminiMessage. Match Assistant branch first, then User.
+const assistantCall = "\t\t} else if (message.role === LanguageModelChatMessageRole.Assistant) {\n\t\t\tconst parts = apiContentToGeminiContent(message.content);";
+const assistantReplacement = "\t\t} else if (message.role === LanguageModelChatMessageRole.Assistant) {\n\t\t\tconst parts = apiContentToGeminiContent(message.content, callIdToName);";
+if (code.includes(assistantCall)) {
+  code = code.replace(assistantCall, () => assistantReplacement);
+} else {
+  console.warn("WARN: Assistant apiContentToGeminiContent call anchor not found \u2014 skipping patch 43 (partial)");
+  process.exit(0);
+}
+
+const userCall = "\t\t} else if (message.role === LanguageModelChatMessageRole.User) {\n\t\t\tconst parts = apiContentToGeminiContent(message.content);";
+const userReplacement = "\t\t} else if (message.role === LanguageModelChatMessageRole.User) {\n\t\t\tconst parts = apiContentToGeminiContent(message.content, callIdToName);";
+if (code.includes(userCall)) {
+  code = code.replace(userCall, () => userReplacement);
+} else {
+  console.warn("WARN: User apiContentToGeminiContent call anchor not found \u2014 skipping patch 43 (partial)");
+  process.exit(0);
+}
+
+// 4) Drop orphan tool-result parts inside apiContentToGeminiContent.
+//    Gemini 400s on cardinality mismatch between functionCall parts (model
+//    turn) and functionResponse parts (user turn) regardless of whether the
+//    names resolve correctly via step (1). Any LanguageModelToolResultPart
+//    whose callId is not in the pre-walk map came from a model turn that was
+//    summarised/truncated out of history — passing it through makes Gemini
+//    reject the whole transcript. Skip it so the rest still renders.
+//
+//    Gated on `callIdToName.size > 0` so direct callers that pass the
+//    default empty map (unit tests exercising the resolveToolName fallback)
+//    keep legacy behaviour.
+if (code.includes("BYOK CUSTOM PATCH: drop orphan tool-result parts")) {
+  console.log("Patch 43 orphan-drop already present, skipping sub-step 4");
+} else {
+  const orphanAnchor = "\t\t} else if (part instanceof LanguageModelToolResultPart || part instanceof LanguageModelToolResultPart2) {\n\t\t\t// Convert tool result content - handle both text and image parts";
+  const orphanReplacement = "\t\t} else if (part instanceof LanguageModelToolResultPart || part instanceof LanguageModelToolResultPart2) {\n\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: drop orphan tool-result parts (Patch 43) \u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t\t// Gemini's function-calling contract requires that every\n\t\t\t// `functionResponse.name` in a user turn match a `functionCall.name`\n\t\t\t// emitted by the model in the preceding turn (count + names). When\n\t\t\t// history gets summarised/truncated, or when a model switch drops\n\t\t\t// the assistant turn that issued the call, the user turn can carry\n\t\t\t// orphan tool-results whose callId is nowhere in the transcript.\n\t\t\t// Passing those through makes Gemini 400 with \"the number of\n\t\t\t// function response parts is equal to the number of function call\n\t\t\t// parts of the function call turn\". Drop them here so the rest of\n\t\t\t// the transcript still renders.\n\t\t\t//\n\t\t\t// Only active when the caller pre-walked the transcript (map is\n\t\t\t// non-empty). Direct callers that pass the default empty map keep\n\t\t\t// legacy behaviour so the resolveToolName fallback is exercisable\n\t\t\t// in unit tests.\n\t\t\tif (callIdToName.size > 0 && part.callId && !callIdToName.has(part.callId)) {\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t// Convert tool result content - handle both text and image parts";
+  if (!code.includes(orphanAnchor)) {
+    console.warn("WARN: ToolResultPart branch anchor not found \u2014 skipping patch 43 sub-step 4 (orphan-drop)");
+  } else {
+    code = code.replace(orphanAnchor, () => orphanReplacement);
+  }
+}
+
+// 5) Prune user-role contents emptied by the orphan drop in step (4). If a
+//    user turn was composed entirely of orphan tool-results, its `parts`
+//    array is now empty. An empty `{role:'user',parts:[]}` is also rejected
+//    by Gemini — remove the whole turn. Same rule as the existing model-role
+//    cleanup loop immediately above.
+if (code.includes("BYOK CUSTOM PATCH: prune user messages emptied by orphan drop")) {
+  console.log("Patch 43 user-prune already present, skipping sub-step 5");
+} else {
+  const pruneAnchor = "\t// Cleanup: remove any model messages that became empty after extraction\n\tfor (let i = contents.length - 1; i >= 0; i--) {\n\t\tconst c = contents[i];\n\t\tif (c.role === 'model' && (!c.parts || c.parts.length === 0)) {\n\t\t\tcontents.splice(i, 1);\n\t\t}\n\t}";
+  const pruneReplacement = "\t// Cleanup: remove any model messages that became empty after extraction\n\tfor (let i = contents.length - 1; i >= 0; i--) {\n\t\tconst c = contents[i];\n\t\tif (c.role === 'model' && (!c.parts || c.parts.length === 0)) {\n\t\t\tcontents.splice(i, 1);\n\t\t}\n\t}\n\n\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: prune user messages emptied by orphan drop (Patch 43) \u2500\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// If a user turn consisted entirely of orphan tool-results, it now has\n\t// zero parts and would render as an empty `{role:'user', parts:[]}` which\n\t// Gemini also rejects. Same rule as the model-role cleanup above.\n\tfor (let i = contents.length - 1; i >= 0; i--) {\n\t\tconst c = contents[i];\n\t\tif (c.role === 'user' && (!c.parts || c.parts.length === 0)) {\n\t\t\tcontents.splice(i, 1);\n\t\t}\n\t}\n\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+  if (!code.includes(pruneAnchor)) {
+    console.warn("WARN: model-cleanup loop anchor not found \u2014 skipping patch 43 sub-step 5 (user-prune)");
+  } else {
+    code = code.replace(pruneAnchor, () => pruneReplacement);
+  }
+}
+
+fs.writeFileSync(f, code);
+console.log("Patched: cross-provider tool-name resolution + orphan-drop in geminiMessageConverter (43)");
+PATCH43_EOF
+
+# Patch 44: Specific user-visible error for Gemini tool-history INVALID_ARGUMENT.
+#
+# Patch 43 repairs most tool-history contract violations in the message
+# converter on the way out to Gemini (cross-provider tool-id resolution +
+# orphan tool-result drop). Residual cases — e.g. when the assistant turn
+# that issued a call *and* its response both survive history truncation
+# but some intermediate call was collapsed, or when another code path
+# hand-constructs a transcript that skips the converter — still bubble
+# up as Gemini 400 INVALID_ARGUMENT "function response parts / function
+# call parts" rejections. Before this patch those surfaced as the generic
+# `ChatFetchResponseType.Unknown` → "Sorry, no response was returned."
+# with no hint that (a) this is a transcript-shape issue not a model
+# outage, and (b) the right recovery is usually "try again" or "new chat",
+# not "switch model". The patch:
+#   A. Adds a `RESPONSE_TOOL_HISTORY_INVALID` constant to commonTypes.ts
+#      alongside the existing `RESPONSE_EMPTY_STOP` sentinel (Patch 31).
+#   B. Extends the `ChatFetchResponseType.Unknown` message branch in
+#      `getErrorDetailsFromChatFetchError` with an `else if` that returns
+#      a specific, actionable message when the reason matches the new
+#      constant. The generic "no response was returned" fallback is
+#      preserved for unrelated Unknown reasons.
+#   C. Teaches `geminiNativeProvider.ts` how to recognise the error:
+#      exports an `isGeminiToolHistoryInvalidError` helper (ApiError with
+#      status=400, inner status='INVALID_ARGUMENT', inner message matching
+#      /function (response|call) parts/i) and tags the `reason` as
+#      RESPONSE_TOOL_HISTORY_INVALID in the catch block's
+#      `pendingLoggedChatRequest.resolve(...)` call. The throw path still
+#      uses the raw human-readable message for logging / cause chaining.
+# Single idempotency sentinel per file: check for
+# "BYOK CUSTOM PATCH: tool-history invalid detection" in commonTypes.ts
+# and "detect Gemini tool-history INVALID_ARGUMENT errors" in the provider.
+# Sequenced after Patch 31 (depends on RESPONSE_EMPTY_STOP being present)
+# and independent of Patch 43 (Patch 43 reduces the *frequency* of these
+# 400s; Patch 44 improves the UX of the residual ones).
+node << 'PATCH44_EOF'
+const fs = require("fs");
+
+// ─── Step A: commonTypes.ts — new constant + message branch ──────────────
+(function patchCommonTypes() {
+  const f = "src/platform/chat/common/commonTypes.ts";
+  let code = fs.readFileSync(f, "utf8");
+  let changed = false;
+
+  // A1: RESPONSE_TOOL_HISTORY_INVALID constant, inserted after the
+  //     existing empty-stop constant block (Patch 31). Anchor on the
+  //     closing comment of the Patch 31 block that already lives in
+  //     the file. If the anchor isn't present the commonTypes hasn't
+  //     gone through Patch 31 yet — skip and surface a warning.
+  if (code.includes("BYOK CUSTOM PATCH: tool-history invalid detection")) {
+    console.log("commonTypes tool-history-invalid constant already present, skipping A1");
+  } else {
+    const anchor = "export const RESPONSE_EMPTY_STOP = 'Model returned an empty stop completion.';\n// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+    const replacement = anchor + "\n\n// \u2500\u2500\u2500 BYOK CUSTOM PATCH: tool-history invalid detection \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n// Gemini rejects HTTP 400 INVALID_ARGUMENT when the transcript's\n// functionCall / functionResponse contract is violated \u2014 either because\n// of cross-provider tool-id name mismatches (Anthropic/OpenAI ids\n// passing through the Gemini converter, addressed by Patch 43) or\n// because history summarisation dropped the assistant turn that\n// emitted the call while keeping its response, or because count and\n// names no longer line up for any other reason. Patch 43 repairs the\n// transcript on the way out; this constant tags the residual cases\n// that still slip through so getErrorDetailsFromChatFetchError can\n// surface a specific, actionable message instead of the generic\n// \"Sorry, no response was returned.\".\nexport const RESPONSE_TOOL_HISTORY_INVALID = 'Model rejected conversation history (tool-call / tool-response mismatch).';\n// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+    if (!code.includes(anchor)) {
+      console.warn("WARN: RESPONSE_EMPTY_STOP constant anchor not found \u2014 Patch 31 not applied first? Skipping Patch 44 A1");
+    } else {
+      code = code.replace(anchor, replacement);
+      changed = true;
+    }
+  }
+
+  // A2: extend the Patch 31 Unknown-branch with an else-if for
+  //     RESPONSE_TOOL_HISTORY_INVALID, before the generic fallback.
+  //     Anchor is the exact two-line `} else { ... no response was returned ...`
+  //     tail that Patch 31 leaves in place.
+  if (code.includes("BYOK CUSTOM PATCH: tool-history-invalid message (Patch 44)")) {
+    console.log("commonTypes tool-history-invalid message branch already present, skipping A2");
+  } else {
+    const anchor = "\t\t\tif (fetchResult.reason === RESPONSE_EMPTY_STOP) {\n\t\t\t\tdetails = { message: l10n.t(`The model returned an empty response (stop with no content). This is a known flakiness in some models under load \u2014 please try again, or switch to a different model.`) };\n\t\t\t} else {\n\t\t\t\tdetails = { message: l10n.t(`Sorry, no response was returned.`) };\n\t\t\t}";
+    const replacement = "\t\t\tif (fetchResult.reason === RESPONSE_EMPTY_STOP) {\n\t\t\t\tdetails = { message: l10n.t(`The model returned an empty response (stop with no content). This is a known flakiness in some models under load \u2014 please try again, or switch to a different model.`) };\n\t\t\t} else if (fetchResult.reason === RESPONSE_TOOL_HISTORY_INVALID) {\n\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: tool-history-invalid message (Patch 44) \u2500\n\t\t\t\tdetails = { message: l10n.t(`The model rejected the conversation history because of a tool-call / tool-response mismatch. This usually happens after switching providers mid-chat or after history was summarised. Please try again \u2014 if it keeps happening, start a new chat.`) };\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t} else {\n\t\t\t\tdetails = { message: l10n.t(`Sorry, no response was returned.`) };\n\t\t\t}";
+    if (!code.includes(anchor)) {
+      console.warn("WARN: Patch 31 Unknown-branch anchor not found \u2014 skipping Patch 44 A2");
+    } else {
+      code = code.replace(anchor, replacement);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    fs.writeFileSync(f, code);
+  }
+})();
+
+// ─── Step B: geminiNativeProvider.ts — detector + reason-tagger ──────────
+(function patchGeminiProvider() {
+  const f = "src/extension/byok/vscode-node/geminiNativeProvider.ts";
+  let code = fs.readFileSync(f, "utf8");
+  let changed = false;
+
+  // B1: widen the commonTypes import to pull in RESPONSE_TOOL_HISTORY_INVALID.
+  if (code.includes("RESPONSE_TOOL_HISTORY_INVALID")) {
+    console.log("geminiNativeProvider RESPONSE_TOOL_HISTORY_INVALID import already present, skipping B1");
+  } else {
+    const importAnchor = "import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';";
+    const importReplacement = "import { ChatFetchResponseType, ChatLocation, RESPONSE_TOOL_HISTORY_INVALID } from '../../../platform/chat/common/commonTypes';";
+    if (!code.includes(importAnchor)) {
+      console.warn("WARN: geminiNativeProvider commonTypes import anchor not found \u2014 skipping Patch 44 B1");
+    } else {
+      code = code.replace(importAnchor, importReplacement);
+      changed = true;
+    }
+  }
+
+  // B2: insert isGeminiToolHistoryInvalidError helper before the existing
+  //     retry-resilience block header (a stable Patch-era anchor).
+  if (code.includes("detect Gemini tool-history INVALID_ARGUMENT errors")) {
+    console.log("geminiNativeProvider isGeminiToolHistoryInvalidError helper already present, skipping B2");
+  } else {
+    const helperAnchor = "// \u2500\u2500\u2500 BYOK CUSTOM PATCH: Gemini retry resilience \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+    const helperReplacement = "// \u2500\u2500\u2500 BYOK CUSTOM PATCH: detect Gemini tool-history INVALID_ARGUMENT errors \u2500\u2500\n// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n// Gemini returns HTTP 400 with status=\"INVALID_ARGUMENT\" when the\n// transcript's functionCall / functionResponse contract is violated\n// (count mismatch, name mismatch, orphan tool-results, etc.). Patch 43\n// repairs the common cases in the message converter; this helper flags\n// the residual ones so the chat UI can surface a specific, actionable\n// error instead of the generic \"Sorry, no response was returned.\".\n// The wording \"function response parts\" is the Gemini API's own phrasing\n// and is stable across gemini-2.x and gemini-3.x; we also match the\n// broader status string so future wording changes in the `message` field\n// don't regress detection.\nexport function isGeminiToolHistoryInvalidError(err: unknown): boolean {\n\tif (!(err instanceof ApiError)) {\n\t\treturn false;\n\t}\n\tif (err.status !== 400) {\n\t\treturn false;\n\t}\n\ttry {\n\t\tconst parsed = JSON.parse(err.message);\n\t\tconst innerStatus: unknown = parsed?.error?.status;\n\t\tconst innerMessage: unknown = parsed?.error?.message;\n\t\tif (innerStatus !== 'INVALID_ARGUMENT') {\n\t\t\treturn false;\n\t\t}\n\t\t// Be conservative: only flag errors whose inner message mentions\n\t\t// the tool-history contract phrases. Other INVALID_ARGUMENT causes\n\t\t// (malformed generation config, bad model name, bad schema, etc.)\n\t\t// keep falling through to the generic \"no response\" branch so we\n\t\t// don't mislead users with a tool-history message for unrelated\n\t\t// 400s. The two phrases below are the stable fragments Google has\n\t\t// used across gemini-2.x and gemini-3.x rejections.\n\t\tif (typeof innerMessage !== 'string') {\n\t\t\treturn false;\n\t\t}\n\t\treturn /function\\s+response\\s+parts|function\\s+call\\s+parts/i.test(innerMessage);\n\t} catch {\n\t\treturn false;\n\t}\n}\n// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n" + helperAnchor;
+    if (!code.includes(helperAnchor)) {
+      console.warn("WARN: retry-resilience block anchor not found \u2014 skipping Patch 44 B2");
+    } else {
+      code = code.replace(helperAnchor, () => helperReplacement);
+      changed = true;
+    }
+  }
+
+  // B3: tag the catch-block `reason` as RESPONSE_TOOL_HISTORY_INVALID when
+  //     the error matches. Replace the single-line `reason: readableReason`
+  //     arg with a two-line variant that introduces `taggedReason` and
+  //     passes it instead.
+  if (code.includes("BYOK CUSTOM PATCH: tag tool-history INVALID_ARGUMENT")) {
+    console.log("geminiNativeProvider catch-block tag already present, skipping B3");
+  } else {
+    const catchAnchor = "\t\t\t\tconst readableReason = token.isCancellationRequested ? 'cancelled' : extractReadableGeminiMessage(err);\n\t\t\t\tpendingLoggedChatRequest.resolve({\n\t\t\t\t\ttype: token.isCancellationRequested ? ChatFetchResponseType.Canceled : ChatFetchResponseType.Unknown,\n\t\t\t\t\trequestId,\n\t\t\t\t\tserverRequestId: requestId,\n\t\t\t\t\treason: readableReason\n\t\t\t\t},";
+    const catchReplacement = "\t\t\t\tconst readableReason = token.isCancellationRequested ? 'cancelled' : extractReadableGeminiMessage(err);\n\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: tag tool-history INVALID_ARGUMENT \u2500\u2500\u2500\u2500\u2500\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t\t\t// When the error is a Gemini 400 INVALID_ARGUMENT specifically\n\t\t\t\t// about tool call / response contract violation, swap the\n\t\t\t\t// raw message for RESPONSE_TOOL_HISTORY_INVALID so\n\t\t\t\t// getErrorDetailsFromChatFetchError renders the specific\n\t\t\t\t// user-visible message added alongside this patch. The raw\n\t\t\t\t// readableReason is still logged above via this._logService.error.\n\t\t\t\tconst taggedReason = !token.isCancellationRequested && isGeminiToolHistoryInvalidError(err)\n\t\t\t\t\t? RESPONSE_TOOL_HISTORY_INVALID\n\t\t\t\t\t: readableReason;\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t\tpendingLoggedChatRequest.resolve({\n\t\t\t\t\ttype: token.isCancellationRequested ? ChatFetchResponseType.Canceled : ChatFetchResponseType.Unknown,\n\t\t\t\t\trequestId,\n\t\t\t\t\tserverRequestId: requestId,\n\t\t\t\t\treason: taggedReason\n\t\t\t\t},";
+    if (!code.includes(catchAnchor)) {
+      console.warn("WARN: catch-block anchor not found \u2014 skipping Patch 44 B3");
+    } else {
+      code = code.replace(catchAnchor, () => catchReplacement);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    fs.writeFileSync(f, code);
+  }
+})();
+
+console.log("Patched: Gemini tool-history INVALID_ARGUMENT detection + specific user message (44)");
+PATCH44_EOF
+
+# Patch 46: Strip echoed [SYSTEM NOTIFICATION - NOT USER INPUT] wrapper in Copilot CLI assistant messages.
+#
+# The Copilot CLI SDK (@github/copilot) wraps task-notification prompts
+# with a literal 3-line header so the model doesn't misinterpret injected
+# tool results as a new user turn:
+#
+#     [SYSTEM NOTIFICATION - NOT USER INPUT]
+#     This is an automated background-task event, NOT a message from the user.
+#     Do NOT interpret this as user acknowledgement, confirmation, or
+#     response to any pending question.
+#
+#     <original content>
+#
+# This header is meant to stay inside the prompt only. Empirically, some
+# models (most often Gemini under long/confused sessions, occasionally
+# Claude) echo the wrapper back verbatim at the start of their own
+# response. The first line renders as a Markdown-style heading in the
+# chat UI, producing the "there's a system notification inside my
+# chatbox" artefact users have been seeing. This patch strips exactly
+# that 3-line wrapper at the start of each assistant message stream so
+# the chat UI renders only the model's actual answer.
+#
+# Scope is deliberately narrow:
+#   A. A new helper `echoedSystemNotificationStripper.ts` in
+#      src/extension/chatSessions/copilotcli/common/ exporting:
+#        - ECHOED_SYSTEM_NOTIFICATION_HEADER (the exact 3-line constant)
+#        - createEchoedSystemNotificationStripper() — a stateful factory
+#          keyed per messageId so we only strip at message position 0
+#          and never touch later occurrences (e.g. inside tool outputs
+#          or code fences the model is legitimately quoting).
+#   B. CopilotCLISession wires one stripper per sendPrompt turn and
+#      passes `assistant.message_delta` / `assistant.message` chunks
+#      through `stripper.process(messageId, chunk)`; the
+#      `assistant.message` handler also calls `stripper.flush(messageId)`
+#      to drain any residual buffered bytes if the stream never reached
+#      the decision threshold.
+# Helper is pure + fully covered by common/test/echoedSystemNotificationStripper.spec.ts.
+# Single idempotency sentinel per file: helper file presence + the
+# sentinel string, and "createEchoedSystemNotificationStripper" in the
+# session file. Independent of all previous patches.
+node << 'PATCH46_EOF'
+const fs = require("fs");
+
+// ─── Step A: create common/echoedSystemNotificationStripper.ts if missing ─
+(function ensureStripperHelper() {
+  const f = "src/extension/chatSessions/copilotcli/common/echoedSystemNotificationStripper.ts";
+  const sentinel = "BYOK CUSTOM PATCH: strip echoed SYSTEM NOTIFICATION header (Patch 46)";
+  if (fs.existsSync(f) && fs.readFileSync(f, "utf8").includes(sentinel)) {
+    console.log("echoedSystemNotificationStripper already present, skipping A");
+    return;
+  }
+  const content = `/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+// \u2500\u2500\u2500 BYOK CUSTOM PATCH: strip echoed SYSTEM NOTIFICATION header (Patch 46) \u2500\u2500
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Purpose: drop the verbatim 3-line prompt wrapper that the Copilot CLI
+// SDK prepends to task-notification prompts when a language model echoes
+// it back at the start of its own response.
+//
+// Background. The Copilot CLI bundle (node_modules/@github/copilot/sdk)
+// contains a helper \`ICK(q, K)\` that wraps background-task notifications
+// with:
+//
+//     [SYSTEM NOTIFICATION - NOT USER INPUT]
+//     This is an automated background-task event, NOT a message from the user.
+//     Do NOT interpret this as user acknowledgement, confirmation, or
+//     response to any pending question.
+//
+//     <original content>
+//
+// This header is meant to stay inside the model's prompt \u2014 it exists to
+// stop the model from treating the injected tool result as a new user
+// turn. Empirically, Gemini (gemini-2.5-pro, gemini-3.1-pro-preview) and
+// to a lesser extent Claude occasionally echo the whole wrapper back at
+// the start of their response when the turn is confused or interrupted
+// by a downstream error. The first line renders as a Markdown-style
+// heading in the chat UI and every subsequent \`#\` inside the echoed
+// payload renders as a header too, producing the "there's a system
+// notification inside my chatbox" artefact observed in long Gemini
+// sessions.
+//
+// Fix scope. Intercept the two places where CopilotCLISession forwards
+// assistant text to the chat UI (\`assistant.message_delta\` and
+// \`assistant.message\` handlers in copilotcliSession.ts). For each
+// messageId, buffer leading chunks until we have enough bytes to decide
+// whether the prefix matches the exact 3-line wrapper. If it matches,
+// drop the wrapper and flush the remainder. If it doesn't match, flush
+// the buffered chunks as-is and commit to pass-through for the rest of
+// that message. Only position 0 of a message is eligible \u2014 subsequent
+// occurrences inside tool output or code blocks are left alone.
+// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+/** The exact prompt-wrapper the Copilot CLI SDK prepends to task-notification prompts. */
+export const ECHOED_SYSTEM_NOTIFICATION_HEADER =
+\t'[SYSTEM NOTIFICATION - NOT USER INPUT]\\n' +
+\t'This is an automated background-task event, NOT a message from the user.\\n' +
+\t'Do NOT interpret this as user acknowledgement, confirmation, or response to any pending question.\\n\\n';
+
+/**
+ * Returns a stateful stripper that tracks progress per messageId.
+ *
+ * The stripper has two public methods:
+ *  - \`process(messageId, chunk)\` \u2014 call on every streaming chunk. Returns
+ *    the text that should be forwarded downstream (possibly empty while
+ *    the first chunks of a message are buffered pending a match decision).
+ *  - \`flush(messageId)\` \u2014 call when the message is known to be complete
+ *    (e.g. the wrapping turn ended) to drain any residual buffered bytes
+ *    that never reached the decision threshold. Safe to call multiple
+ *    times; a no-op once the message committed.
+ *
+ * Behaviour:
+ *  - A chunk whose accumulated buffer starts with the FULL header is
+ *    stripped once, and the post-header bytes (plus every later chunk
+ *    for that messageId) flow through unchanged.
+ *  - A chunk whose accumulated buffer does NOT start with a prefix of
+ *    the header causes immediate commit-to-pass-through; the buffered
+ *    bytes are returned as one chunk and every later chunk is forwarded
+ *    unchanged.
+ *  - While the buffer is strictly shorter than the header AND is still a
+ *    valid prefix of it, the stripper holds the bytes and returns \`''\`.
+ */
+export function createEchoedSystemNotificationStripper() {
+\ttype StripState = 'buffering' | 'stripped' | 'passthrough';
+\tconst buffers = new Map<string, string>();
+\tconst states = new Map<string, StripState>();
+\tconst HEADER = ECHOED_SYSTEM_NOTIFICATION_HEADER;
+
+\tfunction commitPassthrough(messageId: string): string {
+\t\tconst buffered = buffers.get(messageId) ?? '';
+\t\tstates.set(messageId, 'passthrough');
+\t\tbuffers.delete(messageId);
+\t\treturn buffered;
+\t}
+
+\treturn {
+\t\tprocess(messageId: string, chunk: string): string {
+\t\t\tif (!chunk) {
+\t\t\t\treturn chunk;
+\t\t\t}
+\t\t\tconst state = states.get(messageId);
+\t\t\tif (state === 'stripped' || state === 'passthrough') {
+\t\t\t\treturn chunk;
+\t\t\t}
+\t\t\tconst buffered = (buffers.get(messageId) ?? '') + chunk;
+
+\t\t\tif (buffered.length >= HEADER.length) {
+\t\t\t\tif (buffered.startsWith(HEADER)) {
+\t\t\t\t\tstates.set(messageId, 'stripped');
+\t\t\t\t\tbuffers.delete(messageId);
+\t\t\t\t\treturn buffered.slice(HEADER.length);
+\t\t\t\t}
+\t\t\t\tstates.set(messageId, 'passthrough');
+\t\t\t\tbuffers.delete(messageId);
+\t\t\t\treturn buffered;
+\t\t\t}
+
+\t\t\t// Buffered is shorter than the header \u2014 only keep buffering while
+\t\t\t// the accumulated text is still a valid prefix of the header.
+\t\t\tif (!HEADER.startsWith(buffered)) {
+\t\t\t\tstates.set(messageId, 'passthrough');
+\t\t\t\tbuffers.delete(messageId);
+\t\t\t\treturn buffered;
+\t\t\t}
+
+\t\t\tbuffers.set(messageId, buffered);
+\t\t\tstates.set(messageId, 'buffering');
+\t\t\treturn '';
+\t\t},
+
+\t\tflush(messageId: string): string {
+\t\t\tconst state = states.get(messageId);
+\t\t\tif (state !== 'buffering') {
+\t\t\t\treturn '';
+\t\t\t}
+\t\t\treturn commitPassthrough(messageId);
+\t\t},
+\t};
+}
+
+export type EchoedSystemNotificationStripper = ReturnType<typeof createEchoedSystemNotificationStripper>;
+`;
+  fs.writeFileSync(f, content);
+  console.log("Created echoedSystemNotificationStripper.ts (Patch 46 A)");
+})();
+
+// ─── Step B: copilotcliSession.ts \u2014 import + instantiate + wire handlers ──
+(function patchSession() {
+  const f = "src/extension/chatSessions/copilotcli/node/copilotcliSession.ts";
+  let code = fs.readFileSync(f, "utf8");
+  let changed = false;
+
+  // B1: import alongside the existing copilotCLITools import.
+  if (code.includes("createEchoedSystemNotificationStripper")) {
+    console.log("copilotcliSession stripper import already present, skipping B1");
+  } else {
+    const importAnchor = "import { enrichToolInvocationWithSubagentMetadata, isCopilotCliEditToolCall, isCopilotCLIToolThatCouldRequirePermissions, isTodoRelatedSqlQuery, processToolExecutionComplete, processToolExecutionStart, ToolCall, updateTodoListFromSqlItems, clearTodoList } from '../common/copilotCLITools';";
+    const importReplacement = importAnchor + "\nimport { createEchoedSystemNotificationStripper } from '../common/echoedSystemNotificationStripper';";
+    if (!code.includes(importAnchor)) {
+      console.warn("WARN: copilotcliSession import anchor not found \u2014 skipping Patch 46 B1");
+    } else {
+      code = code.replace(importAnchor, importReplacement);
+      changed = true;
+    }
+  }
+
+  // B2: instantiate echoStripper immediately after chunkMessageIds + assistantMessageChunks.
+  if (code.includes("const echoStripper = createEchoedSystemNotificationStripper()")) {
+    console.log("copilotcliSession echoStripper instantiation already present, skipping B2");
+  } else {
+    const instAnchor = "\t\tconst chunkMessageIds = new Set<string>();\n\t\tconst assistantMessageChunks: string[] = [];";
+    const instReplacement = instAnchor + "\n\t\t// BYOK Patch 46: strip the literal [SYSTEM NOTIFICATION - NOT USER INPUT] prompt wrapper\n\t\t// if the model (commonly Gemini) echoes it back at the start of its response.\n\t\tconst echoStripper = createEchoedSystemNotificationStripper();";
+    if (!code.includes(instAnchor)) {
+      console.warn("WARN: chunkMessageIds/assistantMessageChunks anchor not found \u2014 skipping Patch 46 B2");
+    } else {
+      code = code.replace(instAnchor, instReplacement);
+      changed = true;
+    }
+  }
+
+  // B3: replace the two assistant.message_{delta,<full>} handlers with
+  //     stripper-aware versions. Single combined anchor so the two
+  //     handlers are patched atomically (idempotency sentinel below
+  //     catches a partial-apply and skips re-patching).
+  if (code.includes("BYOK Patch 46: drop the echoed")) {
+    console.log("copilotcliSession event handlers already patched, skipping B3");
+  } else {
+    const handlerAnchor = "\t\t\tdisposables.add(toDisposable(this._sdkSession.on('assistant.message_delta', (event) => {\n\t\t\t\t// Support for streaming delta messages.\n\t\t\t\tif (typeof event.data.deltaContent === 'string' && event.data.deltaContent.length) {\n\t\t\t\t\t// Ensure pending invocation messages are flushed even if we skip sub-agent markdown\n\t\t\t\t\tflushPendingInvocationMessages();\n\t\t\t\t\t// Skip sub-agent markdown \u2014 it will be captured in the subagent tool's result\n\t\t\t\t\tif (event.data.parentToolCallId) {\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tchunkMessageIds.add(event.data.messageId);\n\t\t\t\t\tassistantMessageChunks.push(event.data.deltaContent);\n\t\t\t\t\tthis._stream?.markdown(event.data.deltaContent);\n\t\t\t\t}\n\t\t\t})));\n\t\t\tdisposables.add(toDisposable(this._sdkSession.on('assistant.message', (event) => {\n\t\t\t\tif (typeof event.data.content === 'string' && event.data.content.length && !chunkMessageIds.has(event.data.messageId)) {\n\t\t\t\t\t// Skip sub-agent markdown \u2014 it will be captured in the subagent tool's result\n\t\t\t\t\tif (event.data.parentToolCallId) {\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tassistantMessageChunks.push(event.data.content);\n\t\t\t\t\tflushPendingInvocationMessages();\n\t\t\t\t\tthis._stream?.markdown(event.data.content);\n\t\t\t\t}\n\t\t\t})));";
+    const handlerReplacement = "\t\t\tdisposables.add(toDisposable(this._sdkSession.on('assistant.message_delta', (event) => {\n\t\t\t\t// Support for streaming delta messages.\n\t\t\t\tif (typeof event.data.deltaContent === 'string' && event.data.deltaContent.length) {\n\t\t\t\t\t// Ensure pending invocation messages are flushed even if we skip sub-agent markdown\n\t\t\t\t\tflushPendingInvocationMessages();\n\t\t\t\t\t// Skip sub-agent markdown \u2014 it will be captured in the subagent tool's result\n\t\t\t\t\tif (event.data.parentToolCallId) {\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tchunkMessageIds.add(event.data.messageId);\n\t\t\t\t\t// BYOK Patch 46: drop the echoed [SYSTEM NOTIFICATION - NOT USER INPUT] prompt wrapper.\n\t\t\t\t\tconst sanitizedDelta = echoStripper.process(event.data.messageId, event.data.deltaContent);\n\t\t\t\t\tif (sanitizedDelta.length === 0) {\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tassistantMessageChunks.push(sanitizedDelta);\n\t\t\t\t\tthis._stream?.markdown(sanitizedDelta);\n\t\t\t\t}\n\t\t\t})));\n\t\t\tdisposables.add(toDisposable(this._sdkSession.on('assistant.message', (event) => {\n\t\t\t\tif (typeof event.data.content !== 'string' || !event.data.content.length) {\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\t// BYOK Patch 46: flush any residual buffered bytes from the chunk stripper.\n\t\t\t\tconst residualFromStripper = echoStripper.flush(event.data.messageId);\n\t\t\t\tif (chunkMessageIds.has(event.data.messageId)) {\n\t\t\t\t\tif (residualFromStripper.length > 0 && !event.data.parentToolCallId) {\n\t\t\t\t\t\tassistantMessageChunks.push(residualFromStripper);\n\t\t\t\t\t\tthis._stream?.markdown(residualFromStripper);\n\t\t\t\t\t}\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\t// Skip sub-agent markdown \u2014 it will be captured in the subagent tool's result\n\t\t\t\tif (event.data.parentToolCallId) {\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\t// BYOK Patch 46: strip the echoed [SYSTEM NOTIFICATION - NOT USER INPUT] prompt wrapper for non-chunked messages.\n\t\t\t\tconst sanitizedMessage = echoStripper.process(event.data.messageId, event.data.content);\n\t\t\t\tif (sanitizedMessage.length === 0) {\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\tassistantMessageChunks.push(sanitizedMessage);\n\t\t\t\tflushPendingInvocationMessages();\n\t\t\t\tthis._stream?.markdown(sanitizedMessage);\n\t\t\t})));";
+    if (!code.includes(handlerAnchor)) {
+      console.warn("WARN: copilotcliSession event handlers anchor not found \u2014 skipping Patch 46 B3");
+    } else {
+      code = code.replace(handlerAnchor, () => handlerReplacement);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    fs.writeFileSync(f, code);
+  }
+})();
+
+console.log("Patched: strip echoed SYSTEM NOTIFICATION header in Copilot CLI (46)");
+PATCH46_EOF
+
+# Patch 45: Stub chat endpoint for renderPromptElementJSON BYOK last-resort fallback.
+#
+# Patch 18 installs a two-step BYOK fallback inside renderPromptElementJSON:
+# if `copilot-base` isn't registered, use the first registered chat endpoint;
+# if NONE are registered either, throw. That last-throw branch still fires
+# during the brief window between extension activation and the first BYOK
+# provider finishing its model registration (all BYOK providers construct
+# their endpoint list asynchronously). Every tool that renders its result
+# through `renderPromptElementJSON` (read_file, list_dir, file_search,
+# grep_search, get_errors, the edit tools via codeMapper, etc.) hits that
+# window on a cold start and fails with `No chat endpoints available (BYOK
+# fallback in renderPromptElementJSON)`, which surfaces in the chat as
+# `Sorry, no response was returned.` despite the user having a perfectly
+# valid BYOK setup.
+#
+# Fix: replace the terminal `throw` with a dynamic import of a tiny stub
+# endpoint — `BYOKStubChatEndpoint` — that implements IChatEndpoint with
+# safe defaults (family/model = 'byok-stub', modelMaxPromptTokens = 128k,
+# supportsVision/prediction = false, etc.) and throws a clear error only
+# if something ever tries to use it for a real chat request. The stub is
+# ONLY used for prompt-rendering token-budget math and IPromptEndpoint DI
+# reads — `renderPromptElementJSON` never issues a chat request through it.
+#
+# Two files:
+#   A. New canonical file `src/extension/byok/common/byokStubChatEndpoint.ts`
+#      (installed via fs.writeFileSync if absent). Sentinel: the
+#      "BYOK CUSTOM PATCH: stub chat endpoint for renderPromptElementJSON
+#      (Patch 45)" string in the file header.
+#   B. `src/extension/prompts/node/base/promptRenderer.ts` — replace the
+#      single-line throw added by Patch 18 with a dynamic import + return.
+#      Anchor is the exact throw statement Patch 18 leaves in place, so
+#      Patch 45 strictly layers on top of Patch 18 without re-playing it.
+# Ordering: must run after Patch 18.
+node << 'PATCH45_EOF'
+const fs = require("fs");
+
+// ─── Step A: create common/byokStubChatEndpoint.ts if missing ────────────
+(function ensureStubEndpoint() {
+  const f = "src/extension/byok/common/byokStubChatEndpoint.ts";
+  const sentinel = "BYOK CUSTOM PATCH: stub chat endpoint for renderPromptElementJSON (Patch 45)";
+  if (fs.existsSync(f) && fs.readFileSync(f, "utf8").includes(sentinel)) {
+    console.log("byokStubChatEndpoint already present, skipping A");
+    return;
+  }
+  const content = `/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+// \u2500\u2500\u2500 BYOK CUSTOM PATCH: stub chat endpoint for renderPromptElementJSON (Patch 45) \u2500\u2500
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+//
+// Purpose. Give \`renderPromptElementJSON\` in
+// \`src/extension/prompts/node/base/promptRenderer.ts\` a safe last-resort
+// value when (a) the \`copilot-base\` lookup throws because the fake-token
+// bypass leaves \`_copilotBaseModel\` unset and (b) no BYOK provider has
+// yet registered a chat endpoint either. Before this patch the fallback
+// path threw \`"No chat endpoints available (BYOK fallback in
+// renderPromptElementJSON)"\`, which propagated out of every tool that
+// renders its result through that helper (read_file, list_dir,
+// file_search, grep_search, get_errors, the edit tools via codeMapper,
+// etc.), turning a transient "no model loaded yet" into a hard-stop
+// tool error that surfaces as \`Sorry, no response was returned.\` in
+// the chat.
+//
+// Scope. The endpoint is *only* used for:
+//   1. \`modelMaxPromptTokens\` \u2014 read by \`PromptRendererForJSON\`'s ctor
+//      to seed the tsx renderer's token budget. \`tokenOptions.tokenBudget\`
+//      overrides it when present (and all tool callers that matter set
+//      it), so the exact value is a soft ceiling.
+//   2. \`acquireTokenizer()\` \u2014 used by the same renderer for \`tokenLength\`
+//      / \`countMessagesTokens\`. Tool-result JSON rendering is rarely
+//      close to the budget so a rough char-based estimate is fine.
+//   3. Sitting in the DI container as \`IPromptEndpoint\` so prompt
+//      elements can read \`family\` / \`model\` / \`supportsVision\` and
+//      similar capability flags. All reads must return sensible defaults
+//      that don't trigger model-specific code paths (e.g. \`family\` must
+//      not start with \`gpt-5.1-codex\`, \`model\` must not start with
+//      \`claude-opus\`, etc.).
+//
+// What the stub must NOT be used for: making actual chat requests.
+// \`makeChatRequest\`, \`makeChatRequest2\`, \`processResponseFromChatEndpoint\`
+// and \`createRequestBody\` therefore throw with a clear message instead
+// of silently returning empty data.
+// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+import { OutputMode, Raw } from '@vscode/prompt-tsx';
+import type { LanguageModelChatTool } from 'vscode';
+import { ChatLocation, ChatResponse } from '../../../platform/chat/common/commonTypes';
+import { ILogService } from '../../../platform/log/common/logService';
+import { FinishedCallback, OptionalChatRequestParams } from '../../../platform/networking/common/fetch';
+import { Response } from '../../../platform/networking/common/fetcherService';
+import type { IChatEndpoint, ICreateEndpointBodyOptions, IEndpointBody, IMakeChatRequestOptions } from '../../../platform/networking/common/networking';
+import { ChatCompletion } from '../../../platform/networking/common/openai';
+import { ITelemetryService, TelemetryProperties } from '../../../platform/telemetry/common/telemetry';
+import { TelemetryData } from '../../../platform/telemetry/common/telemetryData';
+import { ITokenizer, TokenizerType } from '../../../util/common/tokenizer';
+import { AsyncIterableObject } from '../../../util/vs/base/common/async';
+import { CancellationToken } from '../../../util/vs/base/common/cancellation';
+import { Source } from '../../../platform/chat/common/chatMLFetcher';
+
+/**
+ * Rough character-based tokenizer used as a last-resort fallback when no real
+ * endpoint (and therefore no real tokenizer) is available. Four characters per
+ * token is the conventional OAI-family estimate; it is intentionally coarse \u2014
+ * the prompt-tsx rendering path typically has an explicit token budget
+ * supplied by the caller, so this tokenizer's output is a soft ceiling rather
+ * than a precise budget.
+ */
+class BYOKStubTokenizer implements ITokenizer {
+\tpublic readonly mode = OutputMode.Raw;
+
+\tprivate _approx(text: string): number {
+\t\tif (!text) {
+\t\t\treturn 0;
+\t\t}
+\t\treturn Math.ceil(text.length / 4);
+\t}
+
+\tasync tokenLength(text: string | Raw.ChatCompletionContentPart): Promise<number> {
+\t\tif (typeof text === 'string') {
+\t\t\treturn this._approx(text);
+\t\t}
+\t\t// Raw.ChatCompletionContentPartKind.Text = 0 in the enum, but importing
+\t\t// the namespace at runtime would drag the full prompt-tsx bundle into
+\t\t// \`common/\`. Instead pattern-match on the string-valued \`type\` field
+\t\t// exposed on every content part.
+\t\tconst anyPart = text as { type?: unknown; text?: unknown; tokenUsage?: unknown };
+\t\tif (typeof anyPart.text === 'string') {
+\t\t\treturn this._approx(anyPart.text);
+\t\t}
+\t\tif (typeof anyPart.tokenUsage === 'number') {
+\t\t\treturn anyPart.tokenUsage;
+\t\t}
+\t\treturn 1;
+\t}
+
+\tasync countMessageTokens(message: Raw.ChatMessage): Promise<number> {
+\t\tlet total = 3; // canonical role-header overhead
+\t\tconst content = (message as { content?: unknown }).content;
+\t\tif (typeof content === 'string') {
+\t\t\ttotal += this._approx(content);
+\t\t} else if (Array.isArray(content)) {
+\t\t\tfor (const part of content) {
+\t\t\t\ttotal += await this.tokenLength(part as Raw.ChatCompletionContentPart);
+\t\t\t}
+\t\t}
+\t\treturn total;
+\t}
+
+\tasync countMessagesTokens(messages: Raw.ChatMessage[]): Promise<number> {
+\t\tlet total = 3;
+\t\tfor (const m of messages) {
+\t\t\ttotal += await this.countMessageTokens(m);
+\t\t}
+\t\treturn total;
+\t}
+
+\tasync countToolTokens(tools: readonly LanguageModelChatTool[]): Promise<number> {
+\t\tlet total = tools.length ? 16 : 0;
+\t\tfor (const t of tools) {
+\t\t\ttotal += 8;
+\t\t\ttotal += this._approx(t.name ?? '');
+\t\t\ttotal += this._approx(t.description ?? '');
+\t\t\tif (t.inputSchema) {
+\t\t\t\ttry {
+\t\t\t\t\ttotal += this._approx(JSON.stringify(t.inputSchema));
+\t\t\t\t} catch {
+\t\t\t\t\t// ignore non-serializable schemas
+\t\t\t\t}
+\t\t\t}
+\t\t}
+\t\treturn Math.floor(total * 1.1);
+\t}
+}
+
+/**
+ * Minimal \`IChatEndpoint\` implementation used *only* as a last-resort
+ * fallback inside \`renderPromptElementJSON\` when neither the \`copilot-base\`
+ * model nor any registered BYOK endpoint is available yet (typically the
+ * very first tool invocation before any BYOK provider has finished
+ * registering models). See the module-level header for the full rationale.
+ */
+export class BYOKStubChatEndpoint implements IChatEndpoint {
+\tpublic readonly urlOrRequestMetadata: string = 'byok-stub://no-endpoint';
+\tpublic readonly name: string = 'BYOK Stub';
+\tpublic readonly version: string = '1.0';
+\tpublic readonly family: string = 'byok-stub';
+\tpublic readonly tokenizer: TokenizerType = TokenizerType.O200K;
+\tpublic readonly modelMaxPromptTokens: number;
+\tpublic readonly maxOutputTokens: number = 4096;
+\tpublic readonly model: string = 'byok-stub';
+\tpublic readonly modelProvider: string = 'byok-stub';
+\tpublic readonly supportsToolCalls: boolean = true;
+\tpublic readonly supportsVision: boolean = false;
+\tpublic readonly supportsPrediction: boolean = false;
+\tpublic readonly showInModelPicker: boolean = false;
+\tpublic readonly isFallback: boolean = true;
+\tpublic readonly isPremium: boolean = false;
+\tpublic readonly multiplier: number = 0;
+\tpublic readonly maxPromptImages: number = 0;
+\tpublic readonly isExtensionContributed: boolean = false;
+
+\tprivate readonly _tokenizer = new BYOKStubTokenizer();
+
+\tconstructor(modelMaxPromptTokens: number = 128_000) {
+\t\tthis.modelMaxPromptTokens = modelMaxPromptTokens;
+\t}
+
+\tacquireTokenizer(): ITokenizer {
+\t\treturn this._tokenizer;
+\t}
+
+\tprocessResponseFromChatEndpoint(
+\t\t_telemetryService: ITelemetryService,
+\t\t_logService: ILogService,
+\t\t_response: Response,
+\t\t_expectedNumChoices: number,
+\t\t_finishCallback: FinishedCallback,
+\t\t_telemetryData: TelemetryData,
+\t\t_cancellationToken?: CancellationToken,
+\t\t_location?: ChatLocation,
+\t): Promise<AsyncIterableObject<ChatCompletion>> {
+\t\tthrow new Error('BYOKStubChatEndpoint: processResponseFromChatEndpoint is not supported (stub endpoint).');
+\t}
+
+\tmakeChatRequest(
+\t\t_debugName: string,
+\t\t_messages: Raw.ChatMessage[],
+\t\t_finishedCb: FinishedCallback | undefined,
+\t\t_token: CancellationToken,
+\t\t_location: ChatLocation,
+\t\t_source?: Source,
+\t\t_requestOptions?: Omit<OptionalChatRequestParams, 'n'>,
+\t\t_userInitiatedRequest?: boolean,
+\t\t_telemetryProperties?: TelemetryProperties,
+\t): Promise<ChatResponse> {
+\t\tthrow new Error('BYOKStubChatEndpoint: makeChatRequest is not supported (stub endpoint).');
+\t}
+
+\tmakeChatRequest2(_options: IMakeChatRequestOptions, _token: CancellationToken): Promise<ChatResponse> {
+\t\tthrow new Error('BYOKStubChatEndpoint: makeChatRequest2 is not supported (stub endpoint).');
+\t}
+
+\tcreateRequestBody(_options: ICreateEndpointBodyOptions): IEndpointBody {
+\t\tthrow new Error('BYOKStubChatEndpoint: createRequestBody is not supported (stub endpoint).');
+\t}
+
+\tcloneWithTokenOverride(modelMaxPromptTokens: number): IChatEndpoint {
+\t\treturn new BYOKStubChatEndpoint(modelMaxPromptTokens);
+\t}
+}
+`;
+  fs.writeFileSync(f, content);
+  console.log("Created byokStubChatEndpoint.ts (Patch 45 A)");
+})();
+
+// ─── Step B: promptRenderer.ts — swap the terminal throw for a stub return ─
+(function patchPromptRenderer() {
+  const f = "src/extension/prompts/node/base/promptRenderer.ts";
+  let code = fs.readFileSync(f, "utf8");
+
+  if (code.includes("BYOK CUSTOM PATCH: stub endpoint last-resort (Patch 45)")) {
+    console.log("promptRenderer BYOK stub fallback already present, skipping B");
+    return;
+  }
+
+  const anchor = "\t\t\tthrow new Error('No chat endpoints available (BYOK fallback in renderPromptElementJSON)');";
+  const replacement = "\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: stub endpoint last-resort (Patch 45) \u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t// If no BYOK provider has registered a chat endpoint yet (typical\n\t\t\t// during the first tool invocation after a cold start), fall\n\t\t\t// through to a stub endpoint instead of throwing. The stub is\n\t\t\t// only used for token-budget math and capability flag reads in\n\t\t\t// prompt rendering \u2014 `renderPromptElementJSON` never issues a\n\t\t\t// real chat request through it. See byokStubChatEndpoint.ts.\n\t\t\tconst { BYOKStubChatEndpoint } = await import('../../../byok/common/byokStubChatEndpoint');\n\t\t\treturn new BYOKStubChatEndpoint();\n\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+
+  if (!code.includes(anchor)) {
+    console.warn("WARN: promptRenderer terminal-throw anchor not found \u2014 Patch 18 not applied first? Skipping Patch 45 B");
+    return;
+  }
+  code = code.replace(anchor, replacement);
+  fs.writeFileSync(f, code);
+  console.log("Patched: promptRenderer BYOK stub last-resort (Patch 45 B)");
+})();
+
+console.log("Patched: BYOK stub chat endpoint for renderPromptElementJSON (45)");
+PATCH45_EOF

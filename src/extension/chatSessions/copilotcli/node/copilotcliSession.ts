@@ -33,6 +33,7 @@ import { IChatSessionMetadataStore } from '../../common/chatSessionMetadataStore
 import { ExternalEditTracker } from '../../common/externalEditTracker';
 import { getWorkingDirectory, isIsolationEnabled, IWorkspaceInfo } from '../../common/workspaceInfo';
 import { enrichToolInvocationWithSubagentMetadata, isCopilotCliEditToolCall, isCopilotCLIToolThatCouldRequirePermissions, isTodoRelatedSqlQuery, processToolExecutionComplete, processToolExecutionStart, ToolCall, updateTodoListFromSqlItems, clearTodoList } from '../common/copilotCLITools';
+import { createEchoedSystemNotificationStripper } from '../common/echoedSystemNotificationStripper';
 import { getCopilotCLISessionDir } from './cliHelpers';
 import { SessionIdForCLI } from '../common/utils';
 import type { CopilotCliBridgeSpanProcessor } from './copilotCliBridgeSpanProcessor';
@@ -458,6 +459,9 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 
 		const chunkMessageIds = new Set<string>();
 		const assistantMessageChunks: string[] = [];
+		// BYOK Patch 46: strip the literal [SYSTEM NOTIFICATION - NOT USER INPUT] prompt wrapper
+		// if the model (commonly Gemini) echoes it back at the start of its response.
+		const echoStripper = createEchoedSystemNotificationStripper();
 		let lastUsageInfo: UsageInfoData | undefined;
 		const reportUsage = (promptTokens: number, completionTokens: number) => {
 			if (token.isCancellationRequested || !this._stream) {
@@ -639,20 +643,40 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 						return;
 					}
 					chunkMessageIds.add(event.data.messageId);
-					assistantMessageChunks.push(event.data.deltaContent);
-					this._stream?.markdown(event.data.deltaContent);
+					// BYOK Patch 46: drop the echoed [SYSTEM NOTIFICATION - NOT USER INPUT] prompt wrapper.
+					const sanitizedDelta = echoStripper.process(event.data.messageId, event.data.deltaContent);
+					if (sanitizedDelta.length === 0) {
+						return;
+					}
+					assistantMessageChunks.push(sanitizedDelta);
+					this._stream?.markdown(sanitizedDelta);
 				}
 			})));
 			disposables.add(toDisposable(this._sdkSession.on('assistant.message', (event) => {
-				if (typeof event.data.content === 'string' && event.data.content.length && !chunkMessageIds.has(event.data.messageId)) {
-					// Skip sub-agent markdown — it will be captured in the subagent tool's result
-					if (event.data.parentToolCallId) {
-						return;
-					}
-					assistantMessageChunks.push(event.data.content);
-					flushPendingInvocationMessages();
-					this._stream?.markdown(event.data.content);
+				if (typeof event.data.content !== 'string' || !event.data.content.length) {
+					return;
 				}
+				// BYOK Patch 46: flush any residual buffered bytes from the chunk stripper.
+				const residualFromStripper = echoStripper.flush(event.data.messageId);
+				if (chunkMessageIds.has(event.data.messageId)) {
+					if (residualFromStripper.length > 0 && !event.data.parentToolCallId) {
+						assistantMessageChunks.push(residualFromStripper);
+						this._stream?.markdown(residualFromStripper);
+					}
+					return;
+				}
+				// Skip sub-agent markdown — it will be captured in the subagent tool's result
+				if (event.data.parentToolCallId) {
+					return;
+				}
+				// BYOK Patch 46: strip the echoed [SYSTEM NOTIFICATION - NOT USER INPUT] prompt wrapper for non-chunked messages.
+				const sanitizedMessage = echoStripper.process(event.data.messageId, event.data.content);
+				if (sanitizedMessage.length === 0) {
+					return;
+				}
+				assistantMessageChunks.push(sanitizedMessage);
+				flushPendingInvocationMessages();
+				this._stream?.markdown(sanitizedMessage);
 			})));
 			disposables.add(toDisposable(this._sdkSession.on('tool.execution_start', (event) => {
 				toolCalls.set(event.data.toolCallId, event.data as unknown as ToolCall);

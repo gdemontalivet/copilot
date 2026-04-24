@@ -231,7 +231,16 @@ export async function renderPromptElementJSON<P extends BasePromptElementProps>(
 			if (all.length > 0) {
 				return all[0];
 			}
-			throw new Error('No chat endpoints available (BYOK fallback in renderPromptElementJSON)');
+			// ─── BYOK CUSTOM PATCH: stub endpoint last-resort (Patch 45) ──────
+			// If no BYOK provider has registered a chat endpoint yet (typical
+			// during the first tool invocation after a cold start), fall
+			// through to a stub endpoint instead of throwing. The stub is
+			// only used for token-budget math and capability flag reads in
+			// prompt rendering — `renderPromptElementJSON` never issues a
+			// real chat request through it. See byokStubChatEndpoint.ts.
+			const { BYOKStubChatEndpoint } = await import('../../../byok/common/byokStubChatEndpoint');
+			return new BYOKStubChatEndpoint();
+			// ─── END BYOK CUSTOM PATCH ───────────────────────
 		}
 		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
 	});

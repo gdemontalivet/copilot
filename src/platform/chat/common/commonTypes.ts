@@ -125,6 +125,22 @@ export const RESPONSE_CONTAINED_NO_CHOICES = 'Response contained no choices.';
 // completions so getErrorDetailsFromChatFetchError can surface a clearer
 // message and the toolCallingLoop's auto-retry logic can kick in.
 export const RESPONSE_EMPTY_STOP = 'Model returned an empty stop completion.';
+// ─── END BYOK CUSTOM PATCH ────────────────────
+
+// ─── BYOK CUSTOM PATCH: tool-history invalid detection ────────────
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Gemini rejects HTTP 400 INVALID_ARGUMENT when the transcript's
+// functionCall / functionResponse contract is violated — either because
+// of cross-provider tool-id name mismatches (Anthropic/OpenAI ids
+// passing through the Gemini converter, addressed by Patch 43) or
+// because history summarisation dropped the assistant turn that
+// emitted the call while keeping its response, or because count and
+// names no longer line up for any other reason. Patch 43 repairs the
+// transcript on the way out; this constant tags the residual cases
+// that still slip through so getErrorDetailsFromChatFetchError can
+// surface a specific, actionable message instead of the generic
+// "Sorry, no response was returned.".
+export const RESPONSE_TOOL_HISTORY_INVALID = 'Model rejected conversation history (tool-call / tool-response mismatch).';
 // ─── END BYOK CUSTOM PATCH ────────────────────────────
 
 export type ChatFetchError =
@@ -430,6 +446,10 @@ function getErrorDetailsFromChatFetchErrorInner(fetchResult: ChatFetchError, cop
 			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
 			if (fetchResult.reason === RESPONSE_EMPTY_STOP) {
 				details = { message: l10n.t(`The model returned an empty response (stop with no content). This is a known flakiness in some models under load — please try again, or switch to a different model.`) };
+			} else if (fetchResult.reason === RESPONSE_TOOL_HISTORY_INVALID) {
+				// ─── BYOK CUSTOM PATCH: tool-history-invalid message (Patch 44) ─
+				details = { message: l10n.t(`The model rejected the conversation history because of a tool-call / tool-response mismatch. This usually happens after switching providers mid-chat or after history was summarised. Please try again — if it keeps happening, start a new chat.`) };
+				// ─── END BYOK CUSTOM PATCH ────────────────────
 			} else {
 				details = { message: l10n.t(`Sorry, no response was returned.`) };
 			}

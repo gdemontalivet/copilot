@@ -8,7 +8,30 @@ import type { LanguageModelChatMessage } from 'vscode';
 import { CustomDataPartMimeTypes } from '../../../platform/endpoint/common/endpointTypes';
 import { LanguageModelChatMessageRole, LanguageModelDataPart, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, LanguageModelToolResultPart, LanguageModelToolResultPart2 } from '../../../vscodeTypes';
 
-function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelToolCallPart | LanguageModelDataPart | LanguageModelThinkingPart)[]): Part[] {
+// ─── BYOK CUSTOM PATCH: resolve tool names across providers (Patch 43) ─────
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// When a conversation contains tool calls produced by *another* provider
+// (typically Anthropic, where tool_use.id looks like `toolu_01ABCdef…`),
+// the callId carries no tool name. The legacy `callId.split('_')[0]`
+// heuristic was designed for Gemini-native ids (`functionName_timestamp`)
+// and collapses every Anthropic tool response to `name: 'toolu'`. Gemini
+// then 400s with "the number of function response parts is equal to the
+// number of function call parts of the function call turn" because
+// functionResponse.name no longer matches any preceding functionCall.name.
+// Fix: pre-walk the transcript, build a callId→name map from every
+// LanguageModelToolCallPart, and resolve names from it first; fall back to
+// the legacy split-on-underscore heuristic only when the map has no entry
+// (e.g. partial transcript where the tool_call part was truncated out).
+export function resolveToolName(callId: string | undefined, callIdToName: Map<string, string>): string {
+	if (callId) {
+		const tracked = callIdToName.get(callId);
+		if (tracked) { return tracked; }
+	}
+	return callId?.split('_')[0] || 'unknown_function';
+}
+// ─── END BYOK CUSTOM PATCH ─────────────────────────────
+
+function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelToolCallPart | LanguageModelDataPart | LanguageModelThinkingPart)[], callIdToName: Map<string, string> = new Map()): Part[] {
 	const convertedContent: Part[] = [];
 	let pendingSignature: string | undefined;
 
@@ -48,6 +71,27 @@ function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageMod
 				});
 			}
 		} else if (part instanceof LanguageModelToolResultPart || part instanceof LanguageModelToolResultPart2) {
+			// ─── BYOK CUSTOM PATCH: drop orphan tool-result parts (Patch 43) ──────
+			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			// Gemini's function-calling contract requires that every
+			// `functionResponse.name` in a user turn match a `functionCall.name`
+			// emitted by the model in the preceding turn (count + names). When
+			// history gets summarised/truncated, or when a model switch drops
+			// the assistant turn that issued the call, the user turn can carry
+			// orphan tool-results whose callId is nowhere in the transcript.
+			// Passing those through makes Gemini 400 with "the number of
+			// function response parts is equal to the number of function call
+			// parts of the function call turn". Drop them here so the rest of
+			// the transcript still renders.
+			//
+			// Only active when the caller pre-walked the transcript (map is
+			// non-empty). Direct callers that pass the default empty map keep
+			// legacy behaviour so the resolveToolName fallback is exercisable
+			// in unit tests.
+			if (callIdToName.size > 0 && part.callId && !callIdToName.has(part.callId)) {
+				continue;
+			}
+			// ─── END BYOK CUSTOM PATCH ──────────────────────────────
 			// Convert tool result content - handle both text and image parts
 			const textContent = part.content
 				.filter((p): p is LanguageModelTextPart => p instanceof LanguageModelTextPart)
@@ -68,8 +112,11 @@ function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageMod
 				imageDescription = `\n[Contains ${imageParts.length} image(s) with types: ${imageParts.map(p => p.mimeType).join(', ')}]`;
 			}
 
-			// extraction: functionName_timestamp => split on first underscore
-			const functionName = part.callId?.split('_')[0] || 'unknown_function';
+			// ─── BYOK CUSTOM PATCH: resolve tool name via callId→name map (Patch 43) ─
+			// Falls back to the legacy `functionName_timestamp` split for
+			// Gemini-native ids when no mapping is available. See resolveToolName().
+			const functionName = resolveToolName(part.callId, callIdToName);
+			// ─── END BYOK CUSTOM PATCH ──────────────────────────────
 
 			// Preserve structured JSON if possible
 			let responsePayload: any = {};
@@ -127,6 +174,22 @@ export function apiMessageToGeminiMessage(messages: LanguageModelChatMessage[]):
 	// Track tool calls to match with their responses
 	const pendingToolCalls = new Map<string, FunctionCall>();
 
+	// ─── BYOK CUSTOM PATCH: callId→name map for cross-provider transcripts (Patch 43) ─
+	// Pre-walk every message and harvest (callId → tool name) from
+	// LanguageModelToolCallPart so that subsequent tool-result parts can
+	// resolve the real tool name even when the callId was minted by another
+	// provider (Anthropic `toolu_…`, OpenAI `call_…`, etc.). This map is
+	// the single source of truth for `functionResponse.name` below.
+	const callIdToName = new Map<string, string>();
+	for (const message of messages) {
+		for (const part of message.content) {
+			if (part instanceof LanguageModelToolCallPart && part.callId && part.name) {
+				callIdToName.set(part.callId, part.name);
+			}
+		}
+	}
+	// ─── END BYOK CUSTOM PATCH ──────────────────────────
+
 	for (const message of messages) {
 		if (message.role === LanguageModelChatMessageRole.System) {
 			// Gemini uses system instruction separately
@@ -142,7 +205,7 @@ export function apiMessageToGeminiMessage(messages: LanguageModelChatMessage[]):
 				};
 			}
 		} else if (message.role === LanguageModelChatMessageRole.Assistant) {
-			const parts = apiContentToGeminiContent(message.content);
+			const parts = apiContentToGeminiContent(message.content, callIdToName);
 
 			// Store function calls for later matching with responses
 			parts.forEach(part => {
@@ -156,7 +219,7 @@ export function apiMessageToGeminiMessage(messages: LanguageModelChatMessage[]):
 				parts
 			});
 		} else if (message.role === LanguageModelChatMessageRole.User) {
-			const parts = apiContentToGeminiContent(message.content);
+			const parts = apiContentToGeminiContent(message.content, callIdToName);
 
 			contents.push({
 				role: 'user',
@@ -196,6 +259,19 @@ export function apiMessageToGeminiMessage(messages: LanguageModelChatMessage[]):
 			contents.splice(i, 1);
 		}
 	}
+
+	// ─── BYOK CUSTOM PATCH: prune user messages emptied by orphan drop (Patch 43) ─
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// If a user turn consisted entirely of orphan tool-results, it now has
+	// zero parts and would render as an empty `{role:'user', parts:[]}` which
+	// Gemini also rejects. Same rule as the model-role cleanup above.
+	for (let i = contents.length - 1; i >= 0; i--) {
+		const c = contents[i];
+		if (c.role === 'user' && (!c.parts || c.parts.length === 0)) {
+			contents.splice(i, 1);
+		}
+	}
+	// ─── END BYOK CUSTOM PATCH ──────────────────
 
 	return { contents, systemInstruction };
 }
