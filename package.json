@@ -2,7 +2,7 @@
 	"name": "copilot-chat",
 	"displayName": "Copilot Full BYOK",
 	"description": "AI chat features powered by Copilot — Full Bring Your Own Key edition",
-	"version": "0.46.24",
+	"version": "0.46.1",
 	"build": "1",
 	"internalAIKey": "1058ec22-3c95-4951-8443-f26c1f325911",
 	"completionsCoreVersion": "1.378.1799",
@@ -1052,6 +1052,38 @@
 				}
 			},
 			{
+				"name": "copilot_githubTextSearch",
+				"legacyToolReferenceFullNames": [
+					"githubTextSearch"
+				],
+				"toolReferenceName": "githubTextSearch",
+				"displayName": "%github.copilot.tools.githubTextSearch.name%",
+				"modelDescription": "Lexically searches a GitHub repository or organization for files containing specific keywords or code patterns. Use this when looking for exact strings, function names, or identifiers in a GitHub repo or org. Unlike the semantic search tool, this uses keyword matching rather than meaning-based search.",
+				"userDescription": "%github.copilot.tools.githubTextSearch.userDescription%",
+				"icon": "$(search)",
+				"inputSchema": {
+					"type": "object",
+					"properties": {
+						"scope": {
+							"type": "string",
+							"description": "The GitHub scope to search. Use 'owner/repo' to search a single repository, or an org name (no slash) to search across an entire organization."
+						},
+						"query": {
+							"type": "string",
+							"description": "The keyword search query. Supports GitHub code search syntax such as 'language:typescript', 'extension:ts', 'path:src/', etc."
+						},
+						"maxResults": {
+							"type": "number",
+							"description": "Optional. The maximum number of search results to return. Defaults to 100."
+						}
+					},
+					"required": [
+						"scope",
+						"query"
+					]
+				}
+			},
+			{
 				"name": "copilot_switchAgent",
 				"toolReferenceName": "switchAgent",
 				"displayName": "%copilot.tools.switchAgent.name%",
@@ -1271,7 +1303,8 @@
 				"icon": "$(globe)",
 				"tools": [
 					"fetch",
-					"githubRepo"
+					"githubRepo",
+					"githubTextSearch"
 				]
 			}
 		],
@@ -2927,6 +2960,34 @@
 				"enablement": "!chatSessionRequestInProgress",
 				"icon": "$(repo)",
 				"category": "GitHub Copilot"
+			},
+			{
+				"command": "github.copilot.claude.sessions.commit",
+				"title": "%github.copilot.command.claude.sessions.commit%",
+				"enablement": "!chatSessionRequestInProgress",
+				"icon": "$(git-commit)",
+				"category": "GitHub Copilot"
+			},
+			{
+				"command": "github.copilot.claude.sessions.commitAndSync",
+				"title": "%github.copilot.command.claude.sessions.commitAndSync%",
+				"enablement": "!chatSessionRequestInProgress",
+				"icon": "$(sync)",
+				"category": "GitHub Copilot"
+			},
+			{
+				"command": "github.copilot.claude.sessions.sync",
+				"title": "%github.copilot.command.claude.sessions.sync%",
+				"enablement": "!chatSessionRequestInProgress",
+				"icon": "$(sync)",
+				"category": "GitHub Copilot"
+			},
+			{
+				"command": "github.copilot.claude.sessions.initializeRepository",
+				"title": "%github.copilot.command.claude.sessions.initializeRepository%",
+				"enablement": "!chatSessionRequestInProgress",
+				"icon": "$(repo)",
+				"category": "GitHub Copilot"
 			}
 		],
 		"configuration": [
@@ -4422,6 +4483,16 @@
 							"onExp"
 						]
 					},
+					"github.copilot.chat.executionSubagent.useAgenticProxy": {
+						"type": "boolean",
+						"default": false,
+						"markdownDescription": "%github.copilot.config.executionSubagent.useAgenticProxy%",
+						"tags": [
+							"advanced",
+							"experimental",
+							"onExp"
+						]
+					},
 					"github.copilot.chat.executionSubagent.toolCallLimit": {
 						"type": "number",
 						"default": 10,
@@ -5039,8 +5110,28 @@
 				},
 				{
 					"command": "github.copilot.chat.createPullRequestCopilotCLIAgentSession.updatePR",
-					"when": "chatSessionType == copilotcli && isSessionsWindow && sessions.isolationMode == worktree && sessions.hasGitRepository && sessions.hasGitHubRemote && sessions.hasPullRequest && sessions.hasOpenPullRequest",
+					"when": "chatSessionType == copilotcli && isSessionsWindow && sessions.isolationMode == worktree && sessions.hasGitRepository && sessions.hasGitHubRemote && sessions.hasPullRequest && sessions.hasOpenPullRequest && (sessions.hasIncomingChanges || sessions.hasOutgoingChanges || sessions.hasUncommittedChanges)",
 					"group": "pull_request@1"
+				},
+				{
+					"command": "github.copilot.claude.sessions.initializeRepository",
+					"when": "chatSessionType == claude-code && isSessionsWindow && !sessions.hasGitRepository",
+					"group": "init@1"
+				},
+				{
+					"command": "github.copilot.claude.sessions.commit",
+					"when": "chatSessionType == claude-code && isSessionsWindow && sessions.hasGitRepository && sessions.hasUncommittedChanges",
+					"group": "commit@1"
+				},
+				{
+					"command": "github.copilot.claude.sessions.commitAndSync",
+					"when": "chatSessionType == claude-code && isSessionsWindow && sessions.hasGitRepository && sessions.hasUncommittedChanges && sessions.hasUpstream",
+					"group": "commit@2"
+				},
+				{
+					"command": "github.copilot.claude.sessions.sync",
+					"when": "chatSessionType == claude-code && isSessionsWindow && sessions.hasGitRepository && !sessions.hasUncommittedChanges && sessions.hasUpstream",
+					"group": "sync@1"
 				}
 			],
 			"chat/contextUsage/actions": [
@@ -5399,6 +5490,22 @@
 				},
 				{
 					"command": "github.copilot.sessions.initializeRepository",
+					"when": "false"
+				},
+				{
+					"command": "github.copilot.claude.sessions.commit",
+					"when": "false"
+				},
+				{
+					"command": "github.copilot.claude.sessions.commitAndSync",
+					"when": "false"
+				},
+				{
+					"command": "github.copilot.claude.sessions.sync",
+					"when": "false"
+				},
+				{
+					"command": "github.copilot.claude.sessions.initializeRepository",
 					"when": "false"
 				}
 			],

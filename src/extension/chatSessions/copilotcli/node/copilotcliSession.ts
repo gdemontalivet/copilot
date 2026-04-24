@@ -93,14 +93,7 @@ interface McSharedState {
 }
 const mcStateBySessionId = new Map<string, McSharedState>();
 
-export const builtinSlashSCommands = {
-	commit: '/commit',
-	sync: '/sync',
-	merge: '/merge',
-	createPr: '/create-pr',
-	createDraftPr: '/create-draft-pr',
-	updatePr: '/update-pr',
-};
+export { builtinSlashCommands as builtinSlashSCommands } from '../../common/builtinSlashCommands';
 
 /**
  * Either a free-form prompt **or** a known command.
@@ -156,10 +149,6 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 
 	public readonly onDidChangeStatus = this._statusChange.event;
 
-	private _permissionRequested?: PermissionRequest;
-	public get permissionRequested(): PermissionRequest | undefined {
-		return this._permissionRequested;
-	}
 	private _title?: string;
 	public get title(): string | undefined {
 		return this._title;
@@ -623,7 +612,7 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 				this._onDidChangeTitle.fire(event.data.title);
 			})));
 			disposables.add(toDisposable(this._sdkSession.on('user.message', (event) => {
-				sdkRequestId = event.id;
+				sdkRequestId = sdkRequestId ?? event.id;
 			})));
 			disposables.add(toDisposable(this._sdkSession.on('assistant.usage', (event) => {
 				if (this._stream && typeof event.data.outputTokens === 'number' && typeof event.data.inputTokens === 'number') {
