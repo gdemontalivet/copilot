@@ -2,7 +2,7 @@
 	"name": "copilot-chat",
 	"displayName": "Copilot Full BYOK",
 	"description": "AI chat features powered by Copilot — Full Bring Your Own Key edition",
-	"version": "0.46.1",
+	"version": "0.47.1",
 	"build": "1",
 	"internalAIKey": "1058ec22-3c95-4951-8443-f26c1f325911",
 	"completionsCoreVersion": "1.378.1799",
@@ -128,8 +128,10 @@
 		"chatReferenceBinaryData",
 		"languageModelSystem",
 		"languageModelCapabilities",
+		"languageModelPricing",
 		"inlineCompletionsAdditions",
 		"chatStatusItem",
+		"chatInputNotification",
 		"taskProblemMatcherStatus",
 		"contribLanguageModelToolSets",
 		"textDocumentChangeReason",
@@ -1568,6 +1570,11 @@
 					{
 						"name": "chronicle:tips",
 						"description": "%copilot.chronicle.tips.description%",
+						"when": "github.copilot.sessionSearch.enabled"
+					},
+					{
+						"name": "chronicle:reindex",
+						"description": "%copilot.chronicle.reindex.description%",
 						"when": "github.copilot.sessionSearch.enabled"
 					},
 					{
@@ -3291,13 +3298,6 @@
 						"tags": [
 							"onExp"
 						]
-					},
-					"github.copilot.chat.anthropic.thinking.budgetTokens": {
-						"type": "number",
-						"markdownDescription": "%github.copilot.config.anthropic.thinking.budgetTokens%",
-						"minimum": 0,
-						"maximum": 32000,
-						"default": 16000
 					}
 				}
 			},
@@ -6666,7 +6666,7 @@
 		"@opentelemetry/sdk-trace-node": "^2.5.1",
 		"@opentelemetry/semantic-conventions": "^1.39.0",
 		"@sinclair/typebox": "^0.34.41",
-		"@vscode/copilot-api": "^0.2.19",
+		"@vscode/copilot-api": "^0.3.0",
 		"@vscode/extension-telemetry": "^1.5.1",
 		"@vscode/l10n": "^0.0.18",
 		"@vscode/prompt-tsx": "^0.4.0-alpha.8",
