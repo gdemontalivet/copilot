@@ -57,6 +57,7 @@ export function createResponsesRequestBody(accessor: ServicesAccessor, options: 
 	// undefined if the connection is new or the summary state changed). Never fall
 	// back to the HTTP marker lookup in that case.
 	const ignoreStatefulMarker = !!options.ignoreStatefulMarker || !!options.useWebSocket;
+	const modeChanged = !!options.modeChanged;
 
 	// Tool search: when enabled, split tools into non-deferred (included in the request) and deferred
 	// (excluded from the request entirely). Uses OpenAI's client-executed tool search protocol: we add
@@ -124,7 +125,7 @@ export function createResponsesRequestBody(accessor: ServicesAccessor, options: 
 
 	const body: IEndpointBody = {
 		model,
-		...rawMessagesToResponseAPI(model, options.messages, ignoreStatefulMarker, webSocketStatefulMarker, toolsMap),
+		...rawMessagesToResponseAPI(model, options.messages, ignoreStatefulMarker, webSocketStatefulMarker, toolsMap, modeChanged),
 		stream: true,
 		tools: finalTools.length > 0 ? finalTools : undefined,
 		// Only a subset of completion post options are supported, and some
@@ -290,7 +291,7 @@ function resolveWebSocketStatefulMarker(accessor: ServicesAccessor, options: ICr
 	return wsManager.getStatefulMarker(options.conversationId);
 }
 
-function rawMessagesToResponseAPI(modelId: string, messages: readonly Raw.ChatMessage[], ignoreStatefulMarker: boolean, webSocketStatefulMarker: string | undefined, toolsMap?: Map<string, OpenAiFunctionTool>): { input: OpenAI.Responses.ResponseInputItem[]; previous_response_id?: string } {
+function rawMessagesToResponseAPI(modelId: string, messages: readonly Raw.ChatMessage[], ignoreStatefulMarker: boolean, webSocketStatefulMarker: string | undefined, toolsMap?: Map<string, OpenAiFunctionTool>, modeChanged: boolean = false): { input: OpenAI.Responses.ResponseInputItem[]; previous_response_id?: string } {
 	const latestCompactionMessageIndex = getLatestCompactionMessageIndex(messages);
 	const latestCompactionMessage = latestCompactionMessageIndex !== undefined ? createCompactionRoundTripMessage(messages[latestCompactionMessageIndex]) : undefined;
 
@@ -310,6 +311,11 @@ function rawMessagesToResponseAPI(modelId: string, messages: readonly Raw.ChatMe
 			previousResponseId = statefulMarkerAndIndex.statefulMarker;
 			markerIndex = statefulMarkerAndIndex.index;
 		}
+	}
+
+	if (modeChanged) {
+		previousResponseId = undefined;
+		markerIndex = undefined;
 	}
 
 	if (markerIndex !== undefined) {
@@ -832,6 +838,12 @@ export function sendCompletionOutputTelemetry(telemetryService: ITelemetryServic
 			promptTokens: completion.usage.prompt_tokens,
 			completionTokens: completion.usage.completion_tokens,
 			totalTokens: completion.usage.total_tokens,
+			...(completion.usage.prompt_tokens_details && { cachedTokens: completion.usage.prompt_tokens_details.cached_tokens }),
+			...(completion.usage.completion_tokens_details && {
+				reasoningTokens: completion.usage.completion_tokens_details.reasoning_tokens,
+				acceptedPredictionTokens: completion.usage.completion_tokens_details.accepted_prediction_tokens,
+				rejectedPredictionTokens: completion.usage.completion_tokens_details.rejected_prediction_tokens,
+			}),
 		});
 	}
 	sendEngineMessagesTelemetry(telemetryService, [telemetryMessage], telemetryDataWithUsage, true, logService);

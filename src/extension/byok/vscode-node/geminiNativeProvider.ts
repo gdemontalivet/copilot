@@ -10,7 +10,7 @@ import { CustomDataPartMimeTypes } from '../../../platform/endpoint/common/endpo
 import { ILogService } from '../../../platform/log/common/logService';
 import { IResponseDelta, OpenAiFunctionTool } from '../../../platform/networking/common/fetch';
 import { APIUsage } from '../../../platform/networking/common/openai';
-import { CopilotChatAttr, emitInferenceDetailsEvent, GenAiAttr, GenAiMetrics, GenAiOperationName, type OTelModelOptions, StdAttr, truncateForOTel } from '../../../platform/otel/common/index';
+import { CopilotChatAttr, emitInferenceDetailsEvent, GenAiAttr, GenAiMetrics, GenAiOperationName, type OTelModelOptions, StdAttr, toToolDefinitions, truncateForOTel } from '../../../platform/otel/common/index';
 import { IOTelService, SpanKind, SpanStatusCode } from '../../../platform/otel/common/otelService';
 import { IRequestLogger } from '../../../platform/requestLogger/common/requestLogger';
 import { retrieveCapturingTokenByCorrelation, runWithCapturingToken } from '../../../platform/requestLogger/node/requestLogger';
@@ -476,6 +476,12 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 			});
 			// Opt-in: capture input messages in OTel GenAI format
 			if (this._otelService.config.captureContent) {
+				// Tool definitions on the chat span (issue #299934) with `parameters`
+				// per OTel GenAI semantic conventions (issue #300318).
+				const toolDefs = toToolDefinitions(options.tools);
+				if (toolDefs) {
+					otelSpan.setAttribute(GenAiAttr.TOOL_DEFINITIONS, truncateForOTel(JSON.stringify(toolDefs)));
+				}
 				try {
 					const roleNames: Record<number, string> = { 1: 'user', 2: 'assistant', 3: 'system' };
 					const inputMsgs = messages.map(m => {
