@@ -16,6 +16,7 @@ import { RawMessageConversionCallback } from '../../../platform/networking/commo
 import { IChatWebSocketManager } from '../../../platform/networking/node/chatWebSocketManager';
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
 import { ITokenizerProvider } from '../../../platform/tokenizer/node/tokenizer';
+import { deepClone, mixin } from '../../../util/vs/base/common/objects';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 
 function hydrateBYOKErrorMessages(response: ChatResponse): ChatResponse {
@@ -314,8 +315,8 @@ export class OpenAIEndpoint extends ChatEndpoint {
 	}
 
 	override cloneWithTokenOverride(modelMaxPromptTokens: number): IChatEndpoint {
-		const newModelInfo = { ...this.modelMetadata, maxInputTokens: modelMaxPromptTokens };
-		return this.instantiationService.createInstance(OpenAIEndpoint, newModelInfo, this._apiKey, this._modelUrl);
+		const newModelInfo = mixin(deepClone(this.modelMetadata), { capabilities: { limits: { max_prompt_tokens: modelMaxPromptTokens } } });
+		return this.instantiationService.createInstance(OpenAIEndpoint, newModelInfo as IChatModelInformation, this._apiKey, this._modelUrl);
 	}
 
 	public override async makeChatRequest2(options: IMakeChatRequestOptions, token: CancellationToken): Promise<ChatResponse> {
