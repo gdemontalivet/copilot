@@ -126,7 +126,7 @@ export class AzureTestEndpoint extends ChatEndpoint {
 
 	override cloneWithTokenOverride(modelMaxPromptTokens: number): IChatEndpoint {
 		const newModelInfo = mixin(deepClone(this.modelMetadata), { capabilities: { limits: { max_prompt_tokens: modelMaxPromptTokens } } });
-		return this.instantiationService.createInstance(AzureTestEndpoint, newModelInfo as IChatModelInformation);
+		return this.instantiationService.createInstance(AzureTestEndpoint, newModelInfo.id);
 	}
 
 	protected override getCompletionsCallback(): RawMessageConversionCallback | undefined {

@@ -217,7 +217,7 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 		// (Patches 34–39) and the classifier-driven router. Resolution
 		// happens per-turn because the classifier's output depends on
 		// the message payload.
-		const resolution = await this._resolveRouting(messages, token);
+		const resolution = await this._resolveRouting(messages as any, token);
 		const target = resolution.target;
 		this._logService.trace(`[BYOKAutoLMProvider] Delegating to ${target.vendor}/${target.id} (${target.name})`);
 
@@ -236,11 +236,11 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 		}
 
 		const response = await target.sendRequest(
-			messages,
+			messages as any,
 			{
 				modelOptions: options.modelOptions,
 				toolMode: options.toolMode,
-				tools: options.tools,
+				tools: options.tools as any,
 				justification: 'BYOK Auto delegating to configured default model',
 			},
 			token,
@@ -311,7 +311,7 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 			const classifier = await this._getOrCreateClassifier();
 			if (classifier) {
 				try {
-					const resolution = await this._resolveViaClassifier(classifier, messages, token);
+					const resolution = await this._resolveViaClassifier(classifier, messages as any, token);
 					if (resolution) {
 						return resolution;
 					}

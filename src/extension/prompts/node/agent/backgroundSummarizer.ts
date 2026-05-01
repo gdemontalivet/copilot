@@ -57,7 +57,7 @@ export const BackgroundSummarizationThresholds = {
 	 * ahead of the budget without relying on foreground compaction.
 	 */
 	emergency: 0.90,
-} as const;
+}
 
 /**
  * Decide whether to kick off post-render background compaction.
@@ -203,7 +203,7 @@ export const TieredCompactionThresholds = {
 	tier1Confirmed: 0.65,
 	tier2Confirmed: 0.75,
 	tier3Confirmed: 0.85,
-} as const;
+}
 
 /**
  * Adaptive compaction thresholds for large-context models.
@@ -237,7 +237,7 @@ export function resolveCompactionThresholds(modelMaxPromptTokens?: number): type
 		tier1Confirmed: (LARGE_CONTEXT_TIER1_ABSOLUTE * 0.93) / max,
 		tier2Confirmed: (LARGE_CONTEXT_TIER2_ABSOLUTE * 0.93) / max,
 		tier3Confirmed: (LARGE_CONTEXT_TIER3_ABSOLUTE * 0.93) / max,
-	} as const;
+	}
 }
 
 /**

@@ -286,7 +286,7 @@ export class OpenAICompatibleTestEndpoint extends ChatEndpoint {
 
 	override cloneWithTokenOverride(modelMaxPromptTokens: number): IChatEndpoint {
 		const newModelInfo = mixin(deepClone(this.modelMetadata), { capabilities: { limits: { max_prompt_tokens: modelMaxPromptTokens } } });
-		return this.instantiationService.createInstance(OpenAICompatibleTestEndpoint, newModelInfo as IChatModelInformation);
+		return this.instantiationService.createInstance(OpenAICompatibleTestEndpoint, newModelInfo as unknown as IModelConfig);
 	}
 
 	protected override getCompletionsCallback(): RawMessageConversionCallback | undefined {
