@@ -1,0 +1,65 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync copilot extension from microsoft/vscode
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/microsoft/vscode.git /tmp/vscode
+          cd /tmp/vscode
+          git sparse-checkout set extensions/copilot
+          cd -
+          # `rsync --delete` mirrors upstream, meaning anything in ./ that
+          # doesn't exist in upstream's tree gets wiped. Exclude fork-specific
+          # top-level directories that MUST survive the mirror:
+          #   - `.git` / `.github` / `node_modules`: obvious build/VCS scaffolding
+          #   - `.cursor`:   Cursor IDE workspace rules, incl. the BYOK patch log
+          #                  (`.cursor/rules/byok-custom-patches.mdc`)
+          #   - `.agents`:   fork-custom agent skills (anthropic-sdk-upgrader,
+          #                  github-copilot-upgrader, launch, …) consumed by
+          #                  Cursor's agent runtime
+          rsync -a --delete \
+            --exclude='node_modules' \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.cursor' \
+            --exclude='.agents' \
+            /tmp/vscode/extensions/copilot/ ./
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+
+      - name: Apply BYOK patches
+        run: bash .github/scripts/apply-byok-patches.sh
+
+      - name: Commit and push if changed
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No upstream changes detected"
+          else
+            git commit -m "Sync upstream copilot extension + apply BYOK patches"
+            git push origin main
+          fi

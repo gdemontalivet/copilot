@@ -1,0 +1,35 @@
+npm warn Unknown project config "timeout". This will stop working in the next major version of npm.
+
+> copilot-chat@0.47.1 typecheck
+> npx tsc --noEmit --project tsconfig.json && npx tsc --noEmit --project test/simulation/workbench/tsconfig.json && npx tsc --noEmit --project tsconfig.worker.json && npx tsc --noEmit --project src/extension/completions-core/vscode-node/extension/src/copilotPanel/webView/tsconfig.json
+
+npm warn Unknown env config "timeout". This will stop working in the next major version of npm.
+npm warn Unknown project config "timeout". This will stop working in the next major version of npm.
+src/extension/byok/vscode-node/byokAutoProvider.ts(238,33): error TS2769: No overload matches this call.
+  Overload 1 of 2, '(messages: (LanguageModelChatMessage | LanguageModelChatMessage2)[], options?: LanguageModelChatRequestOptions | undefined, token?: CancellationToken | undefined): Thenable<...>', gave the following error.
+    Type 'readonly LanguageModelChatTool[] | undefined' is not assignable to type 'LanguageModelChatTool[] | undefined'.
+      The type 'readonly LanguageModelChatTool[]' is 'readonly' and cannot be assigned to the mutable type 'LanguageModelChatTool[]'.
+  Overload 2 of 2, '(messages: LanguageModelChatMessage[], options?: LanguageModelChatRequestOptions | undefined, token?: CancellationToken | undefined): Thenable<...>', gave the following error.
+    Argument of type '(LanguageModelChatMessage | LanguageModelChatMessage2)[]' is not assignable to parameter of type 'LanguageModelChatMessage[]'.
+      Type 'LanguageModelChatMessage | LanguageModelChatMessage2' is not assignable to type 'LanguageModelChatMessage'.
+        Type 'LanguageModelChatMessage2' is not assignable to type 'LanguageModelChatMessage'.
+          Types of property 'content' are incompatible.
+            Type '(LanguageModelTextPart | LanguageModelThinkingPart | LanguageModelDataPart | LanguageModelToolCallPart | LanguageModelToolResultPart)[]' is not assignable to type 'LanguageModelInputPart[]'.
+              Type 'LanguageModelTextPart | LanguageModelThinkingPart | LanguageModelDataPart | LanguageModelToolCallPart | LanguageModelToolResultPart' is not assignable to type 'LanguageModelInputPart'.
+                Type 'LanguageModelThinkingPart' is not assignable to type 'LanguageModelInputPart'.
+                  Type 'LanguageModelThinkingPart' is not assignable to type 'LanguageModelTextPart'.
+                    Types of property 'value' are incompatible.
+                      Type 'string | string[]' is not assignable to type 'string'.
+                        Type 'string[]' is not assignable to type 'string'.
+src/extension/chatSessions/copilotcli/node/copilotcliSession.ts(659,24): error TS2304: Cannot find name 'createEchoedSystemNotificationStripper'.
+src/extension/prompts/node/agent/backgroundSummarizer.ts(234,3): error TS2322: Type 'number' is not assignable to type '0.7'.
+src/extension/prompts/node/agent/backgroundSummarizer.ts(235,3): error TS2322: Type 'number' is not assignable to type '0.8'.
+src/extension/prompts/node/agent/backgroundSummarizer.ts(236,3): error TS2322: Type 'number' is not assignable to type '0.9'.
+src/extension/prompts/node/agent/backgroundSummarizer.ts(237,3): error TS2322: Type 'number' is not assignable to type '0.65'.
+src/extension/prompts/node/agent/backgroundSummarizer.ts(238,3): error TS2322: Type 'number' is not assignable to type '0.75'.
+src/extension/prompts/node/agent/backgroundSummarizer.ts(239,3): error TS2322: Type 'number' is not assignable to type '0.85'.
+src/platform/authentication/vscode-node/copilotTokenManager.ts(17,1): error TS6133: 'nowSeconds' is declared but its value is never read.
+src/platform/authentication/vscode-node/copilotTokenManager.ts(99,16): error TS6133: '_authShowWarnings' is declared but its value is never read.
+src/platform/endpoint/test/node/azureEndpoint.ts(129,70): error TS2345: Argument of type 'IChatModelInformation' is not assignable to parameter of type 'string'.
+src/platform/endpoint/test/node/openaiCompatibleEndpoint.ts(289,81): error TS2345: Argument of type 'IChatModelInformation' is not assignable to parameter of type 'IModelConfig'.
+  Type 'IChatModelInformation' is missing the following properties from type 'IModelConfig': useDeveloperRole, type, url, auth, overrides

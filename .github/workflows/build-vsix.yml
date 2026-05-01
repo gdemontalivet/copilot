@@ -1,0 +1,50 @@
+name: Build Extension VSIX
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # Run the build in London time so file mtimes inside the VSIX, `date`
+      # output, and Node `Date.toString()` match the maintainer's local wall
+      # clock instead of the runner's default UTC. Swap for another IANA zone
+      # (e.g. `America/New_York`) if the maintainer ever changes timezone.
+      TZ: Europe/London
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Apply Patch (Optional)
+        # If you prefer to apply the patch dynamically instead of committing it, 
+        # uncomment the line below. Otherwise, it uses the committed code.
+        # run: git apply my-byok-changes.patch
+        run: echo "Using committed code. If you want to apply a patch dynamically, update this step."
+
+      - name: Build Extension (VSIX)
+        run: |
+          npm run build
+          # Install vsce globally
+          npm install -g @vscode/vsce
+          # Package the extension
+          vsce package -o copilot-custom-build.vsix
+
+      - name: Upload VSIX Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: copilot-custom-build
+          path: copilot-custom-build.vsix
