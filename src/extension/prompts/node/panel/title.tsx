@@ -9,6 +9,7 @@ import { SafetyRules } from '../base/safetyRules';
 
 export interface TitlePromptProps extends BasePromptElementProps {
 	userRequest: string;
+	historyContext?: string;
 }
 
 export class TitlePrompt extends PromptElement<TitlePromptProps> {
@@ -16,7 +17,7 @@ export class TitlePrompt extends PromptElement<TitlePromptProps> {
 		return (
 			<>
 				<SystemMessage priority={1000}>
-					You are an expert in crafting ultra-compact titles for chatbot conversations. You are presented with a chat request, and you reply with only a brief title that captures the main topic of that request.<br />
+					You are an expert in crafting ultra-compact titles for chatbot conversations. You are presented with a chat request (and optionally its response or subsequent turns), and you reply with only a brief title that captures the main topic of that request.<br />
 					<SafetyRules />
 					<ResponseTranslationRules />
 					Write the title in sentence case, not title case. Preserve product names, abbreviations, code symbols, and proper nouns.<br />
@@ -35,7 +36,7 @@ export class TitlePrompt extends PromptElement<TitlePromptProps> {
 				<UserMessage priority={900}>
 					Please write a brief title for the following request:<br />
 					<br />
-					{this.props.userRequest}
+					{this.props.historyContext ? `Chat History:\n${this.props.historyContext}\n\nLatest Request:\n${this.props.userRequest}` : this.props.userRequest}
 				</UserMessage>
 			</>);
 	}
