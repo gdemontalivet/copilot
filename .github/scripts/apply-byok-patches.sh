@@ -3643,3 +3643,28 @@ export class BYOKStubChatEndpoint implements IChatEndpoint {
 
 console.log("Patched: BYOK stub chat endpoint for renderPromptElementJSON (45)");
 PATCH45_EOF
+
+# Patch 46: Auth change notification on getCopilotToken success
+# Fires fireAuthenticationChange when getCopilotToken successfully returns a token.
+# This ensures ConversationFeature activates properly with the BYOK fake token.
+node << 'PATCH46_EOF'
+const fs = require("fs");
+const f = "src/platform/authentication/common/authentication.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("this.fireAuthenticationChange('getCopilotToken success')")) {
+  console.log("authentication.ts BYOK getCopilotToken success patch already present, skipping");
+  process.exit(0);
+}
+
+const anchor = "const token = await this._tokenManager.getCopilotToken(force);\n\t\t\tthis._tokenStore.copilotToken = token;\n\t\t\tthis._copilotTokenError = undefined;\n\t\t\treturn token;";
+const replacement = "const token = await this._tokenManager.getCopilotToken(force);\n\t\t\tconst copilotTokenBefore = this._tokenStore.copilotToken;\n\t\t\tthis._tokenStore.copilotToken = token;\n\t\t\tthis._copilotTokenError = undefined;\n\t\t\tif (copilotTokenBefore?.token !== token.token || copilotTokenBefore?.sku !== token.sku || copilotTokenBefore?.username !== token.username) {\n\t\t\t\tthis.fireAuthenticationChange('getCopilotToken success');\n\t\t\t}\n\t\t\treturn token;";
+
+if (code.includes(anchor)) {
+  code = code.replace(anchor, replacement);
+  fs.writeFileSync(f, code);
+  console.log("Patched: authentication.ts BYOK getCopilotToken success notification (Patch 46)");
+} else {
+  console.warn("WARN: authentication.ts getCopilotToken anchor not found — skipping Patch 46");
+}
+PATCH46_EOF
