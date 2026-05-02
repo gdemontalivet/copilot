@@ -14,6 +14,7 @@ import { ILogService } from '../../log/common/logService';
 import { IFetcherService } from '../../networking/common/fetcherService';
 import { ITelemetryService } from '../../telemetry/common/telemetry';
 import { CopilotToken, createTestExtendedTokenInfo, ExtendedTokenInfo, TokenErrorNotificationId, TokenInfoOrError } from '../common/copilotToken';
+import { nowSeconds } from '../common/copilotTokenManager';
 import { BaseCopilotTokenManager } from '../node/copilotTokenManager';
 import { getAnyAuthSession } from './session';
 
@@ -95,7 +96,7 @@ export class VSCodeCopilotTokenManager extends BaseCopilotTokenManager {
 		}
 	}
 
-	public async getExtendedTokenInfo(): Promise<ExtendedTokenInfo> {
+	private async _authShowWarnings(): Promise<ExtendedTokenInfo> {
 		const tokenResult = await this._taskSingler.getOrCreate('auth', () => this._auth());
 		this.sendTokenResultErrorTelemetry(tokenResult);
 

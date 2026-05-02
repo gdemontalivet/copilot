@@ -5,7 +5,6 @@
 
 import { OpenAI } from '@vscode/prompt-tsx';
 import { TokenizerType } from '../../../../util/common/tokenizer';
-import { deepClone, mixin } from '../../../../util/vs/base/common/objects';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
 import { IAuthenticationService } from '../../../authentication/common/authentication';
 import { IChatMLFetcher } from '../../../chat/common/chatMLFetcher';
@@ -284,9 +283,8 @@ export class OpenAICompatibleTestEndpoint extends ChatEndpoint {
 		}
 	}
 
-	override cloneWithTokenOverride(modelMaxPromptTokens: number): IChatEndpoint {
-		const newModelInfo = mixin(deepClone(this.modelMetadata), { capabilities: { limits: { max_prompt_tokens: modelMaxPromptTokens } } });
-		return this.instantiationService.createInstance(OpenAICompatibleTestEndpoint, newModelInfo as unknown as IModelConfig);
+	override cloneWithTokenOverride(_modelMaxPromptTokens: number): IChatEndpoint {
+		return this.instantiationService.createInstance(OpenAICompatibleTestEndpoint, this.modelConfig);
 	}
 
 	protected override getCompletionsCallback(): RawMessageConversionCallback | undefined {

@@ -44,25 +44,23 @@ export interface IBackgroundSummarizationResult {
  * tests can reference the same numbers without repeating them.
  */
 export const BackgroundSummarizationThresholds = {
-	/** Trigger ratio for the non-inline path (no prompt-cache benefit). */
-	base: 0.80,
-	/** Minimum of the jittered warm-cache range for the inline path. */
+	/** Minimum of the jittered warm-cache range. */
 	warmJitterMin: 0.78,
 	/** Width of the jittered warm-cache range; together with `warmJitterMin` yields [0.78, 0.82). */
 	warmJitterSpan: 0.04,
 	/**
-	 * Cold-cache emergency ratio for the inline path. Above this we kick off
-	 * even without a warmed cache to avoid forcing a foreground sync compaction
-	 * on the next render. Tuned low enough that long-running sessions stay
-	 * ahead of the budget without relying on foreground compaction.
+	 * Cold-cache emergency ratio. Above this we kick off even without a warmed
+	 * cache to avoid forcing a foreground sync compaction on the next render.
+	 * Tuned low enough that long-running sessions stay ahead of the budget
+	 * without relying on foreground compaction.
 	 */
 	emergency: 0.90,
-}
+} as const;
 
 /**
  * Decide whether to kick off post-render background compaction.
  *
- * For the inline-summarization path prompt-cache parity matters, so we:
+ * Prompt-cache parity matters, so we:
  *   - require a completed tool call in this turn ("warm" cache) before
  *     firing at the normal, jittered ~0.80 threshold;
  *   - allow an emergency kick-off at >= 0.90 even with a cold cache to
@@ -72,20 +70,15 @@ export const BackgroundSummarizationThresholds = {
  * bar") — the goal is to avoid always firing at the exact same boundary,
  * not to kick off systematically earlier.
  *
- * The non-inline path forks its own prompt (no cache benefit) and keeps the
- * simple >= 0.80 behavior. `rng` is only consumed on the warm-cache inline
- * branch, which keeps deterministic tests straightforward.
+ * `rng` is only consumed on the warm-cache branch, which keeps deterministic
+ * tests straightforward.
  */
 export function shouldKickOffBackgroundSummarization(
 	postRenderRatio: number,
-	useInlineSummarization: boolean,
 	cacheWarm: boolean,
 	rng: () => number,
 ): boolean {
 	const t = BackgroundSummarizationThresholds;
-	if (!useInlineSummarization) {
-		return postRenderRatio >= t.base;
-	}
 	if (!cacheWarm) {
 		return postRenderRatio >= t.emergency;
 	}
@@ -203,7 +196,7 @@ export const TieredCompactionThresholds = {
 	tier1Confirmed: 0.65,
 	tier2Confirmed: 0.75,
 	tier3Confirmed: 0.85,
-}
+} as const;
 
 /**
  * Adaptive compaction thresholds for large-context models.
@@ -237,7 +230,7 @@ export function resolveCompactionThresholds(modelMaxPromptTokens?: number): type
 		tier1Confirmed: (LARGE_CONTEXT_TIER1_ABSOLUTE * 0.93) / max,
 		tier2Confirmed: (LARGE_CONTEXT_TIER2_ABSOLUTE * 0.93) / max,
 		tier3Confirmed: (LARGE_CONTEXT_TIER3_ABSOLUTE * 0.93) / max,
-	}
+	} as const;
 }
 
 /**

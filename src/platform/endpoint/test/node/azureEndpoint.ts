@@ -4,7 +4,6 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { TokenizerType } from '../../../../util/common/tokenizer';
-import { deepClone, mixin } from '../../../../util/vs/base/common/objects';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
 import { IAuthenticationService } from '../../../authentication/common/authentication';
 import { IChatMLFetcher } from '../../../chat/common/chatMLFetcher';
@@ -125,8 +124,7 @@ export class AzureTestEndpoint extends ChatEndpoint {
 	}
 
 	override cloneWithTokenOverride(modelMaxPromptTokens: number): IChatEndpoint {
-		const newModelInfo = mixin(deepClone(this.modelMetadata), { capabilities: { limits: { max_prompt_tokens: modelMaxPromptTokens } } });
-		return this.instantiationService.createInstance(AzureTestEndpoint, newModelInfo.id);
+		return this.instantiationService.createInstance(AzureTestEndpoint, this._azureModel);
 	}
 
 	protected override getCompletionsCallback(): RawMessageConversionCallback | undefined {
