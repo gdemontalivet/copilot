@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { ChatContext, CancellationToken, ChatTitleProvider as VscodeChatTitleProvider } from 'vscode';
+import type * as vscode from 'vscode';
 import { sessionResourceToId } from '../../../platform/chat/common/chatDebugFileLoggerService';
 import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';
 import { IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
@@ -16,7 +16,7 @@ import { ChatRequestTurn, ChatResponseTurn } from '../../../vscodeTypes';
 import { renderPromptElement } from '../../prompts/node/base/promptRenderer';
 import { TitlePrompt } from '../../prompts/node/panel/title';
 
-export class ChatTitleProvider implements VscodeChatTitleProvider {
+export class ChatTitleProvider implements vscode.ChatTitleProvider {
 
 	constructor(
 		@ILogService private readonly logService: ILogService,
@@ -26,8 +26,8 @@ export class ChatTitleProvider implements VscodeChatTitleProvider {
 	) { }
 
 	async provideChatTitle(
-		context: ChatContext,
-		token: CancellationToken,
+		context: vscode.ChatContext,
+		token: vscode.CancellationToken,
 	): Promise<string | undefined> {
 
 		// Get the first user message directly from the context
