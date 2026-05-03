@@ -12,7 +12,7 @@ import { CapturingToken } from '../../../platform/requestLogger/common/capturing
 import { IRequestLogger } from '../../../platform/requestLogger/common/requestLogger';
 import { URI } from '../../../util/vs/base/common/uri';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
-import { ChatRequestTurn, ChatResponseTurn } from '../../../vscodeTypes';
+import { ChatRequestTurn } from '../../../vscodeTypes';
 import { renderPromptElement } from '../../prompts/node/base/promptRenderer';
 import { TitlePrompt } from '../../prompts/node/panel/title';
 
@@ -32,25 +32,9 @@ export class ChatTitleProvider implements vscode.ChatTitleProvider {
 
 		// Get the first user message directly from the context
 		// Use instanceof to properly check if the first item is a ChatRequestTurn
-		const firstRequest = context.history.find((item: any) => item instanceof ChatRequestTurn);
+		const firstRequest = context.history.find(item => item instanceof ChatRequestTurn);
 		if (!firstRequest) {
 			return '';
-		}
-
-		// Grab up to 3 turns to give the model better context if the first request is generic
-		let historyContext = '';
-		if (context.history.length > 1) {
-			const recentTurns = context.history.slice(0, 3);
-			historyContext = recentTurns.map((item: any) => {
-				if (item instanceof ChatRequestTurn) {
-					return `User: ${item.prompt}`;
-				} else if (item instanceof ChatResponseTurn) {
-					// We only need a snippet of the response
-					const text = item.response.map((r: any) => r.value).join('\n').substring(0, 150);
-					return `Assistant: ${text}...`;
-				}
-				return '';
-			}).join('\n');
 		}
 
 		// Extract the parent session ID from the context's sessionResource (provided by VS Code)
@@ -58,7 +42,7 @@ export class ChatTitleProvider implements vscode.ChatTitleProvider {
 		const parentChatSessionId = sessionResource ? sessionResourceToId(URI.from(sessionResource)) : undefined;
 
 		const endpoint = await this.endpointProvider.getChatEndpoint('copilot-fast');
-		const { messages } = await renderPromptElement(this.instantiationService, endpoint, TitlePrompt, { userRequest: firstRequest.prompt, historyContext });
+		const { messages } = await renderPromptElement(this.instantiationService, endpoint, TitlePrompt, { userRequest: firstRequest.prompt });
 
 		const capturingToken = new CapturingToken(
 			'title',

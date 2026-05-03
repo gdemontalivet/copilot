@@ -2,8 +2,7 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-import type { LanguageModelChatInformation, LanguageModelDataPart, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, LanguageModelToolResultPart } from '../../../vscodeTypes';
-import { Disposable } from '../../../util/vs/base/common/lifecycle';
+import type { Disposable, LanguageModelChatInformation, LanguageModelDataPart, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, LanguageModelToolResultPart } from 'vscode';
 import { CopilotToken } from '../../../platform/authentication/common/copilotToken';
 import { ICAPIClientService } from '../../../platform/endpoint/common/capiClient';
 import { EndpointEditToolName, IChatModelInformation, ModelSupportedEndpoint } from '../../../platform/endpoint/common/endpointProvider';
@@ -95,9 +94,7 @@ export function resolveModelInfo(modelId: string, providerName: string, knownMod
 		knownModelInfo = knownModels[modelId];
 	}
 	const modelName = knownModelInfo?.name || modelId;
-	const maxInputTokens = knownModelInfo?.maxInputTokens || 128000;
-	const maxOutputTokens = knownModelInfo?.maxOutputTokens || 8192;
-	const contextWinow = maxInputTokens + maxOutputTokens;
+	const contextWinow = knownModelInfo ? (knownModelInfo.maxInputTokens + knownModelInfo.maxOutputTokens) : 128000;
 	const modelInfo: IChatModelInformation = {
 		id: modelId,
 		name: modelName,
@@ -116,8 +113,8 @@ export function resolveModelInfo(modelId: string, providerName: string, knownMod
 			tokenizer: TokenizerType.O200K,
 			limits: {
 				max_context_window_tokens: contextWinow,
-				max_prompt_tokens: maxInputTokens,
-				max_output_tokens: maxOutputTokens
+				max_prompt_tokens: knownModelInfo?.maxInputTokens || 100000,
+				max_output_tokens: knownModelInfo?.maxOutputTokens || 8192
 			}
 		},
 		is_chat_default: false,
@@ -144,8 +141,8 @@ export function byokKnownModelToAPIInfo(providerName: string, id: string, capabi
 		id,
 		name: capabilities.name,
 		version: '1.0.0',
-		maxOutputTokens: capabilities.maxOutputTokens || 8192,
-		maxInputTokens: capabilities.maxInputTokens || 128000,
+		maxOutputTokens: capabilities.maxOutputTokens,
+		maxInputTokens: capabilities.maxInputTokens,
 		// `detail` is intentionally omitted: when this model is resolved
 		// via a configured provider group, `LanguageModelsService` will
 		// fall back to the group name so multiple instances of the same

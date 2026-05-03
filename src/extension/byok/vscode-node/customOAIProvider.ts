@@ -86,8 +86,7 @@ export abstract class AbstractCustomOAIBYOKModelProvider extends AbstractOpenAIC
 	protected async migrateConfig(configKey: Config<IStringDictionary<_CustomOAIModelConfig>>, providerName: string, providerGroupName: string): Promise<void> {
 		// Check if migration has already been completed
 		const migrationKey = `copilot-byok-migration-${providerName}-${configKey}`;
-		const globalState = (this._extensionContext as any).globalState;
-		const migrationCompleted = globalState?.get?.(migrationKey, false);
+		const migrationCompleted = this._extensionContext.globalState.get<boolean>(migrationKey, false);
 		if (migrationCompleted) {
 			return;
 		}
@@ -105,7 +104,7 @@ export abstract class AbstractCustomOAIBYOKModelProvider extends AbstractOpenAIC
 				await this.configureDefaultGroupIfExists(providerGroupName, { models: customOAIModelConfigs, apiKey: apiKey || undefined });
 			}
 			// Mark migration as completed instead of deleting the config
-			await globalState?.update?.(migrationKey, true);
+			await this._extensionContext.globalState.update(migrationKey, true);
 		}
 	}
 
@@ -131,24 +130,21 @@ export abstract class AbstractCustomOAIBYOKModelProvider extends AbstractOpenAIC
 	}
 
 	protected override async createOpenAIEndPoint(model: OpenAICompatibleLanguageModelChatInformation<CustomOAIModelProviderConfig>): Promise<OpenAIEndpoint> {
-		const modelId = (model as any).id;
-		const modelUrl = (model as any).url;
-		const modelName = (model as any).name;
-		const url = this.resolveUrl(modelId, modelUrl);
-		const modelConfiguration = model.configuration?.models?.find(m => m.id === modelId);
+		const url = this.resolveUrl(model.id, model.url);
+		const modelConfiguration = model.configuration?.models?.find(m => m.id === model.id);
 		const modelCapabilities = {
-			maxInputTokens: modelConfiguration?.maxInputTokens ?? (model as any).maxInputTokens ?? 128000,
-			maxOutputTokens: modelConfiguration?.maxOutputTokens ?? (model as any).maxOutputTokens ?? 8192,
-			toolCalling: !!modelConfiguration?.toolCalling || false,
-			vision: !!modelConfiguration?.vision || false,
-			name: modelName,
+			maxInputTokens: model.maxInputTokens,
+			maxOutputTokens: model.maxOutputTokens,
+			toolCalling: !!model.capabilities?.toolCalling || false,
+			vision: !!model.capabilities?.imageInput || false,
+			name: model.name,
 			url,
 			thinking: modelConfiguration?.thinking ?? false,
 			streaming: modelConfiguration?.streaming,
 			requestHeaders: modelConfiguration?.requestHeaders,
 			zeroDataRetentionEnabled: modelConfiguration?.zeroDataRetentionEnabled
 		};
-		const modelInfo = resolveModelInfo(modelId, this._name, undefined, modelCapabilities);
+		const modelInfo = resolveModelInfo(model.id, this._name, undefined, modelCapabilities);
 		if (modelCapabilities?.url?.includes('/responses')) {
 			modelInfo.supported_endpoints = [
 				ModelSupportedEndpoint.ChatCompletions,
