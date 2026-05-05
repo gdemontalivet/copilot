@@ -1,0 +1,73 @@
+---
+description: Build & deploy via GitHub Actions — never build vsix locally
+alwaysApply: true
+---
+
+# Build & Deploy — VSIX is built by CI, not locally
+
+This repo's `.vsix` package is built **exclusively** by the
+`.github/workflows/build-vsix.yml` GitHub Action, which triggers on every
+push to `main` and on `workflow_dispatch`. The maintainer installs the
+artifact produced by that workflow into VS Code.
+
+**You MUST NOT** run `npm run build`, `vsce package`, or
+`code --install-extension` as part of any task. Local builds are slow
+(~3–4 minutes for `npm run build`), produce a 32 MB+ bundle the user has
+no use for, and bypass the timezone normalization (`TZ=Europe/London`)
+that the CI workflow applies so file mtimes match the maintainer's local
+wall clock.
+
+## Deployment flow (the only one you should follow)
+
+1. Make and verify code changes (source edits + corresponding patch in
+   `.github/scripts/apply-byok-patches.sh` — see
+   [byok-custom-patches](mdc:byok-custom-patches.mdc)).
+2. Run the patch script locally to confirm idempotency:
+   `bash .github/scripts/apply-byok-patches.sh` — must report every patch
+   either as "Patched: …" (fresh apply) or "… already present, skipping"
+   (idempotent re-apply). It must NOT exit non-zero.
+3. Run any relevant unit tests with `npx vitest run <spec>`.
+4. Commit + push to `main` (or open a PR; merging triggers the workflow).
+5. The workflow uploads `copilot-custom-build.vsix` as an artifact named
+   `copilot-custom-build`. The maintainer downloads and installs it from
+   the workflow run page.
+
+## What is OK locally
+
+- `npm run compile` (esbuild dev build) is acceptable when the user
+  explicitly asks for it or when you need to verify a tricky bundling
+  question that the typecheck can't answer. Most of the time the
+  TypeScript compiler (`npm run typecheck`) is enough — esbuild is more
+  permissive than `tsc` so passing typecheck is a stronger signal than
+  passing esbuild.
+- `npx tsc --noEmit -p tsconfig.json` for typecheck on a focused subset.
+- Vitest specs.
+- Reading the existing `dist/extension.js` to grep for symbols when
+  diagnosing bundle-shape problems.
+
+## What is NOT OK locally
+
+- `npm run build` (full production build — slow, no purpose locally).
+- `npm run watch:*` (only useful in long-running dev sessions you didn't
+  start).
+- `vsce package`.
+- `code --install-extension <vsix>` — only the maintainer installs.
+- Any attempt to "verify the fix works" by rebuilding and reinstalling.
+  The way to verify is push → wait for CI → maintainer installs → user
+  reports back.
+
+## Version bump
+
+The `.github/scripts/apply-byok-patches.sh` script bumps
+`package.json → version` by one patch level on every run (Patch 3). You do
+NOT need to manually bump it. Each push to `main` produces a new vsix
+whose version is one higher than the previous CI build, which is what
+makes VS Code prefer it over the built-in Copilot Chat extension.
+
+## Honest-feedback expectation
+
+If a task requires verifying that a code change actually works at
+runtime (e.g. "does the model picker now populate?"), say so honestly.
+The right answer is "I've made the change; once you push and install the
+new vsix, you'll know." Do NOT pretend a code change has been verified
+when the only way to verify it is end-to-end installation.

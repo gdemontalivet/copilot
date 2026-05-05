@@ -3668,3 +3668,32 @@ if (code.includes(anchor)) {
   console.warn("WARN: authentication.ts getCopilotToken anchor not found — skipping Patch 46");
 }
 PATCH46_EOF
+
+# Patch 47: Don't wipe model picker on first BYOK token mint
+# Patch 46 fires fireAuthenticationChange on the very first getCopilotToken
+# success because copilotTokenBefore is undefined !== "fake-token". The
+# listener in languageModelAccess.ts then wipes _currentModels because
+# anyGitHubSession is undefined in pure BYOK mode (no real GitHub auth).
+# This guards the wipe so it only fires when BOTH GitHub session AND copilot
+# token are absent — i.e. genuine sign-out, not BYOK-with-fake-token.
+node << 'PATCH47_EOF'
+const fs = require("fs");
+const f = "src/extension/conversation/vscode-node/languageModelAccess.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: don't wipe model picker on first BYOK token mint")) {
+  console.log("languageModelAccess.ts BYOK wipe-guard patch already present, skipping");
+  process.exit(0);
+}
+
+const anchor = "this._register(this._authenticationService.onDidAuthenticationChange(() => {\n\t\t\tif (!this._authenticationService.anyGitHubSession) {\n\t\t\t\tthis._currentModels = [];\n\t\t\t}\n\t\t\t// Auth changed which means models could've changed. Fire the event\n\t\t\tthis._onDidChange.fire();\n\t\t}));";
+const replacement = "this._register(this._authenticationService.onDidAuthenticationChange(() => {\n\t\t\t// ─── BYOK CUSTOM PATCH: don't wipe model picker on first BYOK token mint ─\n\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t\t// In pure BYOK mode `anyGitHubSession` is undefined (no real GitHub\n\t\t\t// auth) but `copilotToken` is the fake from Patch 1. Patch 46 fires\n\t\t\t// `fireAuthenticationChange` on the first `getCopilotToken` success,\n\t\t\t// which used to wipe `_currentModels` here and leave the picker empty\n\t\t\t// until the next models refresh — which under the fake-token bypass\n\t\t\t// (Patch 5) may never fire again in this session. Keep the wipe for\n\t\t\t// genuine sign-out (both GitHub session AND copilot token absent).\n\t\t\tif (!this._authenticationService.anyGitHubSession && !this._authenticationService.copilotToken) {\n\t\t\t\tthis._currentModels = [];\n\t\t\t}\n\t\t\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────\n\t\t\t// Auth changed which means models could've changed. Fire the event\n\t\t\tthis._onDidChange.fire();\n\t\t}));";
+
+if (code.includes(anchor)) {
+  code = code.replace(anchor, replacement);
+  fs.writeFileSync(f, code);
+  console.log("Patched: languageModelAccess.ts BYOK wipe-guard (Patch 47)");
+} else {
+  console.warn("WARN: languageModelAccess.ts onDidAuthenticationChange anchor not found — skipping Patch 47");
+}
+PATCH47_EOF

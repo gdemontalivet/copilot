@@ -159,9 +159,19 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 		};
 		this._register(vscode.lm.registerLanguageModelChatProvider('copilot', provider));
 		this._register(this._authenticationService.onDidAuthenticationChange(() => {
-			if (!this._authenticationService.anyGitHubSession) {
+			// ─── BYOK CUSTOM PATCH: don't wipe model picker on first BYOK token mint ─
+			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			// In pure BYOK mode `anyGitHubSession` is undefined (no real GitHub
+			// auth) but `copilotToken` is the fake from Patch 1. Patch 46 fires
+			// `fireAuthenticationChange` on the first `getCopilotToken` success,
+			// which used to wipe `_currentModels` here and leave the picker empty
+			// until the next models refresh — which under the fake-token bypass
+			// (Patch 5) may never fire again in this session. Keep the wipe for
+			// genuine sign-out (both GitHub session AND copilot token absent).
+			if (!this._authenticationService.anyGitHubSession && !this._authenticationService.copilotToken) {
 				this._currentModels = [];
 			}
+			// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────
 			// Auth changed which means models could've changed. Fire the event
 			this._onDidChange.fire();
 		}));

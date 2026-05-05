@@ -129,9 +129,10 @@ export class VertexGeminiLMProvider extends GeminiNativeBYOKLMProvider {
 
 	protected override createClient(apiKey: string, model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>): GoogleGenAI {
 		const vertexModel = model as ExtendedLanguageModelChatInformation<VertexGeminiProviderConfig>;
-		const modelConfig = vertexModel.configuration?.models?.find(m => m.id === vertexModel.id);
+		const vertexModelId = (vertexModel as unknown as { id: string }).id;
+		const modelConfig = vertexModel.configuration?.models?.find(m => m.id === vertexModelId);
 		if (!modelConfig) {
-			throw new Error(`Configuration not found for Vertex Gemini model ${vertexModel.id}`);
+			throw new Error(`Configuration not found for Vertex Gemini model ${vertexModelId}`);
 		}
 
 		const { projectId, locationId } = modelConfig;
@@ -147,7 +148,7 @@ export class VertexGeminiLMProvider extends GeminiNativeBYOKLMProvider {
 				this._logService.error(`[VertexGemini] Failed to parse credentials JSON: ${e}`);
 				throw new Error('Invalid Vertex Gemini credentials: expected a service-account JSON object.');
 			}
-			this._logService.trace(`[VertexGemini] Using SA credentials (type: ${credentials.type ?? 'unknown'}) for ${vertexModel.id} @ ${locationId}`);
+			this._logService.trace(`[VertexGemini] Using SA credentials (type: ${credentials.type ?? 'unknown'}) for ${vertexModelId} @ ${locationId}`);
 			return new GoogleGenAI({
 				vertexai: true,
 				project: projectId,
@@ -163,7 +164,7 @@ export class VertexGeminiLMProvider extends GeminiNativeBYOKLMProvider {
 		// Case 2: raw Bearer access token (already minted, e.g. via `gcloud
 		// auth print-access-token`). Inject as an HTTP header and disable the
 		// SDK's default ADC lookup by passing a no-op `googleAuthOptions`.
-		this._logService.trace(`[VertexGemini] Using pre-minted Bearer token for ${vertexModel.id} @ ${locationId}`);
+		this._logService.trace(`[VertexGemini] Using pre-minted Bearer token for ${vertexModelId} @ ${locationId}`);
 		return new GoogleGenAI({
 			vertexai: true,
 			project: projectId,
@@ -201,11 +202,6 @@ export class VertexGeminiLMProvider extends GeminiNativeBYOKLMProvider {
 					toolCalling: true,
 					vision,
 				}),
-				// Default every discovered model to hidden so users don't have to
-				// un-tick dozens of Gemini variants after configuring the provider.
-				// The "Manage Models" sheet still lets them flip the ones they want
-				// back on individually.
-				isUserSelectable: false,
 				configuration: {
 					models: [{ ...modelConfig }],
 				},

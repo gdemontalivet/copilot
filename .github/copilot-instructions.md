@@ -1,5 +1,37 @@
 # Copilot Full BYOK - Copilot Instructions
 
+## ⚠️ Build & Deploy — CI Builds the VSIX, Not You
+
+**Never run `npm run build`, `vsce package`, or `code --install-extension` locally.**
+The `.github/workflows/build-vsix.yml` GitHub Action is the single source of truth
+for VSIX packages. It triggers on every push to `main` (and on `workflow_dispatch`),
+applies `TZ=Europe/London` so file mtimes match the maintainer's wall clock, and
+uploads `copilot-custom-build.vsix` as an artifact. The maintainer installs that
+artifact into VS Code.
+
+**Deployment flow:**
+1. Edit source + add idempotent patch in `.github/scripts/apply-byok-patches.sh`.
+2. Re-run `bash .github/scripts/apply-byok-patches.sh` locally — confirm every
+   patch reports either "Patched: …" or "… already present, skipping", and the
+   script exits 0.
+3. Commit + push to `main` (or open a PR; merge triggers the workflow).
+4. CI builds the VSIX, uploads it as `copilot-custom-build`. Done.
+
+**Local commands that ARE OK:**
+- `npm run compile` — esbuild dev build (fast-ish, useful for quick sanity checks).
+- `npx tsc --noEmit -p tsconfig.json` — focused typecheck.
+- `npx vitest run <spec>` — unit tests.
+
+**Local commands that are NOT OK:**
+- `npm run build` — full production build, ~3–4 min, produces a 32 MB+ bundle
+  the user has no use for.
+- `vsce package` / `code --install-extension` — only the maintainer installs.
+- "Let me rebuild and reinstall to verify" — verification happens after CI +
+  maintainer install. Be honest about that limit.
+
+The version bump is automated by Patch 3 in the patch script — never bump
+`package.json → version` by hand.
+
 ## Project Overview
 
 This is **Copilot Full BYOK** — a custom fork of the GitHub Copilot Chat extension for Visual Studio Code. It is rebased on upstream `microsoft/vscode` (`extensions/copilot/`) and adds Bring Your Own Key (BYOK) functionality so you can use your own API keys for Gemini, Anthropic (including Vertex), OpenAI, and other providers **without a Copilot subscription**.
