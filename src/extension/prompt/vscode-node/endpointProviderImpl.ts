@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import * as vscode from 'vscode';
 import { LanguageModelChat, type ChatRequest } from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
@@ -66,8 +67,30 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 		this._logService.trace(`Resolving chat model`);
 
 		if (typeof requestOrFamilyOrModel === 'string') {
-			const modelMetadata = await this._modelFetcher.getChatModelFromFamily(requestOrFamilyOrModel);
-			return this.getOrCreateChatEndpointInstance(modelMetadata!);
+			try {
+				const modelMetadata = await this._modelFetcher.getChatModelFromFamily(requestOrFamilyOrModel);
+				return this.getOrCreateChatEndpointInstance(modelMetadata!);
+			} catch (err) {
+				// ─── BYOK CUSTOM PATCH: family fallback in BYOK mode ────────────
+				// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+				// Under the fake-token bypass (Patch 1) `_familyMap` /
+				// `_copilotBaseModel` are never populated, so resolving the
+				// 'copilot-base' / 'copilot-fast' families throws. Patches
+				// 15/16/18/45 already cover the well-known callsites, but
+				// dozens more (codeMapper, search intent, title generator,
+				// rename suggestions, chat variables, codebase tool calling,
+				// promptCategorizer, intentDetector, devContainerConfigGenerator,
+				// commandToConfigConverter, settingsEditorSearchService, etc.)
+				// still call this method directly. Catch the throw here once
+				// and substitute a registered BYOK chat endpoint so every
+				// downstream feature that asks for a generic family can run.
+				const fallback = await this._byokFamilyFallback(requestOrFamilyOrModel);
+				if (fallback) {
+					return fallback;
+				}
+				throw err;
+				// ─── END BYOK CUSTOM PATCH ──────────────────────────────────
+			}
 		}
 
 		const model = 'model' in requestOrFamilyOrModel ? requestOrFamilyOrModel.model : requestOrFamilyOrModel;
@@ -120,4 +143,116 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 		const models: IChatModelInformation[] = await this._modelFetcher.getAllChatModels();
 		return models.map(model => this.getOrCreateChatEndpointInstance(model));
 	}
+
+	// ─── BYOK CUSTOM PATCH: family fallback resolver ────────────────────────────
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Picks a registered BYOK chat model when the upstream `_modelFetcher`
+	// can't resolve a generic family ('copilot-base' / 'copilot-fast').
+	//
+	// Both 'copilot-base' and 'copilot-fast' callsites in upstream are
+	// background helper tasks (title generation, intent detection, prompt
+	// categorisation, summarisation, code-mapper full-rewrite, search-intent
+	// keyword extraction, devcontainer / debug-config generation, settings-
+	// search, etc.) — almost always short prompts where the cheapest, fastest
+	// model wins on every axis. Selection priority is therefore by *capability
+	// class* first (cheap & fast: gemini-3.1-flash-lite > any flash/haiku/mini/
+	// lite > anything tool-capable) and by vendor only as a tiebreaker. The
+	// chosen model is wrapped in `ExtensionContributedChatEndpoint` (same
+	// shape used for non-copilot vendors at line ~80) so every IChatEndpoint
+	// consumer sees a real endpoint with a working tokenizer / send pipeline.
+	//
+	// `byokauto` is excluded: routing the family fallback through the synthetic
+	// Auto vendor would re-enter `provideLanguageModelChatResponse` and risk
+	// infinite recursion when a BYOK Auto delegation itself triggers a
+	// 'copilot-fast' lookup (e.g. for chat-title generation).
+	private static readonly _BYOK_FAMILY_FALLBACK_NEEDLES: readonly string[] = [
+		// Most-preferred → least-preferred. Each needle is matched
+		// case-insensitively against `id` AND `family`. First non-empty match
+		// wins. All variants here are intentionally cheap+fast classes.
+		// Ordered to spare rate-limited resources: DeepSeek first (no
+		// per-minute pressure on the maintainer's setup), then Vertex-routed
+		// Gemini Flash (Vertex projects don't share the direct-API 15rpm cap),
+		// then direct Gemini Flash variants only as a fallback to the
+		// fallback. Anthropic Haiku / OpenAI mini classes follow.
+		'deepseek-chat',
+		'deepseek',
+		'gemini-3.1-flash-lite',
+		'gemini-3-flash-lite',
+		'gemini-flash-lite',
+		'flash-lite',
+		'gemini-3.1-flash',
+		'gemini-3-flash',
+		'gemini-flash',
+		'flash',
+		'claude-haiku',
+		'haiku',
+		'gpt-5-nano', 'gpt-4.1-nano', 'gpt-4o-mini',
+		'mini',
+		'lite',
+	];
+	private static readonly _BYOK_FAMILY_FALLBACK_VENDOR_PRIORITY: readonly string[] = [
+		// `customoai` first because the maintainer's DeepSeek is configured
+		// there; OpenRouter second (also generally cheap and provider-pooled).
+		// `vertexgemini` outranks direct `gemini` so we route Flash through
+		// Vertex when both are configured (avoids the direct-API 15rpm cap on
+		// the maintainer's free Gemini key).
+		'customoai', 'openrouter', 'vertexgemini', 'gemini',
+		'vertexanthropic', 'anthropic', 'openai',
+	];
+	private readonly _byokFamilyFallbackCache = new Map<string, IChatEndpoint>();
+
+	private async _byokFamilyFallback(family: ChatEndpointFamily): Promise<IChatEndpoint | undefined> {
+		const cached = this._byokFamilyFallbackCache.get(family);
+		if (cached) {
+			return cached;
+		}
+		try {
+			const all = await vscode.lm.selectChatModels({});
+			const eligible = all.filter(m => m.vendor && m.vendor !== 'byokauto' && m.vendor !== 'copilot');
+			if (eligible.length === 0) {
+				return undefined;
+			}
+			let chosen: vscode.LanguageModelChat | undefined;
+			let matchedNeedle: string | undefined;
+			for (const needle of ProductionEndpointProvider._BYOK_FAMILY_FALLBACK_NEEDLES) {
+				const lower = needle.toLowerCase();
+				const matches = eligible.filter(m =>
+					(m.id ?? '').toLowerCase().includes(lower) ||
+					(m.family ?? '').toLowerCase().includes(lower)
+				);
+				if (matches.length === 0) {
+					continue;
+				}
+				for (const v of ProductionEndpointProvider._BYOK_FAMILY_FALLBACK_VENDOR_PRIORITY) {
+					const hit = matches.find(m => m.vendor === v);
+					if (hit) {
+						chosen = hit;
+						matchedNeedle = needle;
+						break;
+					}
+				}
+				chosen ??= matches[0];
+				matchedNeedle ??= needle;
+				break;
+			}
+			if (!chosen) {
+				for (const v of ProductionEndpointProvider._BYOK_FAMILY_FALLBACK_VENDOR_PRIORITY) {
+					const hit = eligible.find(m => m.vendor === v);
+					if (hit) {
+						chosen = hit;
+						break;
+					}
+				}
+				chosen ??= eligible[0];
+			}
+			const endpoint = this._instantiationService.createInstance(ExtensionContributedChatEndpoint, chosen);
+			this._logService.info(`[BYOK family-fallback] '${family}' -> ${chosen.vendor}/${chosen.id}${matchedNeedle ? ` (matched '${matchedNeedle}')` : ' (vendor-priority)'}`);
+			this._byokFamilyFallbackCache.set(family, endpoint);
+			return endpoint;
+		} catch (err) {
+			this._logService.warn(`[BYOK family-fallback] failed to resolve '${family}': ${(err as Error)?.message ?? err}`);
+			return undefined;
+		}
+	}
+	// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
 }
