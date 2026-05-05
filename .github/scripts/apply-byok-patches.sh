@@ -3757,3 +3757,82 @@ code = code.replace(helperAnchor, helperReplacement);
 fs.writeFileSync(f, code);
 console.log("Patched: endpointProviderImpl BYOK family fallback (Patch 48)");
 PATCH48_EOF
+
+# Patch 49: object-spread breaks getter-based endpoints
+# Three upstream callsites do `{ ...endpoint, modelMaxPromptTokens: X }` to
+# rebudget an endpoint inline before passing it into PromptRenderer.create().
+# Object-spread only copies OWN ENUMERABLE properties — every getter on the
+# class prototype is silently dropped. ExtensionContributedChatEndpoint (used
+# for every non-Copilot vendor in BYOK mode AND for Patch 48's family-fallback
+# substitutions) defines `tokenizer`, `model`, `family`, `version`,
+# `modelProvider`, `modelMaxPromptTokens`, `maxOutputTokens`, etc. as class
+# getters. The spread leaves the resulting plain object with `tokenizer ===
+# undefined`, and `PromptRenderer`'s constructor calls
+# `tokenizerProvider.acquireTokenizer(endpoint)` which switch-cases on
+# `endpoint.tokenizer` and throws "Unknown tokenizer: undefined". Symptom in
+# the chat: "all my tools are currently failing with a system error
+# (Unknown tokenizer: undefined)" — every read_file / run_in_terminal /
+# grep_search / etc. blows up because tool-result rendering walks through
+# this path. Replaces all three sites with the proper `cloneWithTokenOverride`
+# method (already implemented by every IChatEndpoint), which preserves the
+# prototype + getters.
+node << 'PATCH49_EOF'
+const fs = require("fs");
+
+// (A) src/extension/prompts/node/panel/chatVariables.tsx
+{
+  const f = "src/extension/prompts/node/panel/chatVariables.tsx";
+  let code = fs.readFileSync(f, "utf8");
+  if (code.includes("BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49)")) {
+    console.log("chatVariables.tsx Patch 49 already present, skipping");
+  } else {
+    const anchor = "\t\tconst toolTokens = await endpoint.acquireTokenizer().countToolTokens([tool]);\n\t\tconst { messages } = await PromptRenderer.create(this.instantiationService, { ...endpoint, modelMaxPromptTokens: endpoint.modelMaxPromptTokens - toolTokens }, PanelChatBasePrompt, argFetchProps).render();";
+    const replacement = "\t\tconst toolTokens = await endpoint.acquireTokenizer().countToolTokens([tool]);\n\t\t// ─── BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49) ───\n\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t// `{ ...endpoint, modelMaxPromptTokens: ... }` only copies OWN ENUMERABLE\n\t\t// properties. `ExtensionContributedChatEndpoint` (used for every non-Copilot\n\t\t// vendor in BYOK mode) defines `tokenizer` / `model` / `family` / etc. as\n\t\t// CLASS GETTERS on the prototype, which the spread silently drops. The\n\t\t// resulting plain object has `tokenizer === undefined`, and `PromptRenderer`'s\n\t\t// constructor then explodes on `tokenizerProvider.acquireTokenizer(endpoint)`\n\t\t// with \"Unknown tokenizer: undefined\" — surfaced as \"all my tools are failing\n\t\t// with a system error\" because tool result rendering walks through this path.\n\t\t// Use `cloneWithTokenOverride()` instead, which every IChatEndpoint\n\t\t// implements and which preserves the prototype + getters.\n\t\tconst budgetedEndpoint = endpoint.cloneWithTokenOverride(endpoint.modelMaxPromptTokens - toolTokens);\n\t\tconst { messages } = await PromptRenderer.create(this.instantiationService, budgetedEndpoint, PanelChatBasePrompt, argFetchProps).render();\n\t\t// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────────────────";
+    if (!code.includes(anchor)) {
+      console.warn("WARN: chatVariables.tsx anchor not found — skipping Patch 49 (A)");
+    } else {
+      code = code.replace(anchor, replacement);
+      fs.writeFileSync(f, code);
+      console.log("Patched: chatVariables.tsx cloneWithTokenOverride (Patch 49 A)");
+    }
+  }
+}
+
+// (B) src/extension/prompts/node/panel/toolCalling.tsx
+{
+  const f = "src/extension/prompts/node/panel/toolCalling.tsx";
+  let code = fs.readFileSync(f, "utf8");
+  if (code.includes("BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49)")) {
+    console.log("toolCalling.tsx Patch 49 already present, skipping");
+  } else {
+    const anchor = "export function sendInvokedToolTelemetry(instantiationService: IInstantiationService, endpoint: IChatEndpoint, telemetry: ITelemetryService, toolName: string, toolResult: LanguageModelToolResult2) {\n\t// Override the token budget to Infinity for telemetry counting to avoid truncation,\n\t// matching the prior behavior with modelMaxPromptTokens: Infinity\n\tconst endpointWithUnlimitedBudget: IChatEndpoint = {\n\t\t...endpoint,\n\t\tmodelMaxPromptTokens: Infinity,\n\t};";
+    const replacement = "export function sendInvokedToolTelemetry(instantiationService: IInstantiationService, endpoint: IChatEndpoint, telemetry: ITelemetryService, toolName: string, toolResult: LanguageModelToolResult2) {\n\t// Override the token budget to Infinity for telemetry counting to avoid truncation,\n\t// matching the prior behavior with modelMaxPromptTokens: Infinity\n\t// ─── BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49) ───\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// See the matching comment in chatVariables.tsx for the full rationale —\n\t// `{ ...endpoint, modelMaxPromptTokens: Infinity }` drops every prototype\n\t// getter on `ExtensionContributedChatEndpoint`, leaving `tokenizer === undefined`\n\t// which kills tool-telemetry rendering with \"Unknown tokenizer: undefined\".\n\tconst endpointWithUnlimitedBudget: IChatEndpoint = endpoint.cloneWithTokenOverride(Infinity);\n\t// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────────────────";
+    if (!code.includes(anchor)) {
+      console.warn("WARN: toolCalling.tsx anchor not found — skipping Patch 49 (B)");
+    } else {
+      code = code.replace(anchor, replacement);
+      fs.writeFileSync(f, code);
+      console.log("Patched: toolCalling.tsx cloneWithTokenOverride (Patch 49 B)");
+    }
+  }
+}
+
+// (C) src/extension/conversation/vscode-node/languageModelAccess.ts
+{
+  const f = "src/extension/conversation/vscode-node/languageModelAccess.ts";
+  let code = fs.readFileSync(f, "utf8");
+  if (code.includes("BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49)")) {
+    console.log("languageModelAccess.ts Patch 49 already present, skipping");
+  } else {
+    const anchor = "\t\t// Add safety rules to the prompt if it originates from outside the Copilot Chat extension, otherwise they already exist in the prompt.\n\t\tconst { messages, tokenCount } = await PromptRenderer.create(this._instantiationService, {\n\t\t\t..._endpoint,\n\t\t\tmodelMaxPromptTokens: tokenLimit\n\t\t}, LanguageModelAccessPrompt, { noSafety: extensionId === this._envService.extensionId, messages: _messages }).render();";
+    const replacement = "\t\t// Add safety rules to the prompt if it originates from outside the Copilot Chat extension, otherwise they already exist in the prompt.\n\t\t// ─── BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49) ───\n\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t// See the matching comment in chatVariables.tsx for the full rationale —\n\t\t// `{ ..._endpoint, modelMaxPromptTokens: tokenLimit }` drops every prototype\n\t\t// getter on `ExtensionContributedChatEndpoint` (every non-Copilot vendor in\n\t\t// BYOK mode), leaving `tokenizer === undefined` and causing the constructor\n\t\t// of `PromptRenderer` to throw \"Unknown tokenizer: undefined\". Use\n\t\t// `cloneWithTokenOverride()` to preserve the prototype + getters.\n\t\tconst _budgetedEndpoint = _endpoint.cloneWithTokenOverride(tokenLimit);\n\t\tconst { messages, tokenCount } = await PromptRenderer.create(this._instantiationService, _budgetedEndpoint, LanguageModelAccessPrompt, { noSafety: extensionId === this._envService.extensionId, messages: _messages }).render();\n\t\t// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────────────────";
+    if (!code.includes(anchor)) {
+      console.warn("WARN: languageModelAccess.ts anchor not found — skipping Patch 49 (C)");
+    } else {
+      code = code.replace(anchor, replacement);
+      fs.writeFileSync(f, code);
+      console.log("Patched: languageModelAccess.ts cloneWithTokenOverride (Patch 49 C)");
+    }
+  }
+}
+PATCH49_EOF

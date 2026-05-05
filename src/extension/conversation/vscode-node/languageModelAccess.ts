@@ -517,10 +517,17 @@ export class CopilotLanguageModelWrapper extends Disposable {
 			this.validateTools(_options.tools);
 		}
 		// Add safety rules to the prompt if it originates from outside the Copilot Chat extension, otherwise they already exist in the prompt.
-		const { messages, tokenCount } = await PromptRenderer.create(this._instantiationService, {
-			..._endpoint,
-			modelMaxPromptTokens: tokenLimit
-		}, LanguageModelAccessPrompt, { noSafety: extensionId === this._envService.extensionId, messages: _messages }).render();
+		// ─── BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49) ───
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// See the matching comment in chatVariables.tsx for the full rationale —
+		// `{ ..._endpoint, modelMaxPromptTokens: tokenLimit }` drops every prototype
+		// getter on `ExtensionContributedChatEndpoint` (every non-Copilot vendor in
+		// BYOK mode), leaving `tokenizer === undefined` and causing the constructor
+		// of `PromptRenderer` to throw "Unknown tokenizer: undefined". Use
+		// `cloneWithTokenOverride()` to preserve the prototype + getters.
+		const _budgetedEndpoint = _endpoint.cloneWithTokenOverride(tokenLimit);
+		const { messages, tokenCount } = await PromptRenderer.create(this._instantiationService, _budgetedEndpoint, LanguageModelAccessPrompt, { noSafety: extensionId === this._envService.extensionId, messages: _messages }).render();
+		// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────────────────
 
 		/* __GDPR__
 			"languagemodelrequest" : {

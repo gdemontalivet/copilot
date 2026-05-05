@@ -499,7 +499,21 @@ export class ChatToolReferences extends PromptElement<ChatToolCallProps, void> {
 			}
 		};
 		const toolTokens = await endpoint.acquireTokenizer().countToolTokens([tool]);
-		const { messages } = await PromptRenderer.create(this.instantiationService, { ...endpoint, modelMaxPromptTokens: endpoint.modelMaxPromptTokens - toolTokens }, PanelChatBasePrompt, argFetchProps).render();
+		// ─── BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49) ───
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// `{ ...endpoint, modelMaxPromptTokens: ... }` only copies OWN ENUMERABLE
+		// properties. `ExtensionContributedChatEndpoint` (used for every non-Copilot
+		// vendor in BYOK mode) defines `tokenizer` / `model` / `family` / etc. as
+		// CLASS GETTERS on the prototype, which the spread silently drops. The
+		// resulting plain object has `tokenizer === undefined`, and `PromptRenderer`'s
+		// constructor then explodes on `tokenizerProvider.acquireTokenizer(endpoint)`
+		// with "Unknown tokenizer: undefined" — surfaced as "all my tools are failing
+		// with a system error" because tool result rendering walks through this path.
+		// Use `cloneWithTokenOverride()` instead, which every IChatEndpoint
+		// implements and which preserves the prototype + getters.
+		const budgetedEndpoint = endpoint.cloneWithTokenOverride(endpoint.modelMaxPromptTokens - toolTokens);
+		const { messages } = await PromptRenderer.create(this.instantiationService, budgetedEndpoint, PanelChatBasePrompt, argFetchProps).render();
+		// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────────────────
 		let fnCall: ICopilotToolCall | undefined;
 		const fetchResult = await endpoint.makeChatRequest(
 			'fetchToolArgs',

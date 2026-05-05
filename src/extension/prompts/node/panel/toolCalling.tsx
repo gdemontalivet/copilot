@@ -487,10 +487,14 @@ class ToolResultElement extends PromptElement<IToolResultElementActualProps & Ba
 export function sendInvokedToolTelemetry(instantiationService: IInstantiationService, endpoint: IChatEndpoint, telemetry: ITelemetryService, toolName: string, toolResult: LanguageModelToolResult2) {
 	// Override the token budget to Infinity for telemetry counting to avoid truncation,
 	// matching the prior behavior with modelMaxPromptTokens: Infinity
-	const endpointWithUnlimitedBudget: IChatEndpoint = {
-		...endpoint,
-		modelMaxPromptTokens: Infinity,
-	};
+	// ─── BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49) ───
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// See the matching comment in chatVariables.tsx for the full rationale —
+	// `{ ...endpoint, modelMaxPromptTokens: Infinity }` drops every prototype
+	// getter on `ExtensionContributedChatEndpoint`, leaving `tokenizer === undefined`
+	// which kills tool-telemetry rendering with "Unknown tokenizer: undefined".
+	const endpointWithUnlimitedBudget: IChatEndpoint = endpoint.cloneWithTokenOverride(Infinity);
+	// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────────────────
 
 	PromptRenderer.create(
 		instantiationService,
