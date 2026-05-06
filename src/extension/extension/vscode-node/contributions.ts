@@ -6,6 +6,7 @@
 import { PromptFileContribution } from '../../agents/vscode-node/promptFileContrib';
 import { AuthenticationContrib } from '../../authentication/vscode-node/authentication.contribution';
 import { BYOKContrib } from '../../byok/vscode-node/byokContribution';
+import { BYOKRemoteContribution } from '../../byokRemote/byokRemote.contribution';
 import { ChatDebugFileLoggerContribution } from '../../chat/vscode-node/chatDebugFileLoggerService';
 import { ChatQuotaContribution } from '../../chat/vscode-node/chatQuota.contribution';
 import { ChatSessionContextContribution } from '../../chatSessionContext/vscode-node/chatSessionContextProvider';
@@ -125,6 +126,13 @@ export const vscodeNodeChatContributions: IExtensionContributionFactory[] = [
 	asContributionFactory(FixTestFailureContribution),
 	asContributionFactory(IgnoredFileProviderContribution),
 	asContributionFactory(BYOKContrib),
+	// ─── BYOK CUSTOM PATCH: mobile bridge contribution (Patch 50) ────────
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Local HTTP + WebSocket server that mirrors active chat to a phone via
+	// either the LAN (M0) or a Dev Tunnel (M3). Gated by the
+	// `chat.byok.mobileBridge.enabled` setting (default false, opt-in).
+	asContributionFactory(BYOKRemoteContribution),
+	// ─── END BYOK CUSTOM PATCH ──────────────────────────────────
 	asContributionFactory(McpSetupCommands),
 	asContributionFactory(LanguageModelProxyContrib),
 	asContributionFactory(PromptFileContribution),

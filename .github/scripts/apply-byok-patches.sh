@@ -3836,3 +3836,153 @@ const fs = require("fs");
   }
 }
 PATCH49_EOF
+
+# Patch 50: BYOK mobile bridge — local HTTP + WS server that mirrors the
+# active chat to a phone over the LAN (M0) and later through Dev Tunnels
+# (M3). The runtime files live entirely outside the upstream tree under
+# `src/extension/byokRemote/` (canonical copies under
+# `.github/byok-patches/files/byokRemote/` re-installed here so the
+# nightly upstream sync's `rsync --delete` doesn't wipe them).
+#
+# Source-tree edits in this patch:
+#   A. register `BYOKRemoteContribution` in the chat contributions list
+#   B. declare three settings (`chat.byok.mobileBridge.{enabled,port,bindHost}`)
+#   C. declare two commands in package.json (Share / Stop)
+#
+# The Vite-built web bundle (`byokRemote/dist/`) is NOT installed here —
+# it's a build artifact populated by `npm run sync` from the
+# `copilotmobile` repo, which writes into `src/extension/byokRemote/dist/`
+# directly. The bundle ships inside the VSIX once the extension's own
+# build picks up `src/extension/byokRemote/dist/`.
+
+# Step 0: install the canonical TypeScript files into the live tree.
+install_byok_file \
+  ".github/byok-patches/files/byokRemote/protocol.ts" \
+  "src/extension/byokRemote/protocol.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/byokRemote/bridgeServer.ts" \
+  "src/extension/byokRemote/bridgeServer.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/byokRemote/chatTap.ts" \
+  "src/extension/byokRemote/chatTap.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/byokRemote/replyInjector.ts" \
+  "src/extension/byokRemote/replyInjector.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/byokRemote/byokRemote.contribution.ts" \
+  "src/extension/byokRemote/byokRemote.contribution.ts"
+
+# Step A: register BYOKRemoteContribution in the chat contributions list
+# so VS Code instantiates it once chat is enabled. Anchored on the
+# existing BYOKContrib registration so the two BYOK contributions sit
+# together.
+node << 'PATCH50A_EOF'
+const fs = require("fs");
+const f = "src/extension/extension/vscode-node/contributions.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: mobile bridge contribution (Patch 50)")) {
+  console.log("BYOKRemoteContribution registration already present, skipping 50A");
+  process.exit(0);
+}
+
+// Add the import alongside the other BYOK-related import.
+const importAnchor = "import { BYOKContrib } from '../../byok/vscode-node/byokContribution';";
+if (!code.includes(importAnchor)) {
+  console.warn("WARN: BYOKContrib import anchor not found — skipping patch 50A");
+  process.exit(0);
+}
+if (!code.includes("import { BYOKRemoteContribution }")) {
+  code = code.replace(
+    importAnchor,
+    `${importAnchor}\nimport { BYOKRemoteContribution } from '../../byokRemote/byokRemote.contribution';`
+  );
+}
+
+// Register the contribution next to BYOKContrib.
+const registerAnchor = "\tasContributionFactory(BYOKContrib),";
+if (!code.includes(registerAnchor)) {
+  console.warn("WARN: BYOKContrib factory anchor not found — skipping patch 50A registration");
+  fs.writeFileSync(f, code);
+  process.exit(0);
+}
+const registerReplacement = `${registerAnchor}\n\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: mobile bridge contribution (Patch 50) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// Local HTTP + WebSocket server that mirrors active chat to a phone via\n\t// either the LAN (M0) or a Dev Tunnel (M3). Gated by the\n\t// \`chat.byok.mobileBridge.enabled\` setting (default false, opt-in).\n\tasContributionFactory(BYOKRemoteContribution),\n\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`;
+code = code.replace(registerAnchor, () => registerReplacement);
+
+fs.writeFileSync(f, code);
+console.log("Patched: BYOKRemoteContribution registered in vscodeNodeChatContributions (50A)");
+PATCH50A_EOF
+
+# Step B: declare the three mobile-bridge settings in configurationService.ts.
+# Anchored on the closing `ByokAutoRoutingTable` block from Patch 40 so the
+# BYOK settings stay grouped.
+node << 'PATCH50B_EOF'
+const fs = require("fs");
+const f = "src/platform/configuration/common/configurationService.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("ByokMobileBridgeEnabled")) {
+  console.log("ByokMobileBridge* settings already present, skipping 50B");
+  process.exit(0);
+}
+
+const anchor = "\texport const ByokAutoRoutingTable = defineSetting<Record<string, Record<string, string[]>>>('chat.byok.auto.routingTable', ConfigType.Simple, {});";
+if (!code.includes(anchor)) {
+  console.warn("WARN: ByokAutoRoutingTable anchor not found — skipping patch 50B");
+  process.exit(0);
+}
+
+const replacement = anchor + "\n\n\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: mobile bridge settings (Patch 50) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t/**\n\t * BYOK Mobile Bridge (Patch 50). When `true`, the\n\t * \"Copilot Full BYOK: Share chat with mobile\" command starts a local\n\t * HTTP+WebSocket server that streams the active chat to a phone. Default\n\t * `false` because the bridge can bind to a LAN-reachable host \u2014 explicit\n\t * opt-in is the safe choice. Auth uses a per-server connection token\n\t * (rotated each start) plus an `HttpOnly` cookie set on first valid\n\t * request, mirroring VS Code Server's `tkn=` model.\n\t */\n\texport const ByokMobileBridgeEnabled = defineSetting<boolean>('chat.byok.mobileBridge.enabled', ConfigType.Simple, false);\n\n\t/**\n\t * Bind port for the bridge. `31547` is one above\n\t * `TUNNEL_AGENT_HOST_PORT` (31546) used by VS Code's tunnel agent host\n\t * so we don't accidentally collide. `0` picks a random free port \u2014\n\t * useful when something else is already on 31547.\n\t */\n\texport const ByokMobileBridgePort = defineSetting<number>('chat.byok.mobileBridge.port', ConfigType.Simple, 31547);\n\n\t/**\n\t * Bind host for the bridge. M0 default `127.0.0.1` (loopback only).\n\t * For the M0 LAN smoke-test override to `0.0.0.0` so the phone on the\n\t * same Wi-Fi can reach it. M3 will replace LAN binding with Dev Tunnels.\n\t */\n\texport const ByokMobileBridgeBindHost = defineSetting<string>('chat.byok.mobileBridge.bindHost', ConfigType.Simple, '127.0.0.1');\n\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+
+code = code.replace(anchor, () => replacement);
+fs.writeFileSync(f, code);
+console.log("Patched: ByokMobileBridge* settings (50B)");
+PATCH50B_EOF
+
+# Step C: declare the two commands in package.json so they appear in the
+# command palette under the "Copilot Full BYOK" category.
+node << 'PATCH50C_EOF'
+const fs = require("fs");
+const f = "package.json";
+const pkg = JSON.parse(fs.readFileSync(f, "utf8"));
+const contributes = pkg.contributes || {};
+const commands = contributes.commands;
+if (!Array.isArray(commands)) {
+  console.warn("WARN: package.json contributes.commands missing, skipping patch 50C");
+  process.exit(0);
+}
+
+const SHARE_CMD = "copilot-byok.mobile.share";
+const STOP_CMD = "copilot-byok.mobile.stop";
+
+const hasShare = commands.some(c => c && c.command === SHARE_CMD);
+const hasStop = commands.some(c => c && c.command === STOP_CMD);
+if (hasShare && hasStop) {
+  console.log("BYOK mobile commands already present, skipping 50C");
+  process.exit(0);
+}
+
+if (!hasShare) {
+  commands.push({
+    command: SHARE_CMD,
+    title: "Share chat with mobile",
+    category: "Copilot Full BYOK"
+  });
+}
+if (!hasStop) {
+  commands.push({
+    command: STOP_CMD,
+    title: "Stop sharing chat",
+    category: "Copilot Full BYOK"
+  });
+}
+
+contributes.commands = commands;
+pkg.contributes = contributes;
+fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+console.log("Patched: BYOK mobile commands declared in package.json (50C)");
+PATCH50C_EOF

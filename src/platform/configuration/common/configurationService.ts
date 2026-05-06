@@ -955,6 +955,35 @@ export namespace ConfigKey {
 	 */
 	export const ByokAutoRoutingTable = defineSetting<Record<string, Record<string, string[]>>>('chat.byok.auto.routingTable', ConfigType.Simple, {});
 
+	// ─── BYOK CUSTOM PATCH: mobile bridge settings (Patch 50) ────────────
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	/**
+	 * BYOK Mobile Bridge (Patch 50). When `true`, the
+	 * "Copilot Full BYOK: Share chat with mobile" command starts a local
+	 * HTTP+WebSocket server that streams the active chat to a phone. Default
+	 * `false` because the bridge can bind to a LAN-reachable host — explicit
+	 * opt-in is the safe choice. Auth uses a per-server connection token
+	 * (rotated each start) plus an `HttpOnly` cookie set on first valid
+	 * request, mirroring VS Code Server's `tkn=` model.
+	 */
+	export const ByokMobileBridgeEnabled = defineSetting<boolean>('chat.byok.mobileBridge.enabled', ConfigType.Simple, false);
+
+	/**
+	 * Bind port for the bridge. `31547` is one above
+	 * `TUNNEL_AGENT_HOST_PORT` (31546) used by VS Code's tunnel agent host
+	 * so we don't accidentally collide. `0` picks a random free port —
+	 * useful when something else is already on 31547.
+	 */
+	export const ByokMobileBridgePort = defineSetting<number>('chat.byok.mobileBridge.port', ConfigType.Simple, 31547);
+
+	/**
+	 * Bind host for the bridge. M0 default `127.0.0.1` (loopback only).
+	 * For the M0 LAN smoke-test override to `0.0.0.0` so the phone on the
+	 * same Wi-Fi can reach it. M3 will replace LAN binding with Dev Tunnels.
+	 */
+	export const ByokMobileBridgeBindHost = defineSetting<string>('chat.byok.mobileBridge.bindHost', ConfigType.Simple, '127.0.0.1');
+	// ─── END BYOK CUSTOM PATCH ──────────────────────────────────
+
 	/** Failover policy for the Anthropic (direct) BYOK provider. */
 	export const ByokAnthropicFallbackEnabled = defineSetting<boolean>('chat.byok.anthropic.fallback.enabled', ConfigType.Simple, false);
 	/** Anthropic model id → Vertex model id override. */
