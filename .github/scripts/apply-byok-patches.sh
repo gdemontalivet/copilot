@@ -3986,3 +3986,89 @@ pkg.contributes = contributes;
 fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
 console.log("Patched: BYOK mobile commands declared in package.json (50C)");
 PATCH50C_EOF
+
+# Step E: keep `src/extension/byokRemote/dist/` (the mobile UI bundle) in
+# the packaged VSIX. The upstream `.vscodeignore` starts with `**` (exclude
+# everything) and explicitly re-adds only the canonical bundled outputs,
+# which means our BYOK-only bundle gets stripped by `vsce package` even
+# though it's tracked in git. Add an allow rule for our subtree so the
+# bridgeServer has files to serve when the extension runs.
+node << 'PATCH50E_EOF'
+const fs = require("fs");
+const f = ".vscodeignore";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: mobile bridge static bundle (Patch 50)")) {
+  console.log(".vscodeignore mobile bridge allow rule already present, skipping 50E");
+  process.exit(0);
+}
+
+const anchor = "!dist/extension.js";
+if (!code.includes(anchor)) {
+  console.warn("WARN: .vscodeignore !dist/extension.js anchor not found — skipping patch 50E");
+  process.exit(0);
+}
+
+const insertion = "!dist/extension.js\n# \u2500\u2500\u2500 BYOK CUSTOM PATCH: mobile bridge static bundle (Patch 50) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n# Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n# The Vite-built mobile UI is force-added under src/extension/byokRemote/\n# dist/ (past the upstream blanket dist/ rule in .gitignore). Without this\n# allow rule, vsce strips it from the VSIX and the bridgeServer has\n# nothing to serve.\n!src/extension/byokRemote/\n!src/extension/byokRemote/dist/**\n# \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+
+code = code.replace(anchor, () => insertion);
+fs.writeFileSync(f, code);
+console.log("Patched: .vscodeignore allow rule for mobile bridge bundle (50E)");
+PATCH50E_EOF
+
+# Step D: surface the three mobile-bridge settings in the Settings UI by
+# adding them to `contributes.configuration` in package.json. Without this
+# the settings are programmatically registered (defineSetting in
+# configurationService.ts) but invisible in the Settings UI for everyone
+# who isn't an internal Microsoft user — `SettingsSchemaFeature` only
+# generates the `ccsettings://` schema for `_isInternal === true`. We add
+# a dedicated config block so they group under their own section header.
+node << 'PATCH50D_EOF'
+const fs = require("fs");
+const f = "package.json";
+const pkg = JSON.parse(fs.readFileSync(f, "utf8"));
+const contributes = pkg.contributes || {};
+const config = contributes.configuration;
+if (!Array.isArray(config)) {
+  console.warn("WARN: package.json contributes.configuration missing or not an array, skipping patch 50D");
+  process.exit(0);
+}
+
+const BLOCK_ID = "byok-mobile-bridge";
+if (config.some(b => b && b.id === BLOCK_ID)) {
+  console.log("BYOK mobile bridge configuration block already present, skipping 50D");
+  process.exit(0);
+}
+
+const block = {
+  title: "Copilot Full BYOK · Mobile Bridge",
+  id: BLOCK_ID,
+  order: 200,
+  properties: {
+    "chat.byok.mobileBridge.enabled": {
+      type: "boolean",
+      default: false,
+      markdownDescription: "Run a local HTTP + WebSocket server that mirrors the active Copilot Chat session to a mobile browser. Default `false` because the bridge can bind to a LAN-reachable host. Auth is a per-server connection token rotated each start.\n\nUse the **Copilot Full BYOK: Share chat with mobile** command after enabling this."
+    },
+    "chat.byok.mobileBridge.port": {
+      type: "number",
+      default: 31547,
+      minimum: 0,
+      maximum: 65535,
+      markdownDescription: "Port the mobile bridge binds to. `31547` is one above VS Code's `TUNNEL_AGENT_HOST_PORT` (31546) so they don't collide. `0` picks a random free port — useful if `31547` is taken."
+    },
+    "chat.byok.mobileBridge.bindHost": {
+      type: "string",
+      default: "127.0.0.1",
+      examples: ["127.0.0.1", "0.0.0.0"],
+      markdownDescription: "Bind host for the mobile bridge. Default `127.0.0.1` (loopback only — not reachable from your phone). Set to `0.0.0.0` for the M0 LAN smoke-test so the phone on the same Wi-Fi can connect.\n\n**Security:** binding to `0.0.0.0` opens the port to anyone on the LAN. The connection token mitigates but treat the share URL like a password. M3 will replace LAN binding with Dev Tunnels."
+    }
+  }
+};
+
+config.push(block);
+contributes.configuration = config;
+pkg.contributes = contributes;
+fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+console.log("Patched: BYOK mobile bridge configuration block declared in package.json (50D)");
+PATCH50D_EOF

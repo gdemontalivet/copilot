@@ -2,7 +2,7 @@
 	"name": "copilot-chat",
 	"displayName": "Copilot Full BYOK",
 	"description": "AI chat features powered by Copilot — Full Bring Your Own Key edition",
-	"version": "0.48.3",
+	"version": "0.48.7",
 	"build": "1",
 	"internalAIKey": "1058ec22-3c95-4951-8443-f26c1f325911",
 	"completionsCoreVersion": "1.378.1799",
@@ -5039,6 +5039,34 @@
 							"advanced",
 							"onExp"
 						]
+					}
+				}
+			},
+			{
+				"title": "Copilot Full BYOK · Mobile Bridge",
+				"id": "byok-mobile-bridge",
+				"order": 200,
+				"properties": {
+					"chat.byok.mobileBridge.enabled": {
+						"type": "boolean",
+						"default": false,
+						"markdownDescription": "Run a local HTTP + WebSocket server that mirrors the active Copilot Chat session to a mobile browser. Default `false` because the bridge can bind to a LAN-reachable host. Auth is a per-server connection token rotated each start.\n\nUse the **Copilot Full BYOK: Share chat with mobile** command after enabling this."
+					},
+					"chat.byok.mobileBridge.port": {
+						"type": "number",
+						"default": 31547,
+						"minimum": 0,
+						"maximum": 65535,
+						"markdownDescription": "Port the mobile bridge binds to. `31547` is one above VS Code's `TUNNEL_AGENT_HOST_PORT` (31546) so they don't collide. `0` picks a random free port — useful if `31547` is taken."
+					},
+					"chat.byok.mobileBridge.bindHost": {
+						"type": "string",
+						"default": "127.0.0.1",
+						"examples": [
+							"127.0.0.1",
+							"0.0.0.0"
+						],
+						"markdownDescription": "Bind host for the mobile bridge. Default `127.0.0.1` (loopback only — not reachable from your phone). Set to `0.0.0.0` for the M0 LAN smoke-test so the phone on the same Wi-Fi can connect.\n\n**Security:** binding to `0.0.0.0` opens the port to anyone on the LAN. The connection token mitigates but treat the share URL like a password. M3 will replace LAN binding with Dev Tunnels."
 					}
 				}
 			}

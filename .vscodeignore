@@ -3,6 +3,15 @@
 assets/walkthroughs/**
 !dist/compiled/**
 !dist/extension.js
+# ─── BYOK CUSTOM PATCH: mobile bridge static bundle (Patch 50) ─────────
+# Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+# The Vite-built mobile UI is force-added under src/extension/byokRemote/
+# dist/ (past the upstream blanket dist/ rule in .gitignore). Without this
+# allow rule, vsce strips it from the VSIX and the bridgeServer has
+# nothing to serve.
+!src/extension/byokRemote/
+!src/extension/byokRemote/dist/**
+# ─── END BYOK CUSTOM PATCH ─────────────────────────────────
 !dist/extension.js.LICENSE.txt
 !dist/*.wasm
 !dist/*.json
