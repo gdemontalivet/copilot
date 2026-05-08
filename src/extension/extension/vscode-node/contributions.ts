@@ -6,6 +6,10 @@
 import { PromptFileContribution } from '../../agents/vscode-node/promptFileContrib';
 import { AuthenticationContrib } from '../../authentication/vscode-node/authentication.contribution';
 import { BYOKContrib } from '../../byok/vscode-node/byokContribution';
+// ─── BYOK CUSTOM PATCH: context-window breakdown import (Patch 51) ────
+// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+import { ContextWindowStatusItem } from '../../byok/vscode-node/contextWindowStatusItem';
+// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────
 import { ChatDebugFileLoggerContribution } from '../../chat/vscode-node/chatDebugFileLoggerService';
 import { ChatQuotaContribution } from '../../chat/vscode-node/chatQuota.contribution';
 import { ChatSessionContextContribution } from '../../chatSessionContext/vscode-node/chatSessionContextProvider';
@@ -104,6 +108,14 @@ export const vscodeNodeContributions: IExtensionContributionFactory[] = [
 	asContributionFactory(OTelContrib),
 	asContributionFactory(SessionStoreTracker),
 	sessionSyncContribution,
+	// ─── BYOK CUSTOM PATCH: context-window breakdown status item (Patch 51) ───
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Renders a ChatStatusItem in the chat panel's status row showing
+	// per-segment token counts for the most recent turn. Subscribes to
+	// the channel emitter fed by toolCallingLoop's _onDidBuildPrompt
+	// instrumentation (Patch 51).
+	asContributionFactory(ContextWindowStatusItem),
+	// ─── END BYOK CUSTOM PATCH ──────────────────────────────────
 ];
 
 /**

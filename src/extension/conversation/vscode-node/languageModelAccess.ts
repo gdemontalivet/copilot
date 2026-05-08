@@ -9,7 +9,7 @@ import * as vscode from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { CopilotToken } from '../../../platform/authentication/common/copilotToken';
 import { IBlockedExtensionService } from '../../../platform/chat/common/blockedExtensionService';
-import { ChatFetchResponseType, ChatLocation, getErrorDetailsFromChatFetchError } from '../../../platform/chat/common/commonTypes';
+import { ChatFetchResponseType, ChatLocation, getErrorDetailsFromChatFetchError, type ChatResponse } from '../../../platform/chat/common/commonTypes';
 import { getTextPart } from '../../../platform/chat/common/globalStringUtils';
 import { EmbeddingType, getWellKnownEmbeddingTypeInfo, IEmbeddingsComputer } from '../../../platform/embeddings/common/embeddingsComputer';
 import { IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
@@ -492,7 +492,7 @@ export class CopilotLanguageModelWrapper extends Disposable {
 		super();
 	}
 
-	private async _provideLanguageModelResponse(_endpoint: IChatEndpoint, _messages: Array<vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage2>, _options: vscode.ProvideLanguageModelChatResponseOptions, extensionId: string | undefined, callback: FinishedCallback, token: vscode.CancellationToken): Promise<void> {
+	private async _provideLanguageModelResponse(_endpoint: IChatEndpoint, _messages: Array<vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage2>, _options: vscode.ProvideLanguageModelChatResponseOptions, extensionId: string | undefined, callback: FinishedCallback, token: vscode.CancellationToken): Promise<ChatResponse> {
 		if (extensionId === 'core') {
 			extensionId = undefined;
 		}
@@ -678,6 +678,8 @@ export class CopilotLanguageModelWrapper extends Disposable {
 				tokenLimit
 			}
 		);
+
+		return result;
 	}
 
 	async provideLanguageModelResponse(endpoint: IChatEndpoint, messages: Array<vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage2>, options: vscode.ProvideLanguageModelChatResponseOptions, extensionId: string | undefined, progress: vscode.Progress<LMResponsePart>, token: vscode.CancellationToken): Promise<void> {
@@ -718,7 +720,33 @@ export class CopilotLanguageModelWrapper extends Disposable {
 
 			return undefined;
 		};
-		return this._provideLanguageModelResponse(endpoint, messages, options, extensionId, finishCallback, token);
+
+		// ─── BYOK CUSTOM PATCH: emit TokenUsage to context-window ring ────────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// OpenAI-compatible providers (OpenAI, Ollama, OpenRouter, xAI, Azure,
+		// custom OAI) use CopilotLanguageModelWrapper but didn't emit TokenUsage.
+		// Without this, the context-window ring in the chat UI stays empty for
+		// all non-Gemini, non-Anthropic-direct models.
+		// The usage data comes from the ChatResponse returned by makeChatRequest2.
+		const result = await this._provideLanguageModelResponse(endpoint, messages, options, extensionId, finishCallback, token);
+
+		if (result && result.type === ChatFetchResponseType.Success && result.usage) {
+			const usage = result.usage;
+			// Import GenAiAttr dynamically to avoid circular deps; it's used by Gemini/Anthropic too
+			const { GenAiAttr } = await import('../../../platform/otel/common/index');
+			progress.report(new vscode.LanguageModelDataPart(
+				{
+					[GenAiAttr.USAGE_INPUT_TOKENS]: usage.prompt_tokens ?? 0,
+					[GenAiAttr.USAGE_OUTPUT_TOKENS]: usage.completion_tokens ?? 0,
+					...(usage.prompt_tokens_details?.cached_tokens
+						? { [GenAiAttr.USAGE_CACHE_READ_INPUT_TOKENS]: usage.prompt_tokens_details.cached_tokens }
+						: {}),
+					[GenAiAttr.RESPONSE_MODEL]: endpoint.model,
+				},
+				CustomDataPartMimeTypes.TokenUsage
+			));
+		}
+		// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────
 	}
 
 	async provideTokenCount(endpoint: IEndpoint, message: string | vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage2): Promise<number> {

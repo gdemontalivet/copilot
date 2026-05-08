@@ -25,6 +25,9 @@ export interface RawThinkingDelta {
 	// Anthropic fields
 	thinking?: string;
 	signature?: string;
+
+	// DeepSeek API fields
+	reasoning_content?: string;
 }
 
 export type ThinkingDelta = {

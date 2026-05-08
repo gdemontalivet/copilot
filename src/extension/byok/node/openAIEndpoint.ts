@@ -294,6 +294,21 @@ export class OpenAIEndpoint extends ChatEndpoint {
 			if (!this.useResponsesApi && body.stream) {
 				body['stream_options'] = { 'include_usage': true };
 			}
+
+			// DeepSeek APIs expect `reasoning_content` to be passed back for assistant messages in multi-turn conversations
+			const isDeepSeekOrR1 = this.model.toLowerCase().includes('deepseek') || this.model.toLowerCase().includes('r1') || this.model.toLowerCase().includes('reasoner');
+			if (isDeepSeekOrR1 && body.messages) {
+				for (const msg of body.messages) {
+					if (msg.role === 'assistant') {
+						if (!('reasoning_content' in msg)) {
+							(msg as any).reasoning_content = (msg as any).cot_summary || "";
+						}
+						// Avoid sending Copilot-specific fields to external providers
+						delete (msg as any).cot_id;
+						delete (msg as any).cot_summary;
+					}
+				}
+			}
 		}
 	}
 

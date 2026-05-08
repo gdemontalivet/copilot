@@ -18,6 +18,9 @@ function getThinkingDeltaText(thinking: RawThinkingDelta | undefined): string | 
 	if (thinking.thinking) {
 		return thinking.thinking;
 	}
+	if (thinking.reasoning_content) {
+		return thinking.reasoning_content;
+	}
 	return undefined;
 }
 
