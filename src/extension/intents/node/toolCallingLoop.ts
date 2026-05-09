@@ -104,7 +104,7 @@ export interface IToolCallingBuiltPromptEvent {
 	tools: LanguageModelToolInformation[];
 }
 
-export type ToolCallingLoopFetchOptions = Required<Pick<IMakeChatRequestOptions, 'messages' | 'finishedCb' | 'requestOptions' | 'userInitiatedRequest' | 'turnId'>> & Pick<IMakeChatRequestOptions, 'modelCapabilities' | 'summarizedAtRoundId'> & { iterationNumber: number };
+export type ToolCallingLoopFetchOptions = Required<Pick<IMakeChatRequestOptions, 'messages' | 'finishedCb' | 'requestOptions' | 'userInitiatedRequest' | 'turnId'>> & Pick<IMakeChatRequestOptions, 'modelCapabilities' | 'summarizedAtRoundId' | 'topLevelTurnId'> & { iterationNumber: number };
 
 interface StartHookResult {
 	/**
@@ -1284,32 +1284,6 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 		const toolTokenCount = availableTools.length > 0 ? await tokenizer.countToolTokens(availableTools) : 0;
 		this.throwIfCancelled(token);
 		this._onDidBuildPrompt.fire({ result: effectiveBuildPromptResult, tools: availableTools, promptTokenLength, toolTokenCount });
-		// ─── BYOK CUSTOM PATCH: report context breakdown (Patch 51) ───
-		// Preserved by .github/scripts/apply-byok-patches.sh.
-		// Computes per-segment token counts (System / Tools / Summary /
-		// History / Current) and fires onto the BYOK ChatStatusItem
-		// channel. Best-effort: any failure silently downgrades the
-		// status item rather than failing the chat turn.
-		void (async () => {
-			try {
-				const { computeContextBreakdown } = await import('../../byok/common/contextBreakdown');
-				const { reportContextBreakdown } = await import('../../byok/common/contextBreakdownChannel');
-				const summaryText = effectiveBuildPromptResult.metadata.get(SummarizedConversationHistoryMetadata)?.text;
-				const breakdown = await computeContextBreakdown({
-					messages: effectiveBuildPromptResult.messages,
-					tokenizer,
-					modelId: endpoint.model,
-					modelMaxPromptTokens: endpoint.modelMaxPromptTokens,
-					toolTokenCount,
-					summaryText,
-					totalMessagesTokensHint: promptTokenLength,
-				});
-				reportContextBreakdown(breakdown);
-			} catch (e) {
-				this._logService.trace(`[ContextBreakdown] failed: ${e}`);
-			}
-		})();
-		// ─── END BYOK CUSTOM PATCH ────────────────────────
 		this._logService.trace('Built prompt');
 
 		// Tool calls happen during prompt building. Check yield again here to see if we should abort prior to sending off the next request.
@@ -1386,7 +1360,8 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 		markChatExt(this.options.conversation.sessionId, ChatExtPerfMark.WillFetch);
 		const fetchResult = await this.fetch({
 			messages: this.applyMessagePostProcessing(effectiveBuildPromptResult.messages, { stripOrphanedToolCalls: isGeminiFamily(endpoint) }),
-			turnId: this.turn.id,
+			turnId: this.options.request.id,
+			topLevelTurnId: this.options.request.parentRequestId ?? this.turn.id,
 			summarizedAtRoundId,
 			finishedCb: async (text, index, delta) => {
 				fetchStreamSource?.update(text, delta);
@@ -1510,7 +1485,7 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 					statefulMarker,
 					thinking: thinkingItem,
 					phase,
-					phaseModelId: phase ? endpoint.model : undefined,
+					modelId: endpoint.model,
 					compaction,
 				}),
 				chatResult,

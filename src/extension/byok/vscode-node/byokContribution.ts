@@ -23,7 +23,6 @@ import { OllamaLMProvider } from './ollamaProvider';
 import { OAIBYOKLMProvider } from './openAIProvider';
 import { OpenRouterLMProvider } from './openRouterProvider';
 import { VertexAnthropicLMProvider } from './vertexAnthropicProvider';
-import { VertexGeminiLMProvider } from './vertexGeminiProvider';
 import { XAIBYOKLMProvider } from './xAIProvider';
 
 export class BYOKContrib extends Disposable implements IExtensionContribution {
@@ -68,45 +67,17 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 			if (this._store.isDisposed) {
 				return;
 			}
-			this._providers.set(OllamaLMProvider.providerName.toLowerCase(), instantiationService.createInstance(OllamaLMProvider, this._byokStorageService));
-			const anthropicProvider = instantiationService.createInstance(AnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService);
-			this._providers.set(AnthropicLMProvider.providerName.toLowerCase(), anthropicProvider);
-			// BYOK CUSTOM PATCH: Vertex-hosted Anthropic, registered as a separate vendor so it has
-			// independent API key / quota / concurrency state. Also wired as a failover target for
-			// the direct Anthropic provider (gated by chat.byok.anthropic.fallback.enabled).
-			const vertexAnthropicProvider = instantiationService.createInstance(VertexAnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService);
-			this._providers.set(VertexAnthropicLMProvider.providerName.toLowerCase(), vertexAnthropicProvider);
-			anthropicProvider.setFailoverTarget(vertexAnthropicProvider);
-			this._providers.set(GeminiNativeBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiNativeBYOKLMProvider, knownModels[GeminiNativeBYOKLMProvider.providerName], this._byokStorageService));
-			// BYOK CUSTOM PATCH: Vertex-hosted Gemini, registered as a separate vendor so it has
-			// independent API key / quota state. Auth is SA-JSON or pre-minted Bearer token, not
-			// the Gemini public-API apiKey.
-			this._providers.set(VertexGeminiLMProvider.providerName.toLowerCase(), instantiationService.createInstance(VertexGeminiLMProvider, knownModels[GeminiNativeBYOKLMProvider.providerName], this._byokStorageService));
-			this._providers.set(XAIBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(XAIBYOKLMProvider, knownModels[XAIBYOKLMProvider.providerName], this._byokStorageService));
-			this._providers.set(OAIBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(OAIBYOKLMProvider, knownModels[OAIBYOKLMProvider.providerName], this._byokStorageService));
-			this._providers.set(OpenRouterLMProvider.providerName.toLowerCase(), instantiationService.createInstance(OpenRouterLMProvider, this._byokStorageService));
-			this._providers.set(AzureBYOKModelProvider.providerName.toLowerCase(), instantiationService.createInstance(AzureBYOKModelProvider, this._byokStorageService));
-			this._providers.set(CustomOAIBYOKModelProvider.providerName.toLowerCase(), instantiationService.createInstance(CustomOAIBYOKModelProvider, this._byokStorageService));
+			this._providers.set(OllamaLMProvider.providerId, instantiationService.createInstance(OllamaLMProvider, this._byokStorageService));
+			this._providers.set(AnthropicLMProvider.providerId, instantiationService.createInstance(AnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService));
+			this._providers.set(GeminiNativeBYOKLMProvider.providerId, instantiationService.createInstance(GeminiNativeBYOKLMProvider, knownModels[GeminiNativeBYOKLMProvider.providerName], this._byokStorageService));
+			this._providers.set(XAIBYOKLMProvider.providerId, instantiationService.createInstance(XAIBYOKLMProvider, knownModels[XAIBYOKLMProvider.providerName], this._byokStorageService));
+			this._providers.set(OAIBYOKLMProvider.providerId, instantiationService.createInstance(OAIBYOKLMProvider, knownModels[OAIBYOKLMProvider.providerName], this._byokStorageService));
+			this._providers.set(OpenRouterLMProvider.providerId, instantiationService.createInstance(OpenRouterLMProvider, this._byokStorageService));
+			this._providers.set(AzureBYOKModelProvider.providerId, instantiationService.createInstance(AzureBYOKModelProvider, this._byokStorageService));
+			this._providers.set(CustomOAIBYOKModelProvider.providerId, instantiationService.createInstance(CustomOAIBYOKModelProvider, this._byokStorageService));
 
-			// ─── BYOK CUSTOM PATCH: BYOK Auto provider (Patch 34) ─────────────
-			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-			// Upstream's `copilot/auto` pseudo-model hits CAPI with the Copilot
-			// token to pick a real model — that flow dies under the BYOK
-			// fake-token bypass and surfaces as "Language model unavailable".
-			// Register a BYOK-native Auto provider that delegates to whichever
-			// model the user configures in `chat.byok.auto.defaultModel`.
-			// See byokAutoProvider.ts for the full rationale.
-			this._providers.set(
-				BYOKAutoLMProvider.vendorId,
-				// Patch 40 extended the constructor to take the shared
-				// BYOK storage service so the classifier can read the
-				// user's Gemini / Vertex keys without re-prompting.
-				instantiationService.createInstance(BYOKAutoLMProvider, this._byokStorageService),
-			);
-			// ─── END BYOK CUSTOM PATCH ──────────────────────────────
-
-			for (const [providerName, provider] of this._providers) {
-				this._byokRegistrations.add(lm.registerLanguageModelChatProvider(providerName, provider));
+			for (const [providerId, provider] of this._providers) {
+				this._byokRegistrations.add(lm.registerLanguageModelChatProvider(providerId, provider));
 			}
 			this._logService.info(`BYOK: registered ${this._providers.size} provider(s): ${Array.from(this._providers.keys()).join(', ')}`);
 		} else if (!this._byokProvidersRegistered) {
