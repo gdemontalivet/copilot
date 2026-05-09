@@ -13,6 +13,8 @@ import { FetchStreamSource, IResponsePart } from '../../../platform/chat/common/
 import { CanceledResult, ChatFetchResponseType, ChatResponse } from '../../../platform/chat/common/commonTypes';
 import { IHistoricalTurn, ISessionTranscriptService, ToolRequest } from '../../../platform/chat/common/sessionTranscriptService';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
+import { computeContextBreakdown } from '../../byok/common/contextBreakdown';
+import { reportContextBreakdown } from '../../byok/common/contextBreakdownChannel';
 import { isAnthropicFamily, isGeminiFamily } from '../../../platform/endpoint/common/chatModelCapabilities';
 import { IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
 import { rawPartAsThinkingData } from '../../../platform/endpoint/common/thinkingDataContainer';
@@ -1283,6 +1285,27 @@ export abstract class ToolCallingLoop<TOptions extends IToolCallingLoopOptions =
 		const promptTokenLength = await tokenizer.countMessagesTokens(effectiveBuildPromptResult.messages);
 		const toolTokenCount = availableTools.length > 0 ? await tokenizer.countToolTokens(availableTools) : 0;
 		this.throwIfCancelled(token);
+
+		// ─── BYOK CUSTOM PATCH: compute context breakdown (Patch 51) ───
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// See .cursor/rules/byok-custom-patches.mdc for details.
+		try {
+			computeContextBreakdown({
+				messages: effectiveBuildPromptResult.messages,
+				tokenizer,
+				modelId: endpoint.model,
+				modelMaxPromptTokens: endpoint.modelMaxPromptTokens,
+				toolTokenCount,
+				summaryText: conversationSummary?.text,
+				totalMessagesTokensHint: promptTokenLength
+			}).then(breakdown => reportContextBreakdown(breakdown)).catch(err => {
+				this._logService.error('Context breakdown failed', err);
+			});
+		} catch (e) {
+			this._logService.error('Context breakdown synchronous setup failed', e);
+		}
+		// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────
+
 		this._onDidBuildPrompt.fire({ result: effectiveBuildPromptResult, tools: availableTools, promptTokenLength, toolTokenCount });
 		this._logService.trace('Built prompt');
 

@@ -3836,3 +3836,83 @@ const fs = require("fs");
   }
 }
 PATCH49_EOF
+
+# Patch 51: Context-Window Breakdown Status Item
+install_byok_file \
+  ".github/byok-patches/files/contextBreakdown.ts" \
+  "src/extension/byok/common/contextBreakdown.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/contextBreakdownChannel.ts" \
+  "src/extension/byok/common/contextBreakdownChannel.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/contextWindowStatusItem.ts" \
+  "src/extension/byok/vscode-node/contextWindowStatusItem.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/contextBreakdown.spec.ts" \
+  "src/extension/byok/common/test/contextBreakdown.spec.ts"
+
+node << 'PATCH51_EOF'
+const fs = require("fs");
+
+// (A) src/extension/intents/node/toolCallingLoop.ts
+{
+  const f = "src/extension/intents/node/toolCallingLoop.ts";
+  let code = fs.readFileSync(f, "utf8");
+  if (code.includes("BYOK CUSTOM PATCH: compute context breakdown (Patch 51)")) {
+    console.log("toolCallingLoop.ts Patch 51 already present, skipping");
+  } else {
+    // Add imports
+    const importAnchor = "import { isAnthropicFamily, isGeminiFamily } from '../../../platform/endpoint/common/chatModelCapabilities';";
+    const importReplacement = "import { computeContextBreakdown } from '../../byok/common/contextBreakdown';\nimport { reportContextBreakdown } from '../../byok/common/contextBreakdownChannel';\n" + importAnchor;
+    if (code.includes(importAnchor)) {
+      code = code.replace(importAnchor, importReplacement);
+    } else {
+      console.warn("WARN: toolCallingLoop.ts import anchor not found");
+    }
+
+    // Add usage
+    const hookAnchor = "this.throwIfCancelled(token);\n\t\tthis._onDidBuildPrompt.fire({ result: effectiveBuildPromptResult, tools: availableTools, promptTokenLength, toolTokenCount });";
+    const hookReplacement = "this.throwIfCancelled(token);\n\n\t\t// ─── BYOK CUSTOM PATCH: compute context breakdown (Patch 51) ───\n\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t// See .cursor/rules/byok-custom-patches.mdc for details.\n\t\ttry {\n\t\t\tcomputeContextBreakdown({\n\t\t\t\tmessages: effectiveBuildPromptResult.messages,\n\t\t\t\ttokenizer,\n\t\t\t\tmodelId: endpoint.model,\n\t\t\t\tmodelMaxPromptTokens: endpoint.modelMaxPromptTokens,\n\t\t\t\ttoolTokenCount,\n\t\t\t\tsummaryText: conversationSummary?.text,\n\t\t\t\ttotalMessagesTokensHint: promptTokenLength\n\t\t\t}).then(breakdown => reportContextBreakdown(breakdown)).catch(err => {\n\t\t\t\tthis._logService.error('Context breakdown failed', err);\n\t\t\t});\n\t\t} catch (e) {\n\t\t\tthis._logService.error('Context breakdown synchronous setup failed', e);\n\t\t}\n\t\t// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────\n\n\t\tthis._onDidBuildPrompt.fire({ result: effectiveBuildPromptResult, tools: availableTools, promptTokenLength, toolTokenCount });";
+
+    if (!code.includes(hookAnchor)) {
+      console.warn("WARN: toolCallingLoop.ts hook anchor not found — skipping Patch 51 (A)");
+    } else {
+      code = code.replace(hookAnchor, hookReplacement);
+      fs.writeFileSync(f, code);
+      console.log("Patched: toolCallingLoop.ts context breakdown hook (Patch 51 A)");
+    }
+  }
+}
+
+// (B) src/extension/extension/vscode-node/contributions.ts
+{
+  const f = "src/extension/extension/vscode-node/contributions.ts";
+  let code = fs.readFileSync(f, "utf8");
+  if (code.includes("ContextWindowStatusItem")) {
+    console.log("contributions.ts Patch 51 already present, skipping");
+  } else {
+    // Add import
+    const importAnchor = "import * as workspaceIndexingContribution from '../../workspaceChunkSearch/vscode-node/workspaceChunkSearch.contribution';";
+    const importReplacement = "import { ContextWindowStatusItem } from '../../byok/vscode-node/contextWindowStatusItem';\n" + importAnchor;
+    if (code.includes(importAnchor)) {
+      code = code.replace(importAnchor, importReplacement);
+    } else {
+      console.warn("WARN: contributions.ts import anchor not found");
+    }
+
+    // Add to array
+    const arrayAnchor = "export const vscodeNodeContributions: IExtensionContributionFactory[] = [";
+    const arrayReplacement = arrayAnchor + "\n\tasContributionFactory(ContextWindowStatusItem),";
+    if (!code.includes(arrayAnchor)) {
+      console.warn("WARN: contributions.ts array anchor not found — skipping Patch 51 (B)");
+    } else {
+      code = code.replace(arrayAnchor, arrayReplacement);
+      fs.writeFileSync(f, code);
+      console.log("Patched: contributions.ts ContextWindowStatusItem (Patch 51 B)");
+    }
+  }
+}
+PATCH51_EOF

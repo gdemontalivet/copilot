@@ -53,6 +53,7 @@ import { ToolsContribution } from '../../tools/vscode-node/tools';
 import { OTelChatDebugLogProviderContribution } from '../../trajectory/vscode-node/otelChatDebugLogProvider';
 import { InlineCompletionContribution } from '../../typescriptContext/vscode-node/languageContextService';
 import { NesRenameContribution } from '../../typescriptContext/vscode-node/nesRenameService';
+import { ContextWindowStatusItem } from '../../byok/vscode-node/contextWindowStatusItem';
 import * as workspaceIndexingContribution from '../../workspaceChunkSearch/vscode-node/workspaceChunkSearch.contribution';
 import { WorkspaceRecorderFeature } from '../../workspaceRecorder/vscode-node/workspaceRecorderFeature';
 import vscodeContributions from '../vscode/contributions';
@@ -66,6 +67,7 @@ import vscodeContributions from '../vscode/contributions';
 // ###################################################################################################
 
 export const vscodeNodeContributions: IExtensionContributionFactory[] = [
+	asContributionFactory(ContextWindowStatusItem),
 	...vscodeContributions,
 	asContributionFactory(ExtensionStateCommandContribution),
 	asContributionFactory(ConversationFeature),
