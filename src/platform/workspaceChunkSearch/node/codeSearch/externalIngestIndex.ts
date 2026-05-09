@@ -167,10 +167,17 @@ export class ExternalIngestIndex extends Disposable {
 			this._codeSearchRepoRoots.add(root);
 		}
 
-		let dbPath: string;
+let dbPath: string;
 		if (debug || !this._vsExtensionContext.storageUri || this._vsExtensionContext.storageUri.scheme !== Schemas.file) {
 			dbPath = ':memory:';
 		} else {
+			try {
+				if (!fs.existsSync(this._vsExtensionContext.storageUri.fsPath)) {
+					fs.mkdirSync(this._vsExtensionContext.storageUri.fsPath, { recursive: true });
+				}
+			} catch (e) {
+				// ignore
+			}
 			dbPath = URI.joinPath(this._vsExtensionContext.storageUri, 'codebase-external.sqlite').fsPath;
 		}
 
@@ -182,6 +189,7 @@ export class ExternalIngestIndex extends Disposable {
 		}
 	}
 
+	
 	override dispose(): void {
 		this._isDisposed = true;
 

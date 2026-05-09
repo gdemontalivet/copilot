@@ -181,7 +181,7 @@ export abstract class BaseToolsService extends Disposable implements IToolsServi
 	abstract tools: ReadonlyArray<vscode.LanguageModelToolInformation>;
 	abstract copilotTools: ReadonlyMap<ToolName, ICopilotTool<unknown>>;
 
-	private readonly ajv = new Ajv({ coerceTypes: true });
+	private readonly ajv = new Ajv({ coerceTypes: true, strict: false });
 	private didWarnAboutValidationError?: Set<string>;
 	private readonly schemaCache = new LRUCache<ValidateFunction>(16);
 

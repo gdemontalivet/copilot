@@ -75,8 +75,7 @@ export class ProxyModelsService extends Disposable implements IProxyModelsServic
 	}
 
 	private async _fetchLatestModels(copilotToken: CopilotToken | undefined, token: CancellationToken): Promise<WireTypes.ModelList.t | undefined> {
-		if (!copilotToken) {
-			return undefined;
+                if (!copilotToken || copilotToken.token === 'fake-token') {
 		}
 
 		const url = `${this._capiClient.proxyBaseURL}/models`;

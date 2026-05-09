@@ -85,6 +85,9 @@ const ajvJsonValidator = new Lazy(() => {
 		strictTypes: true,
 		allowUnionTypes: true,
 	});
+        ajv.addKeyword("enumDescriptions");
+        ajv.addKeyword("markdownDescription");
+
 	ajv.addFormat('uri', (value) => URL.canParse(value));
 	ajv.addFormat('regex', (value) => typeof value === 'string');
 
