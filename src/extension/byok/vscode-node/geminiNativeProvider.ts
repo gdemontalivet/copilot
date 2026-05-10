@@ -31,23 +31,14 @@ import { IBYOKStorageService } from './byokStorageService';
 // Surfacing that JSON in chat UI is noisy — extract the nested `error.message`.
 function extractReadableGeminiMessage(err: unknown): string {
 	if (err instanceof ApiError) {
-		let currentMessage = err.message;
-		let parsedCount = 0;
-		while (parsedCount < 3) {
-			try {
-				const parsed = JSON.parse(currentMessage);
-				const nested = parsed?.error?.message || parsed?.message;
-				if (typeof nested === 'string' && nested.length > 0) {
-					currentMessage = nested;
-					parsedCount++;
-				} else {
-					break;
-				}
-			} catch {
-				break;
+		try {
+			const parsed = JSON.parse(err.message);
+			const nested = parsed?.error?.message;
+			if (typeof nested === 'string' && nested.length > 0) {
+				return nested;
 			}
-		}
-		return currentMessage;
+		} catch { /* fall through */ }
+		return err.message;
 	}
 	return toErrorMessage(err);
 }
@@ -111,7 +102,7 @@ function classifyRetryableGeminiError(err: unknown): 'rate-limit' | 'unavailable
 	const transientCodes = new Set(['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
 	if (code && transientCodes.has(code)) { return 'network'; }
 	const msg = typeof e?.message === 'string' ? e.message.toLowerCase() : '';
-	if (/fetch failed|network error|timed? ?out|socket hang up|stream has been closed/.test(msg)) { return 'network'; }
+	if (/fetch failed|network error|timed? ?out|socket hang up/.test(msg)) { return 'network'; }
 	return null;
 }
 // ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
@@ -541,7 +532,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 	private async _makeRequest(client: GoogleGenAI, progress: Progress<LMResponsePart>, params: GenerateContentParameters, token: CancellationToken, issuedTime: number, retryCount = 0): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined }> {
 		// BYOK CUSTOM PATCH: retry + connect-timeout constants
 		const MAX_RETRIES = 6;
-		const CONNECT_TIMEOUT_MS = 30_000;
+		const CONNECT_TIMEOUT_MS = 120_000;
 		const start = Date.now();
 		let ttft: number | undefined;
 		let ttfte: number | undefined;
