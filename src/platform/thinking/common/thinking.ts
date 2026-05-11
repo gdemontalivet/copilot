@@ -4,6 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 export interface ThinkingDataInMessage {
+	// DeepSeek / OpenAI reasoning field for Completions
+	reasoning_content?: string;
+
 	// Azure Open AI fields for Completions
 	cot_id?: string;
 	cot_summary?: string;
@@ -14,6 +17,9 @@ export interface ThinkingDataInMessage {
 }
 
 export interface RawThinkingDelta {
+	// DeepSeek / OpenAI reasoning field
+	reasoning_content?: string;
+
 	// Azure Open AI fields
 	cot_id?: string;
 	cot_summary?: string;
