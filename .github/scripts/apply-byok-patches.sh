@@ -3916,3 +3916,115 @@ const fs = require("fs");
   }
 }
 PATCH51_EOF
+
+# Patch 52: Add reasoning_content field to ThinkingDataInMessage and RawThinkingDelta
+# interfaces in thinking.ts. DeepSeek v4 sends reasoning_content in delta chunks
+# during thinking mode. Without this field, the thinking data is lost, and on
+# subsequent requests the missing reasoning_content causes a HTTP 400 from DeepSeek:
+# "The reasoning_content in the thinking mode must be passed back to the API."
+node << 'PATCH52_EOF'
+const fs = require("fs");
+const f = "src/platform/thinking/common/thinking.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("// DeepSeek / OpenAI reasoning field for Completions")) {
+  console.log("thinking.ts reasoning_content already present, skipping");
+  process.exit(0);
+}
+
+// Add to ThinkingDataInMessage (right after the opening brace)
+const inMsgAnchor = "export interface ThinkingDataInMessage {";
+const inMsgField = "\n\t// DeepSeek / OpenAI reasoning field for Completions\n\treasoning_content?: string;\n";
+if (code.includes(inMsgAnchor)) {
+  code = code.replace(inMsgAnchor, inMsgAnchor + inMsgField);
+  console.log("Patched: ThinkingDataInMessage.reasoning_content (Patch 52 A)");
+} else {
+  console.warn("WARN: ThinkingDataInMessage anchor not found — skipping Patch 52 (A)");
+}
+
+// Add to RawThinkingDelta (right after the opening brace)
+const rawAnchor = "export interface RawThinkingDelta {";
+const rawField = "\n\t// DeepSeek / OpenAI reasoning field\n\treasoning_content?: string;\n";
+if (code.includes(rawAnchor)) {
+  code = code.replace(rawAnchor, rawAnchor + rawField);
+  console.log("Patched: RawThinkingDelta.reasoning_content (Patch 52 B)");
+} else {
+  console.warn("WARN: RawThinkingDelta anchor not found — skipping Patch 52 (B)");
+}
+
+fs.writeFileSync(f, code);
+console.log("Patched: thinking.ts reasoning_content fields (Patch 52)");
+PATCH52_EOF
+
+# Patch 53: Prioritise reasoning_content in getThinkingDeltaText() so DeepSeek's
+# thinking-mode field is surfaced as a LanguageModelThinkingPart, which in turn
+# gets round-tripped back to the API on subsequent requests.
+#
+# The check is inserted BEFORE cot_summary so DeepSeek's field wins over Azure's.
+# Order: reasoning_content > cot_summary > reasoning_text > thinking
+node << 'PATCH53_EOF'
+const fs = require("fs");
+const f = "src/platform/thinking/common/thinkingUtils.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("if (thinking.reasoning_content) {")) {
+  console.log("thinkingUtils.ts reasoning_content check already present, skipping");
+  process.exit(0);
+}
+
+const anchor = `function getThinkingDeltaText(thinking: RawThinkingDelta | undefined): string | undefined {
+\tif (!thinking) {
+\t\treturn '';
+\t}
+\tif (thinking.cot_summary) {`;
+
+const replacement = `function getThinkingDeltaText(thinking: RawThinkingDelta | undefined): string | undefined {
+\tif (!thinking) {
+\t\treturn '';
+\t}
+\tif (thinking.reasoning_content) {
+\t\treturn thinking.reasoning_content;
+\t}
+\tif (thinking.cot_summary) {`;
+
+if (code.includes(anchor)) {
+  code = code.replace(anchor, replacement);
+  console.log("Patched: getThinkingDeltaText reasoning_content priority (Patch 53)");
+  fs.writeFileSync(f, code);
+} else {
+  console.warn("WARN: getThinkingDeltaText anchor not found — skipping Patch 53");
+}
+PATCH53_EOF
+
+# Patch 54: Re-serialise reasoning_content in the CAPI createRequestBody callback
+# so DeepSeek v4's thinking-mode field is round-tripped on follow-up requests.
+# Without this, the assistant message sent back to DeepSeek is missing
+# reasoning_content, triggering HTTP 400:
+# "The reasoning_content in the thinking mode must be passed back to the API."
+node << 'PATCH54_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/node/openAIEndpoint.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("out.reasoning_content = text;")) {
+  console.log("openAIEndpoint.ts reasoning_content re-serialisation already present, skipping");
+  process.exit(0);
+}
+
+const anchor = `\t\t\t\t\tconst text = Array.isArray(data.text) ? data.text.join('') : data.text;
+\t\t\t\t\tif (text) {
+\t\t\t\t\t\tout.cot_summary = text;`;
+
+const replacement = `\t\t\t\t\tconst text = Array.isArray(data.text) ? data.text.join('') : data.text;
+\t\t\t\t\tif (text) {
+\t\t\t\t\t\tout.cot_summary = text;
+\t\t\t\t\t\tout.reasoning_content = text;`;
+
+if (code.includes(anchor)) {
+  code = code.replace(anchor, replacement);
+  console.log("Patched: openAIEndpoint.ts reasoning_content re-serialisation (Patch 54)");
+  fs.writeFileSync(f, code);
+} else {
+  console.warn("WARN: openAIEndpoint.ts anchor not found — skipping Patch 54");
+}
+PATCH54_EOF
