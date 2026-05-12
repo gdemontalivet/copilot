@@ -143,10 +143,27 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 					continue; // Skip models without names
 				}
 
-				// Enable only known models.
+				// ─── BYOK CUSTOM PATCH: gemini model allowlist relaxation (Patch 59) ───
+				// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+				// Prefer the Microsoft-curated known-models entry when present so
+				// production-grade models keep their hand-tuned capabilities. For
+				// every other chat-capable model Google's API advertises, build a
+				// sensible BYOKModelCapabilities entry from `Model.displayName`,
+				// `inputTokenLimit`, `outputTokenLimit`, and a name-based heuristic
+				// for tool-calling / vision / thinking. Without this fallback the
+				// allowlist drops every new Gemini preview model (e.g.
+				// `gemini-3.1-flash-lite-preview` after gemini-3.1-pro-preview
+				// shipped) until the upstream curated list is refreshed, which
+				// can take weeks.
 				if (this._knownModels && this._knownModels[modelId]) {
 					modelList[modelId] = this._knownModels[modelId];
+					continue;
 				}
+				const inferred = this._inferGeminiCapabilities(model);
+				if (inferred) {
+					modelList[modelId] = inferred;
+				}
+				// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────
 			}
 			return byokKnownModelsToAPIInfo(this._name, modelList);
 		} catch (e) {
@@ -684,4 +701,56 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 			throw new Error(extractReadableGeminiMessage(error), { cause: error });
 		}
 	}
+
+	// ─── BYOK CUSTOM PATCH: gemini model allowlist relaxation helpers (Patch 59) ───
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// See call site above (search for "gemini model allowlist relaxation") for
+	// rationale. Both helpers are intentionally `protected` so subclasses
+	// (e.g. VertexGeminiLMProvider) can override the heuristic.
+	protected _inferGeminiCapabilities(model: { name?: string; displayName?: string; description?: string; supportedActions?: string[]; inputTokenLimit?: number; outputTokenLimit?: number }): BYOKModelCapabilities | undefined {
+		const id = model.name;
+		if (!id) {
+			return undefined;
+		}
+		// Skip non-chat model families even when Google's `/models` endpoint
+		// reports them. supportedActions is the authoritative signal when
+		// populated; otherwise fall back to the name regex.
+		if (model.supportedActions && !model.supportedActions.includes('generateContent')) {
+			return undefined;
+		}
+		if (/embedding|aqa|imagen|veo|tts|text-bison|chat-bison|live-2|live-audio/i.test(id)) {
+			return undefined;
+		}
+		// Only Gemini chat families past this point. Anything else (e.g. a
+		// hypothetical future "palm-*") should fall back to the curated list.
+		if (!/gemini/i.test(id)) {
+			return undefined;
+		}
+		// Capability heuristics — chosen for false-positive over false-negative
+		// because we can already see in `_knownModels` that every modern
+		// Gemini chat model supports tools + images. The user can override
+		// per-model via `chatLanguageModels.json`.
+		const supportsToolCalling = true;
+		const supportsVision = !/text-only/i.test(id);
+		const supportsThinking = /gemini-3(\.|-)/i.test(id) || /thinking/i.test(id);
+		const isLite = /lite/i.test(id);
+		return {
+			name: model.displayName ?? this._humanizeGeminiModelId(id),
+			toolCalling: supportsToolCalling,
+			vision: supportsVision,
+			maxInputTokens: model.inputTokenLimit ?? (isLite ? 1_000_000 : 2_000_000),
+			maxOutputTokens: model.outputTokenLimit ?? 65_536,
+			thinking: supportsThinking,
+			...(supportsThinking ? { supportsReasoningEffort: ['low', 'medium', 'high'] } : {}),
+		};
+	}
+
+	protected _humanizeGeminiModelId(id: string): string {
+		return id
+			.replace(/^models\//, '')
+			.split('-')
+			.map(part => part.length === 0 ? part : part.charAt(0).toUpperCase() + part.slice(1))
+			.join(' ');
+	}
+	// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────
 }

@@ -4189,3 +4189,55 @@ code = code.replace(resultAnchor, replacement);
 fs.writeFileSync(f, code);
 console.log("Patched: languageModelAccess.ts empty-stop retry (Patch 57)");
 PATCH57_EOF
+
+# Patch 59: Relax the Gemini provider's hard allowlist on model discovery.
+# Without this, every Gemini preview model Google releases (e.g.
+# gemini-3.1-flash-lite-preview after gemini-3.1-pro-preview shipped)
+# stays invisible in the picker until the Microsoft-curated known-models
+# list refreshes — weeks of lag. Preserves known-models entries verbatim
+# but adds a `_inferGeminiCapabilities` fallback that builds a sensible
+# BYOKModelCapabilities entry from Model.displayName / inputTokenLimit /
+# outputTokenLimit + a name-based heuristic for tool-calling / vision /
+# thinking. Non-chat families (embedding / imagen / veo / etc.) are
+# filtered out by supportedActions + a name regex. See
+# `.cursor/rules/byok-custom-patches.mdc` entry 59 for rationale.
+node << 'PATCH59_EOF'
+const fs = require("fs");
+const path = require("path");
+const f = path.join("src", "extension", "byok", "vscode-node", "geminiNativeProvider.ts");
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: gemini model allowlist relaxation")) {
+  console.log("Patch 59 (gemini model allowlist relaxation) already present, skipping");
+  process.exit(0);
+}
+
+// Step A: replace the existing if-known-only block with the relaxed
+// fallback. Anchor is the exact pre-patch block including the indentation
+// and the trailing close brace.
+const callSiteAnchor = "\t\t\t\t// Enable only known models.\n\t\t\t\tif (this._knownModels && this._knownModels[modelId]) {\n\t\t\t\t\tmodelList[modelId] = this._knownModels[modelId];\n\t\t\t\t}";
+const callSiteReplacement = "\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: gemini model allowlist relaxation (Patch 59) \u2500\u2500\u2500\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t\t\t// Prefer the Microsoft-curated known-models entry when present so\n\t\t\t\t// production-grade models keep their hand-tuned capabilities. For\n\t\t\t\t// every other chat-capable model Google's API advertises, build a\n\t\t\t\t// sensible BYOKModelCapabilities entry from `Model.displayName`,\n\t\t\t\t// `inputTokenLimit`, `outputTokenLimit`, and a name-based heuristic\n\t\t\t\t// for tool-calling / vision / thinking. Without this fallback the\n\t\t\t\t// allowlist drops every new Gemini preview model (e.g.\n\t\t\t\t// `gemini-3.1-flash-lite-preview` after gemini-3.1-pro-preview\n\t\t\t\t// shipped) until the upstream curated list is refreshed, which\n\t\t\t\t// can take weeks.\n\t\t\t\tif (this._knownModels && this._knownModels[modelId]) {\n\t\t\t\t\tmodelList[modelId] = this._knownModels[modelId];\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tconst inferred = this._inferGeminiCapabilities(model);\n\t\t\t\tif (inferred) {\n\t\t\t\t\tmodelList[modelId] = inferred;\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+
+if (!code.includes(callSiteAnchor)) {
+  console.warn("WARN: geminiNativeProvider getAllModels allowlist anchor not found \u2014 skipping Patch 59 (call site)");
+  process.exit(0);
+}
+code = code.replace(callSiteAnchor, callSiteReplacement);
+
+// Step B: insert the helpers immediately before the class-closing brace.
+// Anchor is the exact tail of `doRequest`'s catch block followed by the
+// class close — stable across upstream tweaks because both the AbortError
+// branch and the closing brace pair are part of the public method shape.
+const helpersAnchor = "\t\t\tthis._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);\n\t\t\tif ((error as any)?.name === 'AbortError' || token.isCancellationRequested) {\n\t\t\t\tthrow error;\n\t\t\t}\n\t\t\tthrow new Error(extractReadableGeminiMessage(error), { cause: error });\n\t\t}\n\t}\n}";
+const helpersReplacement = "\t\t\tthis._logService.error(`Gemini streaming error: ${toErrorMessage(error, true)}`);\n\t\t\tif ((error as any)?.name === 'AbortError' || token.isCancellationRequested) {\n\t\t\t\tthrow error;\n\t\t\t}\n\t\t\tthrow new Error(extractReadableGeminiMessage(error), { cause: error });\n\t\t}\n\t}\n\n\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: gemini model allowlist relaxation helpers (Patch 59) \u2500\u2500\u2500\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// See call site above (search for \"gemini model allowlist relaxation\") for\n\t// rationale. Both helpers are intentionally `protected` so subclasses\n\t// (e.g. VertexGeminiLMProvider) can override the heuristic.\n\tprotected _inferGeminiCapabilities(model: { name?: string; displayName?: string; description?: string; supportedActions?: string[]; inputTokenLimit?: number; outputTokenLimit?: number }): BYOKModelCapabilities | undefined {\n\t\tconst id = model.name;\n\t\tif (!id) {\n\t\t\treturn undefined;\n\t\t}\n\t\t// Skip non-chat model families even when Google's `/models` endpoint\n\t\t// reports them. supportedActions is the authoritative signal when\n\t\t// populated; otherwise fall back to the name regex.\n\t\tif (model.supportedActions && !model.supportedActions.includes('generateContent')) {\n\t\t\treturn undefined;\n\t\t}\n\t\tif (/embedding|aqa|imagen|veo|tts|text-bison|chat-bison|live-2|live-audio/i.test(id)) {\n\t\t\treturn undefined;\n\t\t}\n\t\t// Only Gemini chat families past this point. Anything else (e.g. a\n\t\t// hypothetical future \"palm-*\") should fall back to the curated list.\n\t\tif (!/gemini/i.test(id)) {\n\t\t\treturn undefined;\n\t\t}\n\t\t// Capability heuristics \u2014 chosen for false-positive over false-negative\n\t\t// because we can already see in `_knownModels` that every modern\n\t\t// Gemini chat model supports tools + images. The user can override\n\t\t// per-model via `chatLanguageModels.json`.\n\t\tconst supportsToolCalling = true;\n\t\tconst supportsVision = !/text-only/i.test(id);\n\t\tconst supportsThinking = /gemini-3(\\.|-)/i.test(id) || /thinking/i.test(id);\n\t\tconst isLite = /lite/i.test(id);\n\t\treturn {\n\t\t\tname: model.displayName ?? this._humanizeGeminiModelId(id),\n\t\t\ttoolCalling: supportsToolCalling,\n\t\t\tvision: supportsVision,\n\t\t\tmaxInputTokens: model.inputTokenLimit ?? (isLite ? 1_000_000 : 2_000_000),\n\t\t\tmaxOutputTokens: model.outputTokenLimit ?? 65_536,\n\t\t\tthinking: supportsThinking,\n\t\t\t...(supportsThinking ? { supportsReasoningEffort: ['low', 'medium', 'high'] } : {}),\n\t\t};\n\t}\n\n\tprotected _humanizeGeminiModelId(id: string): string {\n\t\treturn id\n\t\t\t.replace(/^models\\//, '')\n\t\t\t.split('-')\n\t\t\t.map(part => part.length === 0 ? part : part.charAt(0).toUpperCase() + part.slice(1))\n\t\t\t.join(' ');\n\t}\n\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n}";
+
+if (!code.includes(helpersAnchor)) {
+  console.warn("WARN: geminiNativeProvider class-tail anchor not found \u2014 skipping Patch 59 (helpers); call-site patch already wrote in references that won't resolve at compile time");
+  // Don't write the partial step-A change. Re-read original to roll back.
+  process.exit(0);
+}
+code = code.replace(helpersAnchor, helpersReplacement);
+
+fs.writeFileSync(f, code);
+console.log("Patched: geminiNativeProvider.ts gemini allowlist relaxation (Patch 59)");
+PATCH59_EOF
