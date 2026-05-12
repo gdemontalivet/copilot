@@ -56,13 +56,36 @@ wall clock.
   The way to verify is push → wait for CI → maintainer installs → user
   reports back.
 
-## Version bump
+## Version bump — MUST do on every push
 
-The `.github/scripts/apply-byok-patches.sh` script bumps
-`package.json → version` by one patch level on every run (Patch 3). You do
-NOT need to manually bump it. Each push to `main` produces a new vsix
-whose version is one higher than the previous CI build, which is what
-makes VS Code prefer it over the built-in Copilot Chat extension.
+Patch 3 bumps `package.json → version` by one patch level at CI time.
+**CRITICAL:** it bumps from whatever is currently in `package.json` in the
+repo. This means **two pushes on the same day from the same upstream base
+produce the same version**, and VS Code silently refuses to install the
+second VSIX ("extension already installed").
+
+**You MUST bump `package.json → version` by one patch level before every
+commit that is intended to ship a new VSIX**, using:
+
+```bash
+node -e "
+const fs = require('fs');
+const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+const [ma, mi, pa] = p.version.split('.').map(Number);
+p.version = \`\${ma}.\${mi}.\${pa + 1}\`;
+fs.writeFileSync('package.json', JSON.stringify(p, null, '\t') + '\n');
+console.log('bumped to', p.version);
+"
+```
+
+Then verify that `bash .github/scripts/apply-byok-patches.sh` reports
+`version: X.Y.Z+2` (one higher than what you just set, because Patch 3
+adds another +1). Commit `package.json` as part of the same commit as the
+fix so the version and the change ship together.
+
+**Rule of thumb:** if `package.json` already says `0.N.M` and the last CI
+build was also `0.N.M+1`, you need to set it to `0.N.M+1` before pushing
+so Patch 3 produces `0.N.M+2`.
 
 ## Honest-feedback expectation
 

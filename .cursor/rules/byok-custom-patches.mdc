@@ -107,7 +107,30 @@ When making a custom change that touches upstream files:
 - [ ] Gracefully skip on missing anchors (exit 0, log warning)
 - [ ] Test fresh-apply: stash, run script, diff against stash, confirm match
 - [ ] Test idempotency: run script twice, confirm second run skips
-- [ ] Commit the source changes AND the script update together
+- [ ] **Bump `package.json → version` by one patch level** (see below)
+- [ ] Commit the source changes, the script update, AND `package.json` together
+
+### Version bump — required on every push
+
+Patch 3 bumps `package.json → version` by +1 at CI time. If you push two
+commits on the same day without bumping the source version first, both CI
+builds produce the **same version number** and VS Code silently refuses to
+install the second one ("extension already installed at version X.Y.Z").
+
+**Always run this before committing:**
+
+```bash
+node -e "
+const fs = require('fs');
+const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+const [ma, mi, pa] = p.version.split('.').map(Number);
+p.version = \`\${ma}.\${mi}.\${pa + 1}\`;
+fs.writeFileSync('package.json', JSON.stringify(p, null, '\t') + '\n');
+console.log('bumped to', p.version);
+"
+bash .github/scripts/apply-byok-patches.sh 2>&1 | grep "version:"
+# Should print: version: X.Y.Z+2  (one higher than what you set)
+```
 
 ## Existing Patches (as of this rule)
 
