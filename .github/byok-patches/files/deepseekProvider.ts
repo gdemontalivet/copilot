@@ -88,17 +88,17 @@ export class DeepSeekBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
 	/**
 	 * Serve models from the hardcoded table — no live /models API call.
 	 *
-	 * Returns empty until an API key is configured (consistent with Anthropic,
-	 * Gemini, and xAI: models only appear after the key is entered). Once a
-	 * key is present we return the full catalogue immediately without hitting
-	 * the network, avoiding the 401 / "Invalid response format" error that the
-	 * base-class discovery path produces before the key is set.
+	 * Mirrors the base-class `getModelsFromEndpoint` guard (`if (!apiKey && silent)`)
+	 * so the behaviour is:
+	 *   - Background refresh, no key  → empty (models don't clutter the picker)
+	 *   - User opens Add Models, no key → return catalogue (VS Code can prompt for key)
+	 *   - Any call with a key          → return catalogue immediately, no network call
 	 */
 	protected override async getAllModels(
-		_silent: boolean,
+		silent: boolean,
 		apiKey: string | undefined,
 	): Promise<OpenAICompatibleLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
-		if (!apiKey) {
+		if (!apiKey && silent) {
 			return [];
 		}
 		const url = this.getModelsBaseUrl()!;
