@@ -88,19 +88,19 @@ export class DeepSeekBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
 	/**
 	 * Serve models from the hardcoded table — no live /models API call.
 	 *
-	 * DeepSeek has a very small, stable model catalogue (2 production models +
-	 * 2 deprecated aliases). Bypassing API discovery means:
-	 *   - Models appear in the picker immediately, even before the key is set.
-	 *   - No 401/format errors during extension startup.
-	 *   - No quota burn from the Patch 42 cache-miss window.
-	 *
-	 * If DeepSeek ever ships a new model that isn't in KNOWN_MODELS, users can
-	 * still reach it via the CustomOAI provider until we add it here.
+	 * Returns empty until an API key is configured (consistent with Anthropic,
+	 * Gemini, and xAI: models only appear after the key is entered). Once a
+	 * key is present we return the full catalogue immediately without hitting
+	 * the network, avoiding the 401 / "Invalid response format" error that the
+	 * base-class discovery path produces before the key is set.
 	 */
 	protected override async getAllModels(
 		_silent: boolean,
-		_apiKey: string | undefined,
+		apiKey: string | undefined,
 	): Promise<OpenAICompatibleLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
+		if (!apiKey) {
+			return [];
+		}
 		const url = this.getModelsBaseUrl()!;
 		return byokKnownModelsToAPIInfoWithEffort(DeepSeekBYOKLMProvider.providerName, KNOWN_MODELS)
 			.map(model => ({ ...model, url }));
