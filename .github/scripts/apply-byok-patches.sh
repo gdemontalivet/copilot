@@ -675,6 +675,10 @@ install_byok_file \
   ".github/byok-patches/files/vertexGeminiProvider.ts" \
   "src/extension/byok/vscode-node/vertexGeminiProvider.ts"
 
+install_byok_file \
+  ".github/byok-patches/files/deepseekProvider.ts" \
+  "src/extension/byok/vscode-node/deepseekProvider.ts"
+
 # Patch 10: Anthropic provider — createClient() hook + fail-over wrapper
 # Required so VertexAnthropicLMProvider can subclass it and reuse the stream
 # handling, and so the primary Anthropic path can transparently failover to
@@ -4028,3 +4032,82 @@ if (code.includes(anchor)) {
   console.warn("WARN: openAIEndpoint.ts anchor not found — skipping Patch 54");
 }
 PATCH54_EOF
+
+# Patch 55: Register DeepSeekBYOKLMProvider in byokContribution.ts.
+# DeepSeek V4 (deepseek-v4-flash / deepseek-v4-pro) has a 1 M token context
+# window and requires no round-trip of reasoning_content (see deepseekProvider.ts).
+# A dedicated vendor ('deepseek') gives it a separate API-key slot and model
+# picker entry, avoiding confusion with the generic CustomOAI provider.
+node << 'PATCH55_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/byokContribution.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("DeepSeekBYOKLMProvider")) {
+  console.log("DeepSeek already registered in byokContribution.ts, skipping");
+  process.exit(0);
+}
+
+// Step 1: add import after the xAI import line.
+const importAnchor = "import { XAIBYOKLMProvider } from './xAIProvider';";
+if (!code.includes(importAnchor)) {
+  console.warn("WARN: xAIProvider import anchor not found — skipping Patch 55");
+  process.exit(0);
+}
+code = code.replace(importAnchor, importAnchor + "\nimport { DeepSeekBYOKLMProvider } from './deepseekProvider';");
+
+// Step 2: register after the XAI provider line.
+const xaiLine = "this._providers.set(XAIBYOKLMProvider.providerId, instantiationService.createInstance(XAIBYOKLMProvider, knownModels[XAIBYOKLMProvider.providerName], this._byokStorageService));";
+if (!code.includes(xaiLine)) {
+  console.warn("WARN: XAI provider registration anchor not found — skipping Patch 55 step 2");
+  fs.writeFileSync(f, code); // still write step 1
+  process.exit(0);
+}
+const registration = xaiLine + "\n\t\t\tthis._providers.set(DeepSeekBYOKLMProvider.providerId, instantiationService.createInstance(DeepSeekBYOKLMProvider, knownModels[DeepSeekBYOKLMProvider.providerName], this._byokStorageService));";
+code = code.replace(xaiLine, registration);
+
+fs.writeFileSync(f, code);
+console.log("Patched: byokContribution.ts (DeepSeek registration)");
+PATCH55_EOF
+
+# Patch 56: Declare `deepseek` as a known languageModelChatProviders vendor in
+# package.json. Without this VS Code refuses the
+# `lm.registerLanguageModelChatProvider('deepseek', ...)` call with
+# "Chat model provider uses UNKNOWN vendor deepseek".
+# Mirrors Patches 14 (vertexanthropic), 28 (vertexgemini), 37 (byokauto).
+node << 'PATCH56_EOF'
+const fs = require("fs");
+const f = "package.json";
+let pkg = JSON.parse(fs.readFileSync(f, "utf8"));
+
+const providers = pkg?.contributes?.languageModelChatProviders;
+if (!Array.isArray(providers)) {
+  console.log("languageModelChatProviders missing, skipping deepseek registration");
+  process.exit(0);
+}
+
+// Normalise any stray casing that a manual edit might have introduced.
+for (const p of providers) {
+  if (p && typeof p.vendor === "string" && p.vendor.toLowerCase() === "deepseek" && p.vendor !== "deepseek") {
+    console.log("Normalising existing DeepSeek vendor casing (" + p.vendor + " -> deepseek)");
+    p.vendor = "deepseek";
+  }
+}
+
+if (providers.some(p => p && p.vendor === "deepseek")) {
+  fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+  console.log("deepseek vendor already declared, ensured lowercase");
+  process.exit(0);
+}
+
+providers.push({
+  vendor: "deepseek",
+  displayName: "DeepSeek",
+  configuration: {
+    label: "DeepSeek API Key",
+    type: "secret"
+  }
+});
+fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+console.log("Patched: deepseek vendor declared in package.json (Patch 56)");
+PATCH56_EOF
