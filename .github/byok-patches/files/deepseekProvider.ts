@@ -22,12 +22,14 @@
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { CancellationToken, LanguageModelChatMessage, LanguageModelChatMessage2, LanguageModelResponsePart2, LanguageModelTextPart, LanguageModelToolCallPart, Progress, ProvideLanguageModelChatResponseOptions } from 'vscode';
 import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IFetcherService } from '../../../platform/networking/common/fetcherService';
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { BYOKKnownModels, BYOKModelCapabilities } from '../common/byokProvider';
+import { DsmlToolCallStripper } from '../common/dsmlToolCallStripper';
 import { AbstractOpenAICompatibleLMProvider, LanguageModelChatConfiguration, OpenAICompatibleLanguageModelChatInformation } from './abstractLanguageModelChatProvider';
 import { byokKnownModelsToAPIInfoWithEffort } from './byokModelInfo';
 import { IBYOKStorageService } from './byokStorageService';
@@ -83,6 +85,64 @@ export class DeepSeekBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
 
 	protected getModelsBaseUrl(): string | undefined {
 		return 'https://api.deepseek.com';
+	}
+
+	/**
+	 * Override the response handler to install a streaming DSML sanitizer
+	 * between the OpenAI-compatible stream and the VS Code progress
+	 * reporter. DeepSeek V4 has a known server-side bug
+	 * (vllm-project/vllm#40801) where in ~11% of `tool_choice=auto`
+	 * + `stream=true` requests, the model's native DSML tool-call tokens
+	 * leak into `delta.content` as plain text instead of being parsed
+	 * into structured `tool_calls`. Without this wrapper, the agent loop
+	 * treats the markup as an assistant message and the tool calls are
+	 * never executed — the user sees raw `<｜｜DSML｜｜tool_calls>…` in chat.
+	 *
+	 * The wrapped progress reporter:
+	 *   1. Forwards thinking parts, real tool-call parts, and any other
+	 *      non-text parts unchanged.
+	 *   2. Feeds incoming text-part deltas through `DsmlToolCallStripper`,
+	 *      which emits sanitized text and any structured tool calls
+	 *      extracted from DSML markup as separate parts.
+	 *
+	 * Stripper state is per-request — a fresh instance per
+	 * `provideLanguageModelChatResponse` invocation — so concurrent
+	 * requests never share buffers.
+	 */
+	override async provideLanguageModelChatResponse(
+		model: OpenAICompatibleLanguageModelChatInformation<LanguageModelChatConfiguration>,
+		messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>,
+		options: ProvideLanguageModelChatResponseOptions,
+		progress: Progress<LanguageModelResponsePart2>,
+		token: CancellationToken,
+	): Promise<void> {
+		const stripper = new DsmlToolCallStripper();
+		const wrappedProgress: Progress<LanguageModelResponsePart2> = {
+			report: (part: LanguageModelResponsePart2) => {
+				if (part instanceof LanguageModelTextPart) {
+					const { text, calls } = stripper.process(part.value);
+					if (text) {
+						progress.report(new LanguageModelTextPart(text));
+					}
+					for (const call of calls) {
+						progress.report(new LanguageModelToolCallPart(call.id, call.name, call.args));
+					}
+					return;
+				}
+				progress.report(part);
+			},
+		};
+		try {
+			await super.provideLanguageModelChatResponse(model, messages, options, wrappedProgress, token);
+		} finally {
+			const tail = stripper.flush();
+			if (tail.text) {
+				progress.report(new LanguageModelTextPart(tail.text));
+			}
+			for (const call of tail.calls) {
+				progress.report(new LanguageModelToolCallPart(call.id, call.name, call.args));
+			}
+		}
 	}
 
 	/**

@@ -679,6 +679,19 @@ install_byok_file \
   ".github/byok-patches/files/deepseekProvider.ts" \
   "src/extension/byok/vscode-node/deepseekProvider.ts"
 
+# Patch 58 deps: DSML tool-call stripper + tests (canonical files, BYOK-only,
+# wiped by nightly rsync --delete without this re-install). The stripper is
+# imported by deepseekProvider.ts to work around DeepSeek V4's intermittent
+# server-side bug where native DSML tool-call tokens leak into delta.content
+# instead of being parsed into structured tool_calls (vllm#40801).
+install_byok_file \
+  ".github/byok-patches/files/dsmlToolCallStripper.ts" \
+  "src/extension/byok/common/dsmlToolCallStripper.ts"
+
+install_byok_file \
+  ".github/byok-patches/files/dsmlToolCallStripper.spec.ts" \
+  "src/extension/byok/common/test/dsmlToolCallStripper.spec.ts"
+
 # Patch 10: Anthropic provider — createClient() hook + fail-over wrapper
 # Required so VertexAnthropicLMProvider can subclass it and reuse the stream
 # handling, and so the primary Anthropic path can transparently failover to
