@@ -28,7 +28,8 @@ import { IFetcherService } from '../../../platform/networking/common/fetcherServ
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { BYOKKnownModels, BYOKModelCapabilities } from '../common/byokProvider';
-import { AbstractOpenAICompatibleLMProvider } from './abstractLanguageModelChatProvider';
+import { AbstractOpenAICompatibleLMProvider, LanguageModelChatConfiguration, OpenAICompatibleLanguageModelChatInformation } from './abstractLanguageModelChatProvider';
+import { byokKnownModelsToAPIInfoWithEffort } from './byokModelInfo';
 import { IBYOKStorageService } from './byokStorageService';
 
 interface DeepSeekModelData {
@@ -36,26 +37,21 @@ interface DeepSeekModelData {
 	object?: string;
 }
 
-interface KnownDeepSeekModel {
-	name: string;
-	maxInputTokens: number;
-	maxOutputTokens: number;
-	toolCalling: boolean;
-}
-
 // DeepSeek V4 context window: 1 M tokens, max output: up to 384 K.
 // We advertise 64 K max output as a safe default; users who need more
-// can increase via per-model CustomOAI config or a future setting.
-const DEFAULT_MAX_INPUT = 1_000_000;
+// can set max_tokens per request.
+const DEFAULT_MAX_INPUT  = 1_000_000;
 const DEFAULT_MAX_OUTPUT = 64_000;
 
-const KNOWN_MODELS: Record<string, KnownDeepSeekModel> = {
+// Shared capability shape used both for the static model list and
+// for `resolveModelCapabilities` (API-discovery fallback).
+const KNOWN_MODELS: BYOKKnownModels = {
 	// Current production models
-	'deepseek-v4-pro':   { name: 'DeepSeek V4 Pro',   maxInputTokens: DEFAULT_MAX_INPUT, maxOutputTokens: DEFAULT_MAX_OUTPUT, toolCalling: true  },
-	'deepseek-v4-flash': { name: 'DeepSeek V4 Flash', maxInputTokens: DEFAULT_MAX_INPUT, maxOutputTokens: DEFAULT_MAX_OUTPUT, toolCalling: true  },
+	'deepseek-v4-pro':   { name: 'DeepSeek V4 Pro',               maxInputTokens: DEFAULT_MAX_INPUT, maxOutputTokens: DEFAULT_MAX_OUTPUT, toolCalling: true,  vision: false, thinking: false, supportsReasoningEffort: ['high', 'max'] },
+	'deepseek-v4-flash': { name: 'DeepSeek V4 Flash',             maxInputTokens: DEFAULT_MAX_INPUT, maxOutputTokens: DEFAULT_MAX_OUTPUT, toolCalling: true,  vision: false, thinking: false, supportsReasoningEffort: ['high', 'max'] },
 	// Deprecated aliases (→ deepseek-v4-flash, going away 2026-07-24)
-	'deepseek-chat':     { name: 'DeepSeek Chat (→ V4 Flash)', maxInputTokens: DEFAULT_MAX_INPUT, maxOutputTokens: DEFAULT_MAX_OUTPUT, toolCalling: true  },
-	'deepseek-reasoner': { name: 'DeepSeek Reasoner (→ V4 Flash)', maxInputTokens: DEFAULT_MAX_INPUT, maxOutputTokens: DEFAULT_MAX_OUTPUT, toolCalling: false },
+	'deepseek-chat':     { name: 'DeepSeek Chat (→ V4 Flash)',    maxInputTokens: DEFAULT_MAX_INPUT, maxOutputTokens: DEFAULT_MAX_OUTPUT, toolCalling: true,  vision: false, thinking: false, supportsReasoningEffort: ['high', 'max'] },
+	'deepseek-reasoner': { name: 'DeepSeek Reasoner (→ V4 Flash)', maxInputTokens: DEFAULT_MAX_INPUT, maxOutputTokens: DEFAULT_MAX_OUTPUT, toolCalling: false, vision: false, thinking: false, supportsReasoningEffort: ['high', 'max'] },
 };
 
 export class DeepSeekBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
@@ -89,43 +85,56 @@ export class DeepSeekBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
 		return 'https://api.deepseek.com';
 	}
 
+	/**
+	 * Serve models from the hardcoded table — no live /models API call.
+	 *
+	 * DeepSeek has a very small, stable model catalogue (2 production models +
+	 * 2 deprecated aliases). Bypassing API discovery means:
+	 *   - Models appear in the picker immediately, even before the key is set.
+	 *   - No 401/format errors during extension startup.
+	 *   - No quota burn from the Patch 42 cache-miss window.
+	 *
+	 * If DeepSeek ever ships a new model that isn't in KNOWN_MODELS, users can
+	 * still reach it via the CustomOAI provider until we add it here.
+	 */
+	protected override async getAllModels(
+		_silent: boolean,
+		_apiKey: string | undefined,
+	): Promise<OpenAICompatibleLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
+		const url = this.getModelsBaseUrl()!;
+		return byokKnownModelsToAPIInfoWithEffort(DeepSeekBYOKLMProvider.providerName, KNOWN_MODELS)
+			.map(model => ({ ...model, url }));
+	}
+
+	/**
+	 * Fallback capability resolver used when API discovery is active (e.g. if a
+	 * subclass re-enables it). Maps model IDs to the KNOWN_MODELS table first,
+	 * then falls back to sensible V4 defaults.
+	 */
 	protected override resolveModelCapabilities(modelData: unknown): BYOKModelCapabilities | undefined {
 		const model = modelData as DeepSeekModelData;
 		if (!model?.id) {
 			return undefined;
 		}
-
-		const known = this._lookupKnown(model.id);
-
-		return {
-			name:           known?.name     ?? this._humanize(model.id),
-			toolCalling:    known?.toolCalling ?? true,
-			vision:         false,
-			maxInputTokens: known?.maxInputTokens  ?? DEFAULT_MAX_INPUT,
-			maxOutputTokens: known?.maxOutputTokens ?? DEFAULT_MAX_OUTPUT,
-			// `thinking: false` — DeepSeek's reasoning_content is captured
-			// and shown by Patch 53 but MUST NOT be sent back to the API
-			// on subsequent turns (causes HTTP 400 per DeepSeek docs).
-			thinking: false,
-			// `reasoning_effort` maps to 'high' (default) or 'max' on DeepSeek.
-			// The existing `_applyReasoningEffort` in openAIEndpoint.ts writes
-			// this as a top-level `reasoning_effort` field (chat-completions format).
-			supportsReasoningEffort: ['high', 'max'],
-		};
+		return KNOWN_MODELS[model.id] ?? this._capabilitiesForUnknown(model.id);
 	}
 
-	/** Exact-match first, then prefix-match for future model IDs. */
-	private _lookupKnown(modelId: string): KnownDeepSeekModel | undefined {
-		if (KNOWN_MODELS[modelId]) {
-			return KNOWN_MODELS[modelId];
-		}
-		// e.g. "deepseek-v4-pro-20260601" → prefix matches "deepseek-v4-pro"
-		for (const [key, val] of Object.entries(KNOWN_MODELS)) {
+	private _capabilitiesForUnknown(modelId: string): BYOKModelCapabilities {
+		// Prefix-match: e.g. "deepseek-v4-pro-20260601" → deepseek-v4-pro defaults
+		for (const [key, caps] of Object.entries(KNOWN_MODELS)) {
 			if (modelId.startsWith(key)) {
-				return val;
+				return { ...caps, name: this._humanize(modelId) };
 			}
 		}
-		return undefined;
+		return {
+			name: this._humanize(modelId),
+			toolCalling: true,
+			vision: false,
+			maxInputTokens: DEFAULT_MAX_INPUT,
+			maxOutputTokens: DEFAULT_MAX_OUTPUT,
+			thinking: false,
+			supportsReasoningEffort: ['high', 'max'],
+		};
 	}
 
 	private _humanize(modelId: string): string {
