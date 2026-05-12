@@ -4104,8 +4104,15 @@ providers.push({
   vendor: "deepseek",
   displayName: "DeepSeek",
   configuration: {
-    label: "DeepSeek API Key",
-    type: "secret"
+    properties: {
+      apiKey: {
+        type: "string",
+        secret: true,
+        description: "API key for DeepSeek",
+        title: "API Key"
+      }
+    },
+    required: ["apiKey"]
   }
 });
 fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
