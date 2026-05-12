@@ -4118,3 +4118,61 @@ providers.push({
 fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
 console.log("Patched: deepseek vendor declared in package.json (Patch 56)");
 PATCH56_EOF
+
+# Patch 57: Retry on empty-stop completions in languageModelAccess._provideLanguageModelResponse.
+# Patch 31 in chatMLFetcher converts finishReason=stop + no content into
+# Unknown/RESPONSE_EMPTY_STOP. The toolCallingLoop auto-retries in agent mode but
+# the LM-API path (used by BYOK providers, BYOKAutoLMProvider, and any external
+# extension calling model.sendRequest()) threw immediately — users saw:
+#   "Sorry, your request failed. Reason: Model returned an empty stop completion."
+# Fix: add a 2-attempt retry loop right before the error-dispatch block. Safe because
+# the finishedCb is never invoked on an empty-stop turn so no content is double-reported.
+node << 'PATCH57_EOF'
+const fs = require("fs");
+const f = "src/extension/conversation/vscode-node/languageModelAccess.ts";
+let code = fs.readFileSync(f, "utf8");
+
+const sentinel = "BYOK CUSTOM PATCH: retry on empty-stop completions (Patch 57)";
+if (code.includes(sentinel)) {
+  console.log("Patch 57 (empty-stop retry in languageModelAccess) already present, skipping");
+  process.exit(0);
+}
+
+// Step A: add RESPONSE_EMPTY_STOP to the commonTypes import.
+const importAnchor = "import { ChatFetchResponseType, ChatLocation, getErrorDetailsFromChatFetchError } from '../../../platform/chat/common/commonTypes';";
+if (!code.includes(importAnchor)) {
+  console.warn("WARN: languageModelAccess.ts commonTypes import anchor not found — skipping Patch 57");
+  process.exit(0);
+}
+code = code.replace(
+  importAnchor,
+  "import { ChatFetchResponseType, ChatLocation, getErrorDetailsFromChatFetchError, RESPONSE_EMPTY_STOP } from '../../../platform/chat/common/commonTypes';"
+);
+
+// Step B: replace `const result = await wrappedRequest();` with the retry loop.
+// The method body uses 2-tab indentation at this nesting level.
+const resultAnchor = "\t\tconst result = await wrappedRequest();\n\n\t\tif (result.type !== ChatFetchResponseType.Success) {";
+if (!code.includes(resultAnchor)) {
+  console.warn("WARN: languageModelAccess.ts result anchor not found — skipping Patch 57 step B");
+  fs.writeFileSync(f, code); // still write step A
+  process.exit(0);
+}
+const replacement = `\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: retry on empty-stop completions (Patch 57) \u2500\u2500\u2500\u2500\u2500\u2500\u2500
+\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+\t\t// Patch 31 in chatMLFetcher converts finishReason=stop + no content into
+\t\t// Unknown/RESPONSE_EMPTY_STOP. The toolCallingLoop auto-retries in agent mode
+\t\t// but this LM-API path threw immediately. Retry up to 2 times; safe because
+\t\t// the finishedCb is never called on an empty-stop turn (no duplicate content).
+\t\tlet result = await wrappedRequest();
+\t\tfor (let _emptyStopAttempt = 1; result.type === ChatFetchResponseType.Unknown && result.reason === RESPONSE_EMPTY_STOP && _emptyStopAttempt <= 2; _emptyStopAttempt++) {
+\t\t\tthis._logService.warn(\`[LMWrapper] empty-stop completion (attempt \${_emptyStopAttempt}/2), retrying\u2026\`);
+\t\t\tresult = await wrappedRequest();
+\t\t}
+\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+\t\tif (result.type !== ChatFetchResponseType.Success) {`;
+code = code.replace(resultAnchor, replacement);
+
+fs.writeFileSync(f, code);
+console.log("Patched: languageModelAccess.ts empty-stop retry (Patch 57)");
+PATCH57_EOF

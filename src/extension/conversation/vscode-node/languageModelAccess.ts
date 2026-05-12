@@ -9,7 +9,7 @@ import * as vscode from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { CopilotToken } from '../../../platform/authentication/common/copilotToken';
 import { IBlockedExtensionService } from '../../../platform/chat/common/blockedExtensionService';
-import { ChatFetchResponseType, ChatLocation, getErrorDetailsFromChatFetchError } from '../../../platform/chat/common/commonTypes';
+import { ChatFetchResponseType, ChatLocation, getErrorDetailsFromChatFetchError, RESPONSE_EMPTY_STOP } from '../../../platform/chat/common/commonTypes';
 import { getTextPart } from '../../../platform/chat/common/globalStringUtils';
 import { EmbeddingType, getWellKnownEmbeddingTypeInfo, IEmbeddingsComputer } from '../../../platform/embeddings/common/embeddingsComputer';
 import { IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
@@ -704,7 +704,18 @@ export class CopilotLanguageModelWrapper extends Disposable {
 				? runWithCapturingToken(capturingToken, makeRequest)
 				: makeRequest();
 
-		const result = await wrappedRequest();
+		// ─── BYOK CUSTOM PATCH: retry on empty-stop completions (Patch 57) ───────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Patch 31 in chatMLFetcher converts finishReason=stop + no content into
+		// Unknown/RESPONSE_EMPTY_STOP. The toolCallingLoop auto-retries in agent mode
+		// but this LM-API path threw immediately. Retry up to 2 times; safe because
+		// the finishedCb is never called on an empty-stop turn (no duplicate content).
+		let result = await wrappedRequest();
+		for (let _emptyStopAttempt = 1; result.type === ChatFetchResponseType.Unknown && result.reason === RESPONSE_EMPTY_STOP && _emptyStopAttempt <= 2; _emptyStopAttempt++) {
+			this._logService.warn(`[LMWrapper] empty-stop completion (attempt ${_emptyStopAttempt}/2), retrying…`);
+			result = await wrappedRequest();
+		}
+		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────
 
 		if (result.type !== ChatFetchResponseType.Success) {
 			if (result.type === ChatFetchResponseType.ExtensionBlocked) {
