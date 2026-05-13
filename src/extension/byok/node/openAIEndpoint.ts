@@ -260,7 +260,14 @@ export class OpenAIEndpoint extends ChatEndpoint {
 			const callback: RawMessageConversionCallback = (out, data) => {
 				if (data && data.id) {
 					out.cot_id = data.id;
-					out.cot_summary = Array.isArray(data.text) ? data.text.join('') : data.text;
+					const reasoning = Array.isArray(data.text) ? data.text.join('') : data.text;
+					out.cot_summary = reasoning;
+					// ─── BYOK CUSTOM PATCH: reasoning_content re-serialisation (Patch 54) ──
+					// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+					// DeepSeek v4 requires reasoning_content on every follow-up assistant
+					// message when in thinking mode; without it the API returns HTTP 400.
+					out.reasoning_content = reasoning;
+					// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────
 				}
 			};
 			const body = createCapiRequestBody(options, this.model, callback);

@@ -3973,29 +3973,39 @@ fs.writeFileSync(f, code);
 console.log("Patched: thinking.ts reasoning_content fields (Patch 52)");
 PATCH52_EOF
 
-# Patch 53: Prioritise reasoning_content in getThinkingDeltaText() so DeepSeek's
-# thinking-mode field is surfaced as a LanguageModelThinkingPart, which in turn
-# gets round-tripped back to the API on subsequent requests.
+# Patch 53: Two-part fix for reasoning_content in thinkingUtils.ts.
 #
-# The check is inserted BEFORE cot_summary so DeepSeek's field wins over Azure's.
-# Order: reasoning_content > cot_summary > reasoning_text > thinking
+# Sub-fix A: Prioritise reasoning_content in getThinkingDeltaText() so
+#   DeepSeek's thinking-mode field is surfaced as a LanguageModelThinkingPart.
+#   Order: reasoning_content > cot_summary > reasoning_text > thinking
+#
+# Sub-fix B: Synthesise a stable 'reasoning' id in getThinkingDeltaId() when
+#   reasoning_content is present but no native id exists (cot_id / signature /
+#   reasoning_opaque). Without an id, languageModelAccessPrompt.tsx gates on
+#   `thinking.id &&` and never creates the ThinkingDataContainer — so reasoning
+#   content is never round-tripped to DeepSeek, causing HTTP 400:
+#   "The reasoning_content in the thinking mode must be passed back to the API."
 node << 'PATCH53_EOF'
 const fs = require("fs");
 const f = "src/platform/thinking/common/thinkingUtils.ts";
 let code = fs.readFileSync(f, "utf8");
 
-if (code.includes("if (thinking.reasoning_content) {")) {
-  console.log("thinkingUtils.ts reasoning_content check already present, skipping");
+// Primary sentinel: only present after Sub-fix B is applied
+if (code.includes("BYOK CUSTOM PATCH: synthetic id for reasoning_content")) {
+  console.log("thinkingUtils.ts reasoning_content patches already present, skipping");
   process.exit(0);
 }
 
-const anchor = `function getThinkingDeltaText(thinking: RawThinkingDelta | undefined): string | undefined {
+let changed = false;
+
+// Sub-fix A: getThinkingDeltaText priority
+const textAnchor = `function getThinkingDeltaText(thinking: RawThinkingDelta | undefined): string | undefined {
 \tif (!thinking) {
 \t\treturn '';
 \t}
 \tif (thinking.cot_summary) {`;
 
-const replacement = `function getThinkingDeltaText(thinking: RawThinkingDelta | undefined): string | undefined {
+const textReplacement = `function getThinkingDeltaText(thinking: RawThinkingDelta | undefined): string | undefined {
 \tif (!thinking) {
 \t\treturn '';
 \t}
@@ -4004,12 +4014,56 @@ const replacement = `function getThinkingDeltaText(thinking: RawThinkingDelta | 
 \t}
 \tif (thinking.cot_summary) {`;
 
-if (code.includes(anchor)) {
-  code = code.replace(anchor, replacement);
-  console.log("Patched: getThinkingDeltaText reasoning_content priority (Patch 53)");
-  fs.writeFileSync(f, code);
+if (code.includes(textAnchor)) {
+  code = code.replace(textAnchor, textReplacement);
+  console.log("Patched: getThinkingDeltaText reasoning_content priority (Patch 53 A)");
+  changed = true;
+} else if (!code.includes("if (thinking.reasoning_content) {")) {
+  console.warn("WARN: getThinkingDeltaText anchor not found — skipping Patch 53 A");
 } else {
-  console.warn("WARN: getThinkingDeltaText anchor not found — skipping Patch 53");
+  console.log("Patch 53 A: getThinkingDeltaText already patched, skipping");
+}
+
+// Sub-fix B: getThinkingDeltaId synthetic 'reasoning' id for reasoning_content.
+// Anchor is the tail of getThinkingDeltaId right before extractThinkingDeltaFromChoice.
+const idAnchor = `\tif (thinking.signature) {
+\t\treturn thinking.signature;
+\t}
+\treturn undefined;
+}
+
+export function extractThinkingDeltaFromChoice`;
+
+const idReplacement = `\tif (thinking.signature) {
+\t\treturn thinking.signature;
+\t}
+\t// ─── BYOK CUSTOM PATCH: synthetic id for reasoning_content (Patch 53) ───────
+\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+\t// DeepSeek / OpenAI o-series send reasoning_content but no native id field.
+\t// Without an id the ThinkingDataContainer pipeline gates on \`thinking.id &&\`
+\t// and never serialises the thinking block — causing HTTP 400 on the next
+\t// turn: "The reasoning_content in the thinking mode must be passed back."
+\t// Return a stable sentinel so the block flows through to Patch 54's
+\t// out.reasoning_content re-serialisation.
+\tif (thinking.reasoning_content) {
+\t\treturn 'reasoning';
+\t}
+\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
+\treturn undefined;
+}
+
+export function extractThinkingDeltaFromChoice`;
+
+if (code.includes(idAnchor)) {
+  code = code.replace(idAnchor, idReplacement);
+  console.log("Patched: getThinkingDeltaId synthetic id for reasoning_content (Patch 53 B)");
+  changed = true;
+} else {
+  console.warn("WARN: getThinkingDeltaId anchor not found — skipping Patch 53 B");
+}
+
+if (changed) {
+  fs.writeFileSync(f, code);
 }
 PATCH53_EOF
 
@@ -4018,24 +4072,34 @@ PATCH53_EOF
 # Without this, the assistant message sent back to DeepSeek is missing
 # reasoning_content, triggering HTTP 400:
 # "The reasoning_content in the thinking mode must be passed back to the API."
+#
+# Also refactors the two-liner into a named `reasoning` variable so the same
+# value is written to both cot_summary (CAPI compat) and reasoning_content
+# (DeepSeek / OpenAI-compat wire format).
 node << 'PATCH54_EOF'
 const fs = require("fs");
 const f = "src/extension/byok/node/openAIEndpoint.ts";
 let code = fs.readFileSync(f, "utf8");
 
-if (code.includes("out.reasoning_content = text;")) {
+if (code.includes("out.reasoning_content = reasoning;")) {
   console.log("openAIEndpoint.ts reasoning_content re-serialisation already present, skipping");
   process.exit(0);
 }
 
-const anchor = `\t\t\t\t\tconst text = Array.isArray(data.text) ? data.text.join('') : data.text;
-\t\t\t\t\tif (text) {
-\t\t\t\t\t\tout.cot_summary = text;`;
+// Upstream anchor: the two-liner inside the callback's `if (data && data.id)` block.
+// The callback body sits at 5 tabs (inside else → const callback → if).
+const anchor = `\t\t\t\t\tout.cot_id = data.id;
+\t\t\t\t\tout.cot_summary = Array.isArray(data.text) ? data.text.join('') : data.text;`;
 
-const replacement = `\t\t\t\t\tconst text = Array.isArray(data.text) ? data.text.join('') : data.text;
-\t\t\t\t\tif (text) {
-\t\t\t\t\t\tout.cot_summary = text;
-\t\t\t\t\t\tout.reasoning_content = text;`;
+const replacement = `\t\t\t\t\tout.cot_id = data.id;
+\t\t\t\t\tconst reasoning = Array.isArray(data.text) ? data.text.join('') : data.text;
+\t\t\t\t\tout.cot_summary = reasoning;
+\t\t\t\t\t// ─── BYOK CUSTOM PATCH: reasoning_content re-serialisation (Patch 54) ──
+\t\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+\t\t\t\t\t// DeepSeek v4 requires reasoning_content on every follow-up assistant
+\t\t\t\t\t// message when in thinking mode; without it the API returns HTTP 400.
+\t\t\t\t\tout.reasoning_content = reasoning;
+\t\t\t\t\t// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────`;
 
 if (code.includes(anchor)) {
   code = code.replace(anchor, replacement);

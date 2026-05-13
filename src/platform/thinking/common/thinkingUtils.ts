@@ -37,6 +37,17 @@ function getThinkingDeltaId(thinking: RawThinkingDelta | undefined): string | un
 	if (thinking.signature) {
 		return thinking.signature;
 	}
+	// ─── BYOK CUSTOM PATCH: synthetic id for reasoning_content (Patch 53) ───────
+	// DeepSeek / OpenAI o-series send reasoning_content but no native id field.
+	// Without an id the ThinkingDataContainer pipeline gates on `thinking.id &&`
+	// and never serialises the thinking block — causing HTTP 400 on the next
+	// turn: "The reasoning_content in the thinking mode must be passed back."
+	// Return a stable sentinel so the block flows through to Patch 54's
+	// out.reasoning_content re-serialisation.
+	if (thinking.reasoning_content) {
+		return 'reasoning';
+	}
+	// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
 	return undefined;
 }
 
