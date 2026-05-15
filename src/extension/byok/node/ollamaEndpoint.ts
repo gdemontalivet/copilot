@@ -86,13 +86,6 @@ export class OllamaEndpoint extends OpenAIEndpoint {
 		}
 		delete body.reasoning_effort;
 
-		// Local 27B models have a 32K context window. VS Code's agent passes 80+
-		// tool schemas which consumes ~15-20K tokens before any conversation.
-		// Strip tools so the model can actually respond within its context budget.
-		if (Array.isArray((body as any).tools)) {
-			delete (body as any).tools;
-			delete (body as any).tool_choice;
-		}
 
 		// ── DEBUG LOGGING ──────────────────────────────────────────────────────
 		const preview = {
