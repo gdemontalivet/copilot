@@ -90,6 +90,17 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 			}
 			this._providersRegistered = true;
 			this._logService.info(`BYOK: registered ${this._providers.size} provider(s): ${Array.from(this._providers.keys()).join(', ')}`);
+			// ─── BYOK CUSTOM PATCH: eager Ollama model warm-up (Patch 63) ───────────
+			// After registering providers VS Code lazily calls provideLanguageModel-
+			// ChatInformation only when a chat request arrives. If the model was
+			// previously used and its ID is stored in chatLanguageModels.json, VS Code
+			// throws "Chat provider for model ollama/Ollama/<id> is not registered"
+			// because the LM registry is still empty at that point. Force-discover
+			// Ollama models immediately at activation so the registry is populated
+			// before the first request.
+			void lm.selectChatModels({ vendor: OllamaLMProvider.providerId })
+				.catch(() => { /* best-effort warm-up, ignore failures */ });
+			// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────
 			if (!this._knownModelsRefreshed) {
 				this._knownModelsRefreshed = true;
 				void this._refreshKnownModels().catch(err => {
