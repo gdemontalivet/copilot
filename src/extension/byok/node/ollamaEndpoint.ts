@@ -40,6 +40,8 @@ import { OpenAIEndpoint } from './openAIEndpoint';
 
 export class OllamaEndpoint extends OpenAIEndpoint {
 
+	private readonly _log: ILogService;
+
 	constructor(
 		modelMetadata: IChatModelInformation,
 		apiKey: string,
@@ -66,6 +68,7 @@ export class OllamaEndpoint extends OpenAIEndpoint {
 			chatWebSocketService,
 			logService
 		);
+		this._log = logService;
 	}
 
 	override interceptBody(body: IEndpointBody | undefined): void {
@@ -75,17 +78,33 @@ export class OllamaEndpoint extends OpenAIEndpoint {
 		}
 
 		// Map reasoning_effort → Ollama's think boolean.
-		// reasoning_effort is populated by _applyReasoningEffort() in the parent,
-		// or absent when the user has not set an effort level.
 		const effort = body.reasoning_effort as string | undefined;
 		if (!effort || effort === 'none') {
 			(body as any)['think'] = false;
 		} else {
-			// low / medium / high → enable thinking
 			(body as any)['think'] = true;
 		}
-		// Always scrub reasoning_effort — Ollama doesn't understand it and some
-		// versions return a 400 when unknown fields are present.
 		delete body.reasoning_effort;
+
+		// Local 27B models have a 32K context window. VS Code's agent passes 80+
+		// tool schemas which consumes ~15-20K tokens before any conversation.
+		// Strip tools so the model can actually respond within its context budget.
+		if (Array.isArray((body as any).tools)) {
+			delete (body as any).tools;
+			delete (body as any).tool_choice;
+		}
+
+		// ── DEBUG LOGGING ──────────────────────────────────────────────────────
+		const preview = {
+			model: (body as any).model,
+			think: (body as any).think,
+			stream: (body as any).stream,
+			tools: Array.isArray((body as any).tools) ? `${(body as any).tools.length} tools` : 'none',
+			messages: Array.isArray((body as any).messages)
+				? (body as any).messages.map((m: any) => `[${m.role}] ${String(m.content ?? '').slice(0, 80)}`)
+				: [],
+		};
+		this._log.info(`[OllamaEndpoint] → sending to Ollama: ${JSON.stringify(preview)}`);
+		// ── END DEBUG LOGGING ──────────────────────────────────────────────────
 	}
 }
