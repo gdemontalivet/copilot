@@ -2,7 +2,6 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-import { EventEmitter } from 'vscode';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { IChatModelInformation } from '../../../platform/endpoint/common/endpointProvider';
 import { ILogService } from '../../../platform/log/common/logService';
@@ -35,9 +34,6 @@ interface OllamaVersionResponse {
 // Minimum supported Ollama version - versions below this may have compatibility issues
 const MINIMUM_OLLAMA_VERSION = '0.6.4';
 
-// How often to poll /api/tags to detect added/removed models (ms)
-const OLLAMA_POLL_INTERVAL_MS = 30_000;
-
 export interface OllamaConfig extends LanguageModelChatConfiguration {
 	url: string;
 }
@@ -48,13 +44,6 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 	public static readonly providerId = this.providerName.toLowerCase();
 
 	private _modelCache = new Map<string, IChatModelInformation>();
-	/** URL last used by a successful getAllModels call — used for polling. */
-	private _lastConfiguredUrl: string | undefined;
-	private _lastKnownModelIds = new Set<string>();
-	private _pollTimer: ReturnType<typeof setInterval> | undefined;
-
-	private readonly _onDidChange = new EventEmitter<void>();
-	public readonly onDidChangeLanguageModelChatInformation = this._onDidChange.event;
 
 	constructor(
 		byokStorageService: IBYOKStorageService,
@@ -77,52 +66,6 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 		);
 
 		this.migrateConfig();
-		this._startPolling();
-	}
-
-	dispose(): void {
-		this._stopPolling();
-		this._onDidChange.dispose();
-	}
-
-	/** Clear both caches and notify VS Code to re-query the model list immediately. */
-	public refreshModels(): void {
-		this._modelCache.clear();
-		this.clearModelListCache();
-		this._onDidChange.fire();
-	}
-
-	private _startPolling(): void {
-		this._pollTimer = setInterval(() => this._pollForModelChanges(), OLLAMA_POLL_INTERVAL_MS);
-	}
-
-	private _stopPolling(): void {
-		if (this._pollTimer !== undefined) {
-			clearInterval(this._pollTimer);
-			this._pollTimer = undefined;
-		}
-	}
-
-	private async _pollForModelChanges(): Promise<void> {
-		// Only poll once we have a URL from a real getAllModels call
-		const baseUrl = this._lastConfiguredUrl;
-		if (!baseUrl) {
-			return;
-		}
-		try {
-			const response = await this._fetcherService.fetch(`${baseUrl}/api/tags`, { method: 'GET', callSite: 'ollama-poll' });
-			const models: Array<{ model: string }> = (await response.json()).models ?? [];
-			const currentIds = new Set(models.map(m => m.model));
-			const changed =
-				currentIds.size !== this._lastKnownModelIds.size ||
-				[...currentIds].some(id => !this._lastKnownModelIds.has(id));
-			if (changed) {
-				this._logService.info('[ollamaProvider] Model list changed, refreshing');
-				this.refreshModels();
-			}
-		} catch {
-			// Ollama may be temporarily unavailable; silently ignore poll errors
-		}
 	}
 
 	private async migrateConfig(): Promise<void> {
@@ -177,16 +120,10 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 				};
 			}
 
-			const result = byokKnownModelsToAPIInfoWithEffort(this._name, this._knownModels).map(model => ({
+			return byokKnownModelsToAPIInfoWithEffort(this._name, this._knownModels).map(model => ({
 				...model,
 				url: ollamaBaseUrl
 			}));
-
-			// Keep URL and model set in sync so the poller has fresh data
-			this._lastConfiguredUrl = ollamaBaseUrl;
-			this._lastKnownModelIds = new Set(models.map((m: { model: string }) => m.model));
-
-			return result;
 
 		} catch (e) {
 			// Check if this is our version check error and preserve it
@@ -209,28 +146,24 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 
 	private async _getOllamaModelInfo(ollamaBaseUrl: string, modelId: string): Promise<IChatModelInformation> {
 		const modelInfo = await this._fetchOllamaModelInformation(ollamaBaseUrl, modelId);
-		// ─── BYOK CUSTOM PATCH: safe architecture extraction (Patch 60) ─────────────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-		// Upstream uses a single expression that crashes when model_info is present
-		// but 'general.architecture' is missing; this two-step form is safe.
 		const architecture = modelInfo?.model_info?.['general.architecture'];
 		const contextWindow = (architecture && modelInfo?.model_info?.[`${architecture}.context_length`]) ?? 32768;
-		// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────────────
 		const outputTokens = contextWindow < 4096 ? Math.floor(contextWindow / 2) : 4096;
+
+		const hasThinkingCapability = Array.isArray(modelInfo?.capabilities) && modelInfo.capabilities.includes('thinking');
+
 		const modelCapabilities = {
 			name: modelInfo?.model_info?.['general.basename'] ?? modelInfo?.remote_model ?? modelId,
 			maxOutputTokens: outputTokens,
 			maxInputTokens: contextWindow - outputTokens,
-			// ─── BYOK CUSTOM PATCH: force toolCalling:true for Ollama models (Patch 60) ──
-			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-			// VS Code's chat picker requires capabilities.toolCalling:true to list a model.
-			// Ollama's /api/show only reports 'tools' in capabilities[] for models that
-			// explicitly declare tool support — many popular models (llama3, qwen, mistral,
-			// gemma) work fine with tools but don't advertise it, so they'd be hidden from
-			// the picker without this override.
 			vision: Array.isArray(modelInfo?.capabilities) && modelInfo.capabilities.includes('vision'),
-			toolCalling: true
-			// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────────
+			// Copilot Chat requires toolCalling: true for a model to appear in the chat picker.
+			// Ollama's /api/show does not always report 'tools' for models that support it.
+			toolCalling: true,
+			// Read 'thinking' from Ollama capabilities, fallback to name heuristics for older setups
+			...(hasThinkingCapability || modelId.toLowerCase().includes('qwen') || modelId.toLowerCase().includes('deepseek') || modelId.toLowerCase().includes('thinking') || modelId.toLowerCase().includes('reasoner')
+				? { supportsReasoningEffort: ['none', 'low', 'medium', 'high'] }
+				: {})
 		};
 
 		return resolveModelInfo(modelId, this._name, this._knownModels, modelCapabilities);

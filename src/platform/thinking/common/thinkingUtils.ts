@@ -9,8 +9,8 @@ function getThinkingDeltaText(thinking: RawThinkingDelta | undefined): string | 
 	if (!thinking) {
 		return '';
 	}
-	if (thinking.reasoning_content) {
-		return thinking.reasoning_content;
+	if (thinking.reasoning_content || thinking.reasoning) {
+		return thinking.reasoning_content || thinking.reasoning;
 	}
 	if (thinking.cot_summary) {
 		return thinking.cot_summary;
@@ -45,7 +45,7 @@ function getThinkingDeltaId(thinking: RawThinkingDelta | undefined): string | un
 	// turn: "The reasoning_content in the thinking mode must be passed back."
 	// Return a stable sentinel so the block flows through to Patch 54's
 	// out.reasoning_content re-serialisation.
-	if (thinking.reasoning_content) {
+	if (thinking.reasoning_content || thinking.reasoning) {
 		return 'reasoning';
 	}
 	// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
