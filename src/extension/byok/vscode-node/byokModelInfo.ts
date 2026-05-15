@@ -34,7 +34,9 @@ export function byokKnownModelsToAPIInfoWithEffort(providerName: string, knownMo
 
 function buildEffortConfigurationSchema(effortLevels: readonly string[], family: string): { configurationSchema?: LanguageModelConfigurationSchema } {
 	const lowerFamily = family.toLowerCase();
-	const preferred = lowerFamily.startsWith('claude') ? 'high' : 'medium';
+	// Cloud reasoning models default high/medium; local models (Qwen, DeepSeek
+	// via Ollama) default to none so thinking is opt-in, not the surprise default.
+	const preferred = lowerFamily.startsWith('claude') ? 'high' : 'none';
 	const defaultEffort = effortLevels.includes(preferred) ? preferred : undefined;
 
 	return {
