@@ -2365,7 +2365,7 @@ fs.writeFileSync(f, code);
 console.log("Patched: workspaceIndexingStatus tooltip guard");
 PATCH33TOOLTIP_EOF
 
-# Patch 33c: BYOK fallback in endpointProviderImpl._resolveUtilityFamily.
+# Patch 33c: BYOK stub fallback in endpointProviderImpl._resolveUtilityFamily.
 #
 # In BYOK mode the fake-token bypass leaves CAPI's model list empty, so both
 # CopilotUtilityChatEndpoint and CopilotUtilitySmallChatEndpoint throw when
@@ -2374,13 +2374,14 @@ PATCH33TOOLTIP_EOF
 # getChatEndpoint('copilot-utility[-small]') — intentDetector, promptCategorizer,
 # applyPatchTool, mcpToolCallingLoop, summarizer, etc. — propagates this throw to
 # the chat turn handler, producing "Unable to resolve Copilot utility chat model
-# (server did not mark a chat fallback model)" for EVERY message, regardless of
-# which BYOK model the user selected.
+# (server did not mark a chat fallback model)" for EVERY message.
 #
-# Fix: wrap _resolveUtilityFamily in try/catch and fall back to the first
-# registered BYOK model via vscode.lm.selectChatModels. This lets intent
-# detection and prompt categorization actually run against the user's BYOK model.
-# Last-resort: BYOKStubChatEndpoint so we never throw.
+# Fix: fall back to BYOKStubChatEndpoint (NOT a real BYOK model). Using a real
+# BYOK model would make intentDetector succeed and route to @workspace or another
+# Copilot-only agent, returning empty responses. The stub lets getChatEndpoint
+# succeed (no throw) but when callers invoke makeChatRequest the stub throws a
+# fast, predictable error that VS Code's ChatParticipantDetectionProvider catches
+# and swallows — the main turn then proceeds with the user's selected BYOK model.
 node << 'PATCH33UTILITY_EOF'
 const fs = require("fs");
 const f = "src/extension/prompt/vscode-node/endpointProviderImpl.ts";
@@ -2390,15 +2391,6 @@ if (code.includes("BYOK CUSTOM PATCH: utility family BYOK fallback")) {
   console.log("endpointProviderImpl utility family BYOK fallback already present, skipping");
   process.exit(0);
 }
-
-// Add `lm` to the vscode import
-const importAnchor = "import { LanguageModelChat, type ChatRequest } from 'vscode';";
-const importReplacement = "import { LanguageModelChat, lm, type ChatRequest } from 'vscode';";
-if (!code.includes(importAnchor)) {
-  console.warn("WARN: endpointProviderImpl vscode import anchor not found — skipping patch 33c");
-  process.exit(0);
-}
-code = code.replace(importAnchor, importReplacement);
 
 const methodAnchor = `\t/**
 \t * Resolves an internal utility family (\`copilot-utility-small\` /
@@ -2427,10 +2419,13 @@ const methodReplacement = `\t/**
 \t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: utility family BYOK fallback \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 \t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
 \t// In BYOK-only mode the fake-token bypass leaves CAPI model list empty so
-\t// both utility endpoint resolvers throw. Every consumer of
-\t// getChatEndpoint('copilot-utility[-small]') propagates the throw to the
-\t// chat turn handler -> "Unable to resolve Copilot utility chat model".
-\t// Fall back to first registered BYOK model; last-resort stub.
+\t// both utility endpoint resolvers throw, breaking every chat turn. We return
+\t// BYOKStubChatEndpoint (not a real BYOK model) because: routing to a real BYOK
+\t// model makes intentDetector succeed and re-route to @workspace / @github /
+\t// other Copilot-only agents that return empty responses. The stub lets
+\t// getChatEndpoint() succeed without throwing; callers that invoke makeChatRequest
+\t// get a fast stub error that VS Code's ChatParticipantDetectionProvider catches
+\t// and swallows, so the main turn proceeds with the user's selected BYOK model.
 \tprivate async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
 \t\tif (family !== 'copilot-utility-small' && family !== 'copilot-utility') {
 \t\t\tthrow new Error(\`Unrecognized chat endpoint family \${family}\`);
@@ -2438,15 +2433,8 @@ const methodReplacement = `\t/**
 \t\tif (family === 'copilot-utility-small') {
 \t\t\ttry { return await CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through */ }
 \t\t}
-\t\ttry { return await CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through to BYOK */ }
-\t\ttry {
-\t\t\tconst byokModels = await lm.selectChatModels({});
-\t\t\tconst byok = byokModels.find(m => m.vendor !== 'copilot' && m.vendor !== 'byokauto');
-\t\t\tif (byok) {
-\t\t\t\tthis._logService.trace(\`[BYOK] copilot-utility resolved via BYOK model \${byok.vendor}/\${byok.id}\`);
-\t\t\t\treturn this._instantiationService.createInstance(ExtensionContributedChatEndpoint, byok);
-\t\t\t}
-\t\t} catch { /* fall through to stub */ }
+\t\ttry { return await CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through to stub */ }
+\t\tthis._logService.trace(\`[BYOK] copilot-utility family resolved via BYOKStubChatEndpoint\`);
 \t\tconst { BYOKStubChatEndpoint } = await import('../../byok/common/byokStubChatEndpoint');
 \t\treturn new BYOKStubChatEndpoint();
 \t}
