@@ -10,6 +10,7 @@ import { IExperimentationService } from '../../../platform/telemetry/common/null
 import { ErrorUtils } from '../../../util/common/errors';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { resolveModelInfo } from '../common/byokProvider';
+import { OllamaEndpoint } from '../node/ollamaEndpoint';
 import { OpenAIEndpoint } from '../node/openAIEndpoint';
 import { AbstractOpenAICompatibleLMProvider, LanguageModelChatConfiguration, OpenAICompatibleLanguageModelChatInformation } from './abstractLanguageModelChatProvider';
 import { byokKnownModelsToAPIInfoWithEffort } from './byokModelInfo';
@@ -141,7 +142,8 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 	protected override async createOpenAIEndPoint(model: OpenAICompatibleLanguageModelChatInformation<OllamaConfig>): Promise<OpenAIEndpoint> {
 		const modelInfo = this.getModelInfo(model.id, model.url);
 		const url = `${model.url}/v1/chat/completions`;
-		return this._instantiationService.createInstance(OpenAIEndpoint, modelInfo, model.configuration?.apiKey ?? '', url);
+		// Use OllamaEndpoint so reasoning_effort is translated to think: true/false
+		return this._instantiationService.createInstance(OllamaEndpoint, modelInfo, model.configuration?.apiKey ?? '', url);
 	}
 
 	private async _getOllamaModelInfo(ollamaBaseUrl: string, modelId: string): Promise<IChatModelInformation> {
