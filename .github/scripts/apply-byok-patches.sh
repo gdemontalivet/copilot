@@ -2325,6 +2325,47 @@ fs.writeFileSync(f, code);
 console.log("Patched: CodeBlockTrackingChatResponseStream proposed-API guards");
 PATCH32_EOF
 
+# Patch 33b: Guard IChatStatusItem.tooltip write for VS Code 1.120+.
+#
+# VS Code 1.120.0 made IChatStatusItem objects non-extensible (Object.freeze or
+# Object.defineProperty). WorkspaceIndexingStatus._writeStatusItem does:
+#   this._statusItem.tooltip = values.tooltip;
+# On VS Code 1.120 this throws "Cannot add property tooltip, object is not
+# extensible", propagates up through new WorkspaceIndexingStatus() and kills
+# the WorkspaceIndexingStatus contribution with "Error while loading
+# contribution", polluting the error log on every window reload. BYOK still
+# activates (9 providers register after the error) so chat works, but the
+# tooltip error can alarm users into thinking the extension is broken.
+node << 'PATCH33TOOLTIP_EOF'
+const fs = require("fs");
+const f = "src/extension/workspaceChunkSearch/vscode-node/workspaceIndexingStatus.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: guard tooltip write (VS Code 1.120 sealed status items)")) {
+  console.log("workspaceIndexingStatus tooltip guard already present, skipping");
+  process.exit(0);
+}
+
+const original = `		this._statusItem.tooltip = values.tooltip;`;
+const replacement = `		// ─── BYOK CUSTOM PATCH: guard tooltip write (VS Code 1.120 sealed status items) ─
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// VS Code 1.120 made IChatStatusItem objects non-extensible. Setting
+		// \`.tooltip\` on a sealed object throws "Cannot add property tooltip,
+		// object is not extensible", which takes down the WorkspaceIndexingStatus
+		// contribution with "Error while loading contribution".
+		try { this._statusItem.tooltip = values.tooltip; } catch { /* not supported on this VS Code version */ }
+		// ─── END BYOK CUSTOM PATCH ───────────────────────`;
+
+if (!code.includes(original)) {
+  console.warn("WARN: workspaceIndexingStatus tooltip anchor not found — skipping patch 33b");
+  process.exit(0);
+}
+code = code.replace(original, replacement);
+fs.writeFileSync(f, code);
+console.log("Patched: workspaceIndexingStatus tooltip guard");
+PATCH33TOOLTIP_EOF
+
+
 # Patch 33: Tunnel BYOK token usage to the context-window ring indicator.
 #
 # BYOK providers (Anthropic, VertexAnthropic, Gemini, VertexGemini) already

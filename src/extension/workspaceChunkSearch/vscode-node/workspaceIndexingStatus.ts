@@ -309,7 +309,14 @@ export class ChatStatusWorkspaceIndexingStatus extends Disposable {
 			this._statusItem.detail = '';
 		}
 
-		this._statusItem.tooltip = values.tooltip;
+		// ─── BYOK CUSTOM PATCH: guard tooltip write (VS Code 1.120 sealed status items) ─
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// VS Code 1.120 made IChatStatusItem objects non-extensible. Setting
+		// `.tooltip` on a sealed object throws "Cannot add property tooltip,
+		// object is not extensible", which takes down the WorkspaceIndexingStatus
+		// contribution with "Error while loading contribution".
+		try { this._statusItem.tooltip = values.tooltip; } catch { /* not supported on this VS Code version */ }
+		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
 	}
 
 	private registerCommands(): IDisposable {
