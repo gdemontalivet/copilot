@@ -65,6 +65,7 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		this._providers.set(AzureBYOKModelProvider.providerId, instantiationService.createInstance(AzureBYOKModelProvider, this._byokStorageService));
 		this._providers.set(CustomOAIBYOKModelProvider.providerId, instantiationService.createInstance(CustomOAIBYOKModelProvider, this._byokStorageService));
 		this._providers.set(CustomEndpointBYOKModelProvider.providerId, instantiationService.createInstance(CustomEndpointBYOKModelProvider, this._byokStorageService));
+		this._providers.set(DeepSeekBYOKLMProvider.providerId, instantiationService.createInstance(DeepSeekBYOKLMProvider, this._byokStorageService));
 
 		this._knownModelsRefreshTargets = [
 			[AnthropicLMProvider.providerName, anthropic],
