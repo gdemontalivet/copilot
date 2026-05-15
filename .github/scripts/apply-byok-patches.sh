@@ -2365,6 +2365,103 @@ fs.writeFileSync(f, code);
 console.log("Patched: workspaceIndexingStatus tooltip guard");
 PATCH33TOOLTIP_EOF
 
+# Patch 33c: BYOK fallback in endpointProviderImpl._resolveUtilityFamily.
+#
+# In BYOK mode the fake-token bypass leaves CAPI's model list empty, so both
+# CopilotUtilityChatEndpoint and CopilotUtilitySmallChatEndpoint throw when
+# their resolver calls modelFetcher.getCopilotUtilityModel() /
+# getChatModelFromCapiFamily(). Every consumer of
+# getChatEndpoint('copilot-utility[-small]') — intentDetector, promptCategorizer,
+# applyPatchTool, mcpToolCallingLoop, summarizer, etc. — propagates this throw to
+# the chat turn handler, producing "Unable to resolve Copilot utility chat model
+# (server did not mark a chat fallback model)" for EVERY message, regardless of
+# which BYOK model the user selected.
+#
+# Fix: wrap _resolveUtilityFamily in try/catch and fall back to the first
+# registered BYOK model via vscode.lm.selectChatModels. This lets intent
+# detection and prompt categorization actually run against the user's BYOK model.
+# Last-resort: BYOKStubChatEndpoint so we never throw.
+node << 'PATCH33UTILITY_EOF'
+const fs = require("fs");
+const f = "src/extension/prompt/vscode-node/endpointProviderImpl.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: utility family BYOK fallback")) {
+  console.log("endpointProviderImpl utility family BYOK fallback already present, skipping");
+  process.exit(0);
+}
+
+// Add `lm` to the vscode import
+const importAnchor = "import { LanguageModelChat, type ChatRequest } from 'vscode';";
+const importReplacement = "import { LanguageModelChat, lm, type ChatRequest } from 'vscode';";
+if (!code.includes(importAnchor)) {
+  console.warn("WARN: endpointProviderImpl vscode import anchor not found — skipping patch 33c");
+  process.exit(0);
+}
+code = code.replace(importAnchor, importReplacement);
+
+const methodAnchor = `\t/**
+\t * Resolves an internal utility family (\`copilot-utility-small\` /
+\t * \`copilot-utility\`) to a concrete \`CopilotChatEndpoint\`. The model
+\t * selection for each family lives in the corresponding resolver
+\t * class so callers don't need to know which CAPI family backs each
+\t * purpose.
+\t */
+\tprivate _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
+\t\tif (family === 'copilot-utility-small') {
+\t\t\treturn CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
+\t\t} else if (family === 'copilot-utility') {
+\t\t\treturn CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
+\t\t} else {
+\t\t\tthrow new Error(\`Unrecognized chat endpoint family \${family}\`);
+\t\t}
+\t}`;
+
+const methodReplacement = `\t/**
+\t * Resolves an internal utility family (\`copilot-utility-small\` /
+\t * \`copilot-utility\`) to a concrete \`CopilotChatEndpoint\`. The model
+\t * selection for each family lives in the corresponding resolver
+\t * class so callers don't need to know which CAPI family backs each
+\t * purpose.
+\t */
+\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: utility family BYOK fallback \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+\t// In BYOK-only mode the fake-token bypass leaves CAPI model list empty so
+\t// both utility endpoint resolvers throw. Every consumer of
+\t// getChatEndpoint('copilot-utility[-small]') propagates the throw to the
+\t// chat turn handler -> "Unable to resolve Copilot utility chat model".
+\t// Fall back to first registered BYOK model; last-resort stub.
+\tprivate async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
+\t\tif (family !== 'copilot-utility-small' && family !== 'copilot-utility') {
+\t\t\tthrow new Error(\`Unrecognized chat endpoint family \${family}\`);
+\t\t}
+\t\tif (family === 'copilot-utility-small') {
+\t\t\ttry { return await CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through */ }
+\t\t}
+\t\ttry { return await CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through to BYOK */ }
+\t\ttry {
+\t\t\tconst byokModels = await lm.selectChatModels({});
+\t\t\tconst byok = byokModels.find(m => m.vendor !== 'copilot' && m.vendor !== 'byokauto');
+\t\t\tif (byok) {
+\t\t\t\tthis._logService.trace(\`[BYOK] copilot-utility resolved via BYOK model \${byok.vendor}/\${byok.id}\`);
+\t\t\t\treturn this._instantiationService.createInstance(ExtensionContributedChatEndpoint, byok);
+\t\t\t}
+\t\t} catch { /* fall through to stub */ }
+\t\tconst { BYOKStubChatEndpoint } = await import('../../byok/common/byokStubChatEndpoint');
+\t\treturn new BYOKStubChatEndpoint();
+\t}
+\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`;
+
+if (!code.includes(methodAnchor)) {
+  console.warn("WARN: endpointProviderImpl _resolveUtilityFamily anchor not found — skipping patch 33c");
+  process.exit(0);
+}
+code = code.replace(methodAnchor, methodReplacement);
+fs.writeFileSync(f, code);
+console.log("Patched: endpointProviderImpl utility family BYOK fallback");
+PATCH33UTILITY_EOF
+
+
 
 # Patch 33: Tunnel BYOK token usage to the context-window ring indicator.
 #

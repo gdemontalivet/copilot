@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { LanguageModelChat, type ChatRequest } from 'vscode';
+import { LanguageModelChat, lm, type ChatRequest } from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { ChatEndpointFamily, EmbeddingsEndpointFamily, IChatModelInformation, ICompletionModelInformation, IEmbeddingModelInformation, IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
@@ -100,15 +100,47 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 	 * class so callers don't need to know which CAPI family backs each
 	 * purpose.
 	 */
-	private _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
-		if (family === 'copilot-utility-small') {
-			return CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
-		} else if (family === 'copilot-utility') {
-			return CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
-		} else {
+	// ─── BYOK CUSTOM PATCH: utility family BYOK fallback ────────────────────────
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// In BYOK-only mode the fake-token bypass leaves `_familyMap` and the
+	// `is_chat_fallback` marker unpopulated, so both CopilotUtilityChatEndpoint
+	// and CopilotUtilitySmallChatEndpoint throw. Every consumer of
+	// `getChatEndpoint('copilot-utility[-small]')` — intentDetector, promptCategorizer,
+	// applyPatchTool, mcpToolCallingLoop, summarizer, etc. — propagates this
+	// throw up to the chat turn handler, producing "Unable to resolve Copilot
+	// utility chat model" for every single message regardless of which BYOK model
+	// the user selected. Fall back to the first registered BYOK model so utility
+	// calls actually run; last-resort stub so we never throw.
+	private async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
+		if (family !== 'copilot-utility-small' && family !== 'copilot-utility') {
 			throw new Error(`Unrecognized chat endpoint family ${family}`);
 		}
+
+		// Primary: try the real Copilot utility endpoints (work in full Copilot mode).
+		if (family === 'copilot-utility-small') {
+			try { return await CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through */ }
+		}
+		try { return await CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through to BYOK */ }
+
+		// BYOK fallback: route to any registered non-copilot, non-byokauto model.
+		// ExtensionContributedChatEndpoint can make real LLM calls so intent detection,
+		// prompt categorization, etc. still work — they'll use the user's BYOK model.
+		try {
+			const byokModels = await lm.selectChatModels({});
+			const byok = byokModels.find(m => m.vendor !== 'copilot' && m.vendor !== 'byokauto');
+			if (byok) {
+				this._logService.trace(`[BYOK] copilot-utility resolved via BYOK model ${byok.vendor}/${byok.id}`);
+				return this._instantiationService.createInstance(ExtensionContributedChatEndpoint, byok);
+			}
+		} catch { /* fall through to stub */ }
+
+		// Last resort: stub endpoint — at least prevents a throw; callers that
+		// actually invoke makeChatRequest will get a clear stub error instead of
+		// "server did not mark a chat fallback model".
+		const { BYOKStubChatEndpoint } = await import('../../byok/common/byokStubChatEndpoint');
+		return new BYOKStubChatEndpoint();
 	}
+	// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
 
 	async getEmbeddingsEndpoint(family?: EmbeddingsEndpointFamily): Promise<IEmbeddingsEndpoint> {
 		this._logService.trace(`Resolving embedding model`);
