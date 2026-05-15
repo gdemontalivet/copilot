@@ -86,6 +86,10 @@ export class OllamaEndpoint extends OpenAIEndpoint {
 		}
 		delete body.reasoning_effort;
 
+		// Keep the model loaded for 30 minutes after each request so it stays
+		// warm between messages in a long session (-1 = never unload).
+		(body as any)['keep_alive'] = '30m';
+
 
 		// ── DEBUG LOGGING ──────────────────────────────────────────────────────
 		const preview = {
