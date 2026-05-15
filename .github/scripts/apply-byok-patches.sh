@@ -4550,3 +4550,167 @@ if (!code.includes(versionErrAnchor)) {
 fs.writeFileSync(f, code);
 console.log("Patched: ollamaProvider.ts toolCalling:true + byokKnownModelsToAPIInfoWithEffort (Patch 60)");
 PATCH60_EOF
+
+# ── Patch 61: QwenThinkingStripper — route <think>…</think> from content ──────
+# Qwen3 models (qwen3.6:27b via Ollama) embed reasoning tokens inside
+# <think>…</think> tags in delta.content. Ollama ≤0.23.x does not promote them
+# to reasoning_content. This patch:
+#   A. Copies qwenThinkingStripper.ts into src/extension/byok/common/
+#   B. Adds the import + _qwenStrippers field to SSEProcessor in stream.ts
+#   C. Inserts the per-chunk interception block before extractThinkingDeltaFromChoice
+node - <<'PATCH61_EOF'
+const fs = require("fs");
+const path = require("path");
+
+// ── A: copy the file ──────────────────────────────────────────────────────────
+const src = path.join(".github", "byok-patches", "files", "qwenThinkingStripper.ts");
+const dst = path.join("src", "extension", "byok", "common", "qwenThinkingStripper.ts");
+if (!fs.existsSync(dst) || !fs.readFileSync(dst, "utf8").includes("Patch 61")) {
+  fs.copyFileSync(src, dst);
+  console.log("Patched: copied qwenThinkingStripper.ts (Patch 61 A)");
+} else {
+  console.log("Patch 61 A (qwenThinkingStripper.ts copy) already present, skipping");
+}
+
+// ── B + C: patch stream.ts ────────────────────────────────────────────────────
+const f = path.join("src", "platform", "networking", "node", "stream.ts");
+let code = fs.readFileSync(f, "utf8");
+
+const sentinel = "BYOK CUSTOM PATCH: Qwen3 <think> tag stripping (Patch 61)";
+if (code.includes(sentinel)) {
+  console.log("Patch 61 (stream.ts QwenThinkingStripper) already present, skipping");
+  process.exit(0);
+}
+
+// ── B: import ─────────────────────────────────────────────────────────────────
+const importAnchor = "import { extractThinkingDeltaFromChoice, } from '../../thinking/common/thinkingUtils';";
+const importReplacement =
+  "import { extractThinkingDeltaFromChoice, } from '../../thinking/common/thinkingUtils';\n" +
+  "import { QwenThinkingStripper } from '../../../extension/byok/common/qwenThinkingStripper';";
+
+if (!code.includes(importAnchor)) {
+  console.warn("WARN: Patch 61 import anchor not found — skipping");
+  process.exit(0);
+}
+code = code.replace(importAnchor, importReplacement);
+
+// ── B: _qwenStrippers field ───────────────────────────────────────────────────
+const fieldAnchor =
+  "\tprivate readonly completedFunctionCallIdxs: Map<number /* index */, 'function' | 'tool'> = new Map();\n" +
+  "\tprivate readonly functionCalls: Record<string, APIJsonDataStreaming | null> = {};\n" +
+  "\tprivate readonly toolCalls = new StreamingToolCalls();";
+const fieldReplacement =
+  "\tprivate readonly completedFunctionCallIdxs: Map<number /* index */, 'function' | 'tool'> = new Map();\n" +
+  "\tprivate readonly functionCalls: Record<string, APIJsonDataStreaming | null> = {};\n" +
+  "\tprivate readonly toolCalls = new StreamingToolCalls();\n" +
+  "\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: Qwen3 <think> tag stripping (Patch 61) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+  "\t// One stripper per choice index. Lazily created on first content chunk that\n" +
+  "\t// contains a '<' character (fast-path skips allocation for non-Qwen models).\n" +
+  "\tprivate readonly _qwenStrippers: Map<number, QwenThinkingStripper> = new Map();\n" +
+  "\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+
+if (!code.includes(fieldAnchor)) {
+  console.warn("WARN: Patch 61 field anchor not found — skipping");
+  process.exit(0);
+}
+code = code.replace(fieldAnchor, fieldReplacement);
+
+// ── C: interception block before extractThinkingDeltaFromChoice ───────────────
+const interceptAnchor =
+  "\t\t\t\t\tthis.logChoice(choice);\n" +
+  "\n" +
+  "\n" +
+  "\t\t\t\t\tconst thinkingDelta = extractThinkingDeltaFromChoice(choice);";
+const interceptReplacement =
+  "\t\t\t\t\tthis.logChoice(choice);\n" +
+  "\n" +
+  "\t\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: Qwen3 <think> tag stripping (Patch 61) \u2500\u2500\u2500\u2500\u2500\n" +
+  "\t\t\t\t\t// Intercept content chunks that may contain <think>\u2026</think> blocks\n" +
+  "\t\t\t\t\t// (Qwen3 thinking models). Move the reasoning portion into\n" +
+  "\t\t\t\t\t// `choice.delta.reasoning_content` so the standard ThinkingDataContainer\n" +
+  "\t\t\t\t\t// pipeline picks it up \u2014 identical to how DeepSeek reasoning_content\n" +
+  "\t\t\t\t\t// is handled. The stripper is a no-op for all other models.\n" +
+  "\t\t\t\t\tif (choice.delta?.content && choice.delta.content.includes('<')) {\n" +
+  "\t\t\t\t\t\tif (!this._qwenStrippers.has(choice.index)) {\n" +
+  "\t\t\t\t\t\t\tthis._qwenStrippers.set(choice.index, new QwenThinkingStripper());\n" +
+  "\t\t\t\t\t\t}\n" +
+  "\t\t\t\t\t\tconst stripper = this._qwenStrippers.get(choice.index)!;\n" +
+  "\t\t\t\t\t\tconst stripped = stripper.process(choice.delta.content);\n" +
+  "\t\t\t\t\t\tchoice.delta.content = stripped.content;\n" +
+  "\t\t\t\t\t\tif (stripped.reasoning_content) {\n" +
+  "\t\t\t\t\t\t\t(choice.delta as RawThinkingDelta).reasoning_content =\n" +
+  "\t\t\t\t\t\t\t\t((choice.delta as RawThinkingDelta).reasoning_content ?? '') + stripped.reasoning_content;\n" +
+  "\t\t\t\t\t\t}\n" +
+  "\t\t\t\t\t}\n" +
+  "\t\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+  "\n" +
+  "\t\t\t\t\tconst thinkingDelta = extractThinkingDeltaFromChoice(choice);";
+
+if (!code.includes(interceptAnchor)) {
+  console.warn("WARN: Patch 61 intercept anchor not found — skipping");
+  process.exit(0);
+}
+code = code.replace(interceptAnchor, interceptReplacement);
+
+fs.writeFileSync(f, code);
+console.log("Patched: stream.ts QwenThinkingStripper (Patch 61)");
+PATCH61_EOF
+
+# ── Patch 62: OllamaEndpoint — map reasoning_effort → think:true/false ─────────
+# Creates OllamaEndpoint (subclass of OpenAIEndpoint) that intercepts the
+# request body and translates Copilot's reasoning_effort into Ollama's think
+# boolean. This enables a single qwen3.6:27b model to serve both fast and
+# thinking modes controlled by the effort slider in the model picker.
+node - <<'PATCH62_EOF'
+const fs = require("fs");
+const path = require("path");
+
+// ── A: copy the file ──────────────────────────────────────────────────────────
+const src = path.join(".github", "byok-patches", "files", "ollamaEndpoint.ts");
+const dst = path.join("src", "extension", "byok", "node", "ollamaEndpoint.ts");
+if (!fs.existsSync(dst) || !fs.readFileSync(dst, "utf8").includes("Patch 62")) {
+  fs.copyFileSync(src, dst);
+  console.log("Patched: copied ollamaEndpoint.ts (Patch 62 A)");
+} else {
+  console.log("Patch 62 A (ollamaEndpoint.ts copy) already present, skipping");
+}
+
+// ── B: patch ollamaProvider.ts ────────────────────────────────────────────────
+const f = path.join("src", "extension", "byok", "vscode-node", "ollamaProvider.ts");
+let code = fs.readFileSync(f, "utf8");
+
+const sentinel = "OllamaEndpoint";
+// Check if the import is already there
+if (code.includes("from '../node/ollamaEndpoint'")) {
+  console.log("Patch 62 (ollamaProvider.ts OllamaEndpoint) already present, skipping");
+  process.exit(0);
+}
+
+// ── B1: add import ────────────────────────────────────────────────────────────
+const importAnchor = "import { OpenAIEndpoint } from '../node/openAIEndpoint';";
+const importReplacement =
+  "import { OllamaEndpoint } from '../node/ollamaEndpoint';\n" +
+  "import { OpenAIEndpoint } from '../node/openAIEndpoint';";
+
+if (!code.includes(importAnchor)) {
+  console.warn("WARN: Patch 62 import anchor not found — skipping");
+  process.exit(0);
+}
+code = code.replace(importAnchor, importReplacement);
+
+// ── B2: swap OpenAIEndpoint → OllamaEndpoint in createOpenAIEndPoint ──────────
+const createAnchor =
+  "\t\treturn this._instantiationService.createInstance(OpenAIEndpoint, modelInfo, model.configuration?.apiKey ?? '', url);";
+const createReplacement =
+  "\t\t// Use OllamaEndpoint so reasoning_effort is translated to think: true/false\n" +
+  "\t\treturn this._instantiationService.createInstance(OllamaEndpoint, modelInfo, model.configuration?.apiKey ?? '', url);";
+
+if (!code.includes(createAnchor)) {
+  console.warn("WARN: Patch 62 createOpenAIEndPoint anchor not found — skipping");
+  process.exit(0);
+}
+code = code.replace(createAnchor, createReplacement);
+
+fs.writeFileSync(f, code);
+console.log("Patched: ollamaProvider.ts OllamaEndpoint (Patch 62)");
+PATCH62_EOF
