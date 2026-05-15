@@ -138,6 +138,11 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 	}
 	// ─── END BYOK CUSTOM PATCH ───────────────────────
 
+	/** Clear the model list cache so the next call to provideLanguageModelChatInformation hits the provider fresh. */
+	protected clearModelListCache(): void {
+		this._byokModelListCache.clear();
+	}
+
 	abstract provideLanguageModelChatResponse(model: T, messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: ProvideLanguageModelChatResponseOptions, progress: Progress<LanguageModelResponsePart2>, token: CancellationToken): Promise<void>;
 	abstract provideTokenCount(model: T, text: string | LanguageModelChatMessage | LanguageModelChatMessage2, token: CancellationToken): Promise<number>;
 	protected abstract getAllModels(silent: boolean, apiKey: string | undefined, configuration: C | undefined): Promise<T[]>;

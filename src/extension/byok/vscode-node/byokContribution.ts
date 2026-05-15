@@ -2,7 +2,7 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-import { LanguageModelChatInformation, LanguageModelChatProvider, lm } from 'vscode';
+import { commands, LanguageModelChatInformation, LanguageModelChatProvider, lm } from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { IVSCodeExtensionContext } from '../../../platform/extContext/common/extensionContext';
 import { ILogService } from '../../../platform/log/common/logService';
@@ -46,6 +46,10 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		this._byokStorageService = new BYOKStorageService(extensionContext);
 		this._applyPolicy();
 		this._register(this._authService.onDidAuthenticationChange(() => this._applyPolicy()));
+		this._register(commands.registerCommand('github.copilot.chat.byok.refreshOllamaModels', () => {
+			const ollamaProvider = this._providers.get(OllamaLMProvider.providerId) as OllamaLMProvider | undefined;
+			ollamaProvider?.refreshModels();
+		}));
 	}
 
 	private _buildProviders(): void {

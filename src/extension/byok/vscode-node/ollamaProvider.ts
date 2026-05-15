@@ -2,6 +2,7 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+import { EventEmitter } from 'vscode';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { IChatModelInformation } from '../../../platform/endpoint/common/endpointProvider';
 import { ILogService } from '../../../platform/log/common/logService';
@@ -34,6 +35,9 @@ interface OllamaVersionResponse {
 // Minimum supported Ollama version - versions below this may have compatibility issues
 const MINIMUM_OLLAMA_VERSION = '0.6.4';
 
+// How often to poll /api/tags to detect added/removed models (ms)
+const OLLAMA_POLL_INTERVAL_MS = 30_000;
+
 export interface OllamaConfig extends LanguageModelChatConfiguration {
 	url: string;
 }
@@ -44,6 +48,13 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 	public static readonly providerId = this.providerName.toLowerCase();
 
 	private _modelCache = new Map<string, IChatModelInformation>();
+	/** URL last used by a successful getAllModels call — used for polling. */
+	private _lastConfiguredUrl: string | undefined;
+	private _lastKnownModelIds = new Set<string>();
+	private _pollTimer: ReturnType<typeof setInterval> | undefined;
+
+	private readonly _onDidChange = new EventEmitter<void>();
+	public readonly onDidChangeLanguageModelChatInformation = this._onDidChange.event;
 
 	constructor(
 		byokStorageService: IBYOKStorageService,
@@ -66,6 +77,52 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 		);
 
 		this.migrateConfig();
+		this._startPolling();
+	}
+
+	dispose(): void {
+		this._stopPolling();
+		this._onDidChange.dispose();
+	}
+
+	/** Clear both caches and notify VS Code to re-query the model list immediately. */
+	public refreshModels(): void {
+		this._modelCache.clear();
+		this.clearModelListCache();
+		this._onDidChange.fire();
+	}
+
+	private _startPolling(): void {
+		this._pollTimer = setInterval(() => this._pollForModelChanges(), OLLAMA_POLL_INTERVAL_MS);
+	}
+
+	private _stopPolling(): void {
+		if (this._pollTimer !== undefined) {
+			clearInterval(this._pollTimer);
+			this._pollTimer = undefined;
+		}
+	}
+
+	private async _pollForModelChanges(): Promise<void> {
+		// Only poll once we have a URL from a real getAllModels call
+		const baseUrl = this._lastConfiguredUrl;
+		if (!baseUrl) {
+			return;
+		}
+		try {
+			const response = await this._fetcherService.fetch(`${baseUrl}/api/tags`, { method: 'GET', callSite: 'ollama-poll' });
+			const models: Array<{ model: string }> = (await response.json()).models ?? [];
+			const currentIds = new Set(models.map(m => m.model));
+			const changed =
+				currentIds.size !== this._lastKnownModelIds.size ||
+				[...currentIds].some(id => !this._lastKnownModelIds.has(id));
+			if (changed) {
+				this._logService.info('[ollamaProvider] Model list changed, refreshing');
+				this.refreshModels();
+			}
+		} catch {
+			// Ollama may be temporarily unavailable; silently ignore poll errors
+		}
 	}
 
 	private async migrateConfig(): Promise<void> {
@@ -120,10 +177,16 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 				};
 			}
 
-			return byokKnownModelsToAPIInfoWithEffort(this._name, this._knownModels).map(model => ({
+			const result = byokKnownModelsToAPIInfoWithEffort(this._name, this._knownModels).map(model => ({
 				...model,
 				url: ollamaBaseUrl
 			}));
+
+			// Keep URL and model set in sync so the poller has fresh data
+			this._lastConfiguredUrl = ollamaBaseUrl;
+			this._lastKnownModelIds = new Set(models.map((m: { model: string }) => m.model));
+
+			return result;
 
 		} catch (e) {
 			// Check if this is our version check error and preserve it
