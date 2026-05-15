@@ -4305,3 +4305,118 @@ code = code.replace(helpersAnchor, helpersReplacement);
 fs.writeFileSync(f, code);
 console.log("Patched: geminiNativeProvider.ts gemini allowlist relaxation (Patch 59)");
 PATCH59_EOF
+
+# ── Patch 60: Ollama toolCalling:true + byokKnownModelsToAPIInfoWithEffort ──────
+# The upstream `_getOllamaModelInfo` uses `.capabilities.includes('tools')` to
+# set toolCalling, but many popular Ollama models (llama3, qwen, mistral, gemma)
+# work fine with tools yet don't advertise 'tools' in /api/show capabilities[].
+# VS Code's chat picker requires capabilities.toolCalling:true to list a model,
+# so those models silently disappear from the picker on every nightly sync.
+# This patch also switches the getAllModels return to byokKnownModelsToAPIInfoWithEffort
+# (adds the "Thinking Effort" schema to models that support reasoning effort) and
+# fixes the import lines accordingly.  Also adds a defensive two-step architecture
+# extraction and surfaces the original error in _checkOllamaVersion failures.
+node << 'PATCH60_EOF'
+const fs = require("fs");
+const path = require("path");
+const f = path.join("src", "extension", "byok", "vscode-node", "ollamaProvider.ts");
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: force toolCalling:true for Ollama models (Patch 60)")) {
+  console.log("Patch 60 (Ollama toolCalling:true) already present, skipping");
+  process.exit(0);
+}
+
+// ── Sub-replacement A: swap import ──────────────────────────────────────────
+// upstream imports `byokKnownModelsToAPIInfo` from byokProvider; we need
+// `byokKnownModelsToAPIInfoWithEffort` from byokModelInfo instead.
+const importAnchor = "import { byokKnownModelsToAPIInfo, resolveModelInfo } from '../common/byokProvider';";
+const importReplacement =
+  "import { resolveModelInfo } from '../common/byokProvider';\n" +
+  "import { byokKnownModelsToAPIInfoWithEffort } from './byokModelInfo';";
+
+if (!code.includes(importAnchor)) {
+  console.warn("WARN: Patch 60 import anchor not found — skipping (already patched or upstream changed)");
+  process.exit(0);
+}
+code = code.replace(importAnchor, importReplacement);
+
+// ── Sub-replacement B: _getOllamaModelInfo — fix architecture + vision + toolCalling ──
+const modelInfoAnchor =
+  "\t\tconst contextWindow = modelInfo?.model_info?.[`${modelInfo.model_info['general.architecture']}.context_length`] ?? 32768;\n" +
+  "\t\tconst outputTokens = contextWindow < 4096 ? Math.floor(contextWindow / 2) : 4096;\n" +
+  "\t\tconst modelCapabilities = {\n" +
+  "\t\t\tname: modelInfo?.model_info?.['general.basename'] ?? modelInfo.remote_model ?? modelId,\n" +
+  "\t\t\tmaxOutputTokens: outputTokens,\n" +
+  "\t\t\tmaxInputTokens: contextWindow - outputTokens,\n" +
+  "\t\t\tvision: modelInfo.capabilities.includes('vision'),\n" +
+  "\t\t\ttoolCalling: modelInfo.capabilities.includes('tools')\n" +
+  "\t\t};";
+
+const modelInfoReplacement =
+  "\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: safe architecture extraction (Patch 60) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+  "\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n" +
+  "\t\t// Upstream uses a single expression that crashes when model_info is present\n" +
+  "\t\t// but 'general.architecture' is missing; this two-step form is safe.\n" +
+  "\t\tconst architecture = modelInfo?.model_info?.['general.architecture'];\n" +
+  "\t\tconst contextWindow = (architecture && modelInfo?.model_info?.[`${architecture}.context_length`]) ?? 32768;\n" +
+  "\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+  "\t\tconst outputTokens = contextWindow < 4096 ? Math.floor(contextWindow / 2) : 4096;\n" +
+  "\t\tconst modelCapabilities = {\n" +
+  "\t\t\tname: modelInfo?.model_info?.['general.basename'] ?? modelInfo?.remote_model ?? modelId,\n" +
+  "\t\t\tmaxOutputTokens: outputTokens,\n" +
+  "\t\t\tmaxInputTokens: contextWindow - outputTokens,\n" +
+  "\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: force toolCalling:true for Ollama models (Patch 60) \u2500\u2500\n" +
+  "\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n" +
+  "\t\t\t// VS Code's chat picker requires capabilities.toolCalling:true to list a model.\n" +
+  "\t\t\t// Ollama's /api/show only reports 'tools' in capabilities[] for models that\n" +
+  "\t\t\t// explicitly declare tool support — many popular models (llama3, qwen, mistral,\n" +
+  "\t\t\t// gemma) work fine with tools but don't advertise it, so they'd be hidden from\n" +
+  "\t\t\t// the picker without this override.\n" +
+  "\t\t\tvision: Array.isArray(modelInfo?.capabilities) && modelInfo.capabilities.includes('vision'),\n" +
+  "\t\t\ttoolCalling: true\n" +
+  "\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+  "\t\t};";
+
+if (!code.includes(modelInfoAnchor)) {
+  console.warn("WARN: Patch 60 _getOllamaModelInfo anchor not found — skipping (upstream may have changed)");
+  process.exit(0);
+}
+code = code.replace(modelInfoAnchor, modelInfoReplacement);
+
+// ── Sub-replacement C: getAllModels return ────────────────────────────────────
+const returnAnchor = "\t\treturn byokKnownModelsToAPIInfo(this._name, this._knownModels).map(model => ({";
+const returnReplacement = "\t\treturn byokKnownModelsToAPIInfoWithEffort(this._name, this._knownModels).map(model => ({";
+
+if (!code.includes(returnAnchor)) {
+  console.warn("WARN: Patch 60 getAllModels return anchor not found — skipping sub-step C");
+} else {
+  code = code.replace(returnAnchor, returnReplacement);
+}
+
+// ── Sub-replacement D: _checkOllamaVersion — include original error ───────────
+const versionErrAnchor =
+  "\t\t\t// If version endpoint fails\n" +
+  "\t\t\tthrow new Error(\n" +
+  "\t\t\t\t`Unable to verify Ollama server version. Please ensure you have Ollama version ${MINIMUM_OLLAMA_VERSION} or higher installed. ` +\n" +
+  "\t\t\t\t`If you're running an older version, please upgrade from https://ollama.ai`\n" +
+  "\t\t\t);";
+
+const versionErrReplacement =
+  "\t\t\t// If version endpoint fails\n" +
+  "\t\t\tconst originalError = e instanceof Error ? e.message : String(e);\n" +
+  "\t\t\tthrow new Error(\n" +
+  "\t\t\t\t`Unable to verify Ollama server version. Please ensure you have Ollama version ${MINIMUM_OLLAMA_VERSION} or higher installed. ` +\n" +
+  "\t\t\t\t`If you're running an older version, please upgrade from https://ollama.ai\\n` +\n" +
+  "\t\t\t\t`Original error: ${originalError}`\n" +
+  "\t\t\t);";
+
+if (!code.includes(versionErrAnchor)) {
+  console.warn("WARN: Patch 60 _checkOllamaVersion error anchor not found — skipping sub-step D");
+} else {
+  code = code.replace(versionErrAnchor, versionErrReplacement);
+}
+
+fs.writeFileSync(f, code);
+console.log("Patched: ollamaProvider.ts toolCalling:true + byokKnownModelsToAPIInfoWithEffort (Patch 60)");
+PATCH60_EOF
