@@ -9,6 +9,7 @@ import { ITelemetryService } from '../../telemetry/common/telemetry';
 import { TelemetryData } from '../../telemetry/common/telemetryData';
 import { RawThinkingDelta, ThinkingDelta } from '../../thinking/common/thinking';
 import { extractThinkingDeltaFromChoice, } from '../../thinking/common/thinkingUtils';
+import { QwenThinkingStripper } from '../../../extension/byok/common/qwenThinkingStripper';
 import { FinishedCallback, getRequestId, ICodeVulnerabilityAnnotation, ICopilotBeginToolCall, ICopilotConfirmation, ICopilotError, ICopilotFunctionCall, ICopilotReference, ICopilotToolCall, ICopilotToolCallStreamUpdate, IIPCodeCitation, isCodeCitationAnnotation, isCopilotAnnotation, RequestId } from '../common/fetch';
 import { DestroyableStream, Response } from '../common/fetcherService';
 import { APIErrorResponse, APIJsonData, APIUsage, ChoiceLogProbs, FilterReason, FinishedCompletionReason, isApiUsage, IToolCall } from '../common/openai';
@@ -223,6 +224,11 @@ export class SSEProcessor {
 	private readonly completedFunctionCallIdxs: Map<number /* index */, 'function' | 'tool'> = new Map();
 	private readonly functionCalls: Record<string, APIJsonDataStreaming | null> = {};
 	private readonly toolCalls = new StreamingToolCalls();
+	// ─── BYOK CUSTOM PATCH: Qwen3 <think> tag stripping (Patch 61) ─────────────
+	// One stripper per choice index. Lazily created on first content chunk that
+	// contains a '<' character (fast-path skips allocation for non-Qwen models).
+	private readonly _qwenStrippers: Map<number, QwenThinkingStripper> = new Map();
+	// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
 	private functionCallName: string | undefined = undefined;
 
 	private constructor(
@@ -420,6 +426,25 @@ export class SSEProcessor {
 
 					this.logChoice(choice);
 
+				// ─── BYOK CUSTOM PATCH: Qwen3 <think> tag stripping (Patch 61) ─────
+				// Intercept content chunks that may contain <think>…</think> blocks
+				// (Qwen3 thinking models). Move the reasoning portion into
+				// `choice.delta.reasoning_content` so the standard ThinkingDataContainer
+				// pipeline picks it up — identical to how DeepSeek reasoning_content
+				// is handled. The stripper is a no-op for all other models.
+				if (choice.delta?.content && choice.delta.content.includes('<')) {
+					if (!this._qwenStrippers.has(choice.index)) {
+						this._qwenStrippers.set(choice.index, new QwenThinkingStripper());
+					}
+					const stripper = this._qwenStrippers.get(choice.index)!;
+					const stripped = stripper.process(choice.delta.content);
+					choice.delta.content = stripped.content;
+					if (stripped.reasoning_content) {
+						(choice.delta as RawThinkingDelta).reasoning_content =
+							((choice.delta as RawThinkingDelta).reasoning_content ?? '') + stripped.reasoning_content;
+					}
+				}
+				// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────
 
 					const thinkingDelta = extractThinkingDeltaFromChoice(choice);
 
