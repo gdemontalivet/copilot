@@ -1208,71 +1208,75 @@ fs.writeFileSync(f, code);
 console.log("Patched: sanitizeAnthropicToolId (cross-provider tool id fix)");
 PATCH17_EOF
 
-# Patch 18: renderPromptElementJSON copilot-base fallback.
+# Patch 18: renderPromptElementJSON copilot-utility fallback.
 #
 # `renderPromptElementJSON` in src/extension/prompts/node/base/promptRenderer.ts
 # is the common trunk every file/edit tool goes through to render its result
 # into a prompt-tsx tree (read_file, list_dir, file_search, grep_search,
-# get_errors, replace_string_in_file via codeMapper, etc.). Upstream hardcodes
-# `getChatEndpoint('copilot-base')` there. In BYOK-only mode the fake-token
-# bypass leaves `_copilotBaseModel` unset, so that lookup throws and every
-# tool invocation fails with:
+# get_errors, replace_string_in_file via codeMapper, etc.). Upstream calls
+# `getChatEndpoint('copilot-utility')` there (previously 'copilot-base').
+# In BYOK-only mode the fake-token bypass leaves this endpoint unset, so that
+# lookup throws and every tool invocation fails with:
 #
-#   [error] Error from tool read_file with args {...}:
-#   Unable to resolve chat model with family selection: copilot-base
+#   Unable to resolve Copilot utility chat model (server did not mark a chat fallback model)
 #
-# Patches 15 and 16 fixed two other call sites; this is the one that took down
-# all the built-in tools simultaneously. The endpoint here is only consumed
-# for `modelMaxPromptTokens` (overridden by `tokenOptions.tokenBudget` when
-# present, which every tool passes) and as an `IPromptEndpoint` DI value, so
-# any registered endpoint is a safe substitute.
+# Wraps the lookup in try/catch and falls back to getAllChatEndpoints()[0].
+# Also handles the old copilot-base version of the patch to upgrade installs.
 node << 'PATCH18_EOF'
 const fs = require("fs");
 const f = "src/extension/prompts/node/base/promptRenderer.ts";
 let code = fs.readFileSync(f, "utf8");
 
-if (code.includes("BYOK CUSTOM PATCH: renderPromptElementJSON copilot-base fallback")) {
+if (code.includes("BYOK CUSTOM PATCH: renderPromptElementJSON copilot-utility fallback")) {
   console.log("renderPromptElementJSON BYOK fallback already present, skipping");
   process.exit(0);
 }
 
-const original = `	const endpoint = await instantiationService.invokeFunction(async (accessor) => {
-		const endpointProvider = accessor.get(IEndpointProvider);
-		return await endpointProvider.getChatEndpoint('copilot-base');
-	});`;
+// Strip old copilot-base version of this patch so we can re-apply with new anchor
+if (code.includes("BYOK CUSTOM PATCH: renderPromptElementJSON copilot-base fallback")) {
+  code = code.replace(
+    /\t\t\/\/ \u2500\u2500\u2500 BYOK CUSTOM PATCH: renderPromptElementJSON copilot-base fallback[\s\S]*?\/\/ \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500+\n/,
+    "\t\treturn await endpointProvider.getChatEndpoint('copilot-utility');\n"
+  );
+  console.log("Stripped old copilot-base Patch 18, re-applying with copilot-utility anchor...");
+}
 
-const replacement = `	const endpoint = await instantiationService.invokeFunction(async (accessor) => {
-		const endpointProvider = accessor.get(IEndpointProvider);
-		// ─── BYOK CUSTOM PATCH: renderPromptElementJSON copilot-base fallback ──────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-		// Upstream unconditionally resolves \`copilot-base\` here. In BYOK-only mode
-		// the fake-token bypass leaves \`_copilotBaseModel\` unset, so the lookup
-		// throws and every tool that renders its result through this helper
-		// (read_file, list_dir, file_search, grep_search, get_errors, edit tools
-		// via codeMapper, etc.) errors with "Unable to resolve chat model with
-		// family selection: copilot-base". Fall back to any registered chat
-		// endpoint — this value is only used for \`modelMaxPromptTokens\` (which
-		// \`tokenOptions.tokenBudget\` overrides when present) and as an
-		// \`IPromptEndpoint\` DI fallback.
-		try {
-			return await endpointProvider.getChatEndpoint('copilot-base');
-		} catch {
-			const all = await endpointProvider.getAllChatEndpoints();
-			if (all.length > 0) {
-				return all[0];
-			}
-			throw new Error('No chat endpoints available (BYOK fallback in renderPromptElementJSON)');
-		}
-		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
-	});`;
+const original = `\tconst endpoint = await instantiationService.invokeFunction(async (accessor) => {
+\t\tconst endpointProvider = accessor.get(IEndpointProvider);
+\t\treturn await endpointProvider.getChatEndpoint('copilot-utility');
+\t});`;
+
+const replacement = `\tconst endpoint = await instantiationService.invokeFunction(async (accessor) => {
+\t\tconst endpointProvider = accessor.get(IEndpointProvider);
+\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: renderPromptElementJSON copilot-utility fallback \u2500\u2500
+\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+\t\t// Upstream unconditionally resolves \\\`copilot-utility\\\` here. In BYOK-only
+\t\t// mode the fake-token bypass leaves this endpoint unset, so the lookup
+\t\t// throws and every tool that renders its result through this helper
+\t\t// (read_file, list_dir, file_search, grep_search, get_errors, edit tools
+\t\t// via codeMapper, etc.) errors with "Unable to resolve Copilot utility
+\t\t// chat model". Fall back to any registered chat endpoint \u2014 this value is
+\t\t// only used for \\\`modelMaxPromptTokens\\\` (which \\\`tokenOptions.tokenBudget\\\`
+\t\t// overrides when present) and as an \\\`IPromptEndpoint\\\` DI fallback.
+\t\ttry {
+\t\t\treturn await endpointProvider.getChatEndpoint('copilot-utility');
+\t\t} catch {
+\t\t\tconst all = await endpointProvider.getAllChatEndpoints();
+\t\t\tif (all.length > 0) {
+\t\t\t\treturn all[0];
+\t\t\t}
+\t\t\tthrow new Error('No chat endpoints available (BYOK fallback in renderPromptElementJSON)');
+\t\t}
+\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+\t});`;
 
 if (!code.includes(original)) {
-  console.warn("WARN: renderPromptElementJSON anchor not found — skipping patch 18");
+  console.warn("WARN: renderPromptElementJSON anchor not found \u2014 skipping patch 18");
   process.exit(0);
 }
 code = code.replace(original, replacement);
 fs.writeFileSync(f, code);
-console.log("Patched: renderPromptElementJSON copilot-base fallback");
+console.log("Patched: renderPromptElementJSON copilot-utility fallback");
 PATCH18_EOF
 
 # Patch 19: VertexAnthropic context defaults + known Claude capability table.
