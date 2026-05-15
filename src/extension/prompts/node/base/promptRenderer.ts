@@ -213,36 +213,7 @@ export async function renderPromptElementJSON<P extends BasePromptElementProps>(
 	// todo@lramos15: We should pass in endpoint provider rather than doing invoke function, but this was easier
 	const endpoint = await instantiationService.invokeFunction(async (accessor) => {
 		const endpointProvider = accessor.get(IEndpointProvider);
-		// ─── BYOK CUSTOM PATCH: renderPromptElementJSON copilot-base fallback ──────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-		// Upstream unconditionally resolves `copilot-base` here. In BYOK-only mode
-		// the fake-token bypass leaves `_copilotBaseModel` unset, so the lookup
-		// throws and every tool that renders its result through this helper
-		// (read_file, list_dir, file_search, grep_search, get_errors, edit tools
-		// via codeMapper, etc.) errors with "Unable to resolve chat model with
-		// family selection: copilot-base". Fall back to any registered chat
-		// endpoint — this value is only used for `modelMaxPromptTokens` (which
-		// `tokenOptions.tokenBudget` overrides when present) and as an
-		// `IPromptEndpoint` DI fallback.
-		try {
-			return await endpointProvider.getChatEndpoint('copilot-base');
-		} catch {
-			const all = await endpointProvider.getAllChatEndpoints();
-			if (all.length > 0) {
-				return all[0];
-			}
-			// ─── BYOK CUSTOM PATCH: stub endpoint last-resort (Patch 45) ──────
-			// If no BYOK provider has registered a chat endpoint yet (typical
-			// during the first tool invocation after a cold start), fall
-			// through to a stub endpoint instead of throwing. The stub is
-			// only used for token-budget math and capability flag reads in
-			// prompt rendering — `renderPromptElementJSON` never issues a
-			// real chat request through it. See byokStubChatEndpoint.ts.
-			const { BYOKStubChatEndpoint } = await import('../../../byok/common/byokStubChatEndpoint');
-			return new BYOKStubChatEndpoint();
-			// ─── END BYOK CUSTOM PATCH ───────────────────────
-		}
-		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
+		return await endpointProvider.getChatEndpoint('copilot-utility');
 	});
 	const hydratedInstaService = instantiationService.createChild(new ServiceCollection([IPromptEndpoint, endpoint]));
 	const renderer = new PromptRendererForJSON(ctor as any, props, tokenOptions, endpoint, hydratedInstaService);

@@ -277,21 +277,14 @@ Learn more about [GitHub Copilot](https://docs.github.com/copilot/using-github-c
 
 	private async switchToBaseModel(request: vscode.ChatRequest, stream: vscode.ChatResponseStream): Promise<ChatRequest> {
 		const endpoint = await this.endpointProvider.getChatEndpoint(request);
-		// ─── BYOK CUSTOM PATCH: skip copilot-base lookup for BYOK / free requests ───
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-		// Upstream unconditionally calls `getChatEndpoint('copilot-base')` here, which
-		// throws in BYOK-only mode (fake-token bypass leaves `_copilotBaseModel`
-		// unset). Since we short-circuit below for non-copilot / 0x / undefined-
-		// multiplier requests anyway, do the guard *before* the base-endpoint
-		// resolution to avoid the unnecessary (and failure-prone) lookup.
+		const baseEndpoint = await this.endpointProvider.getChatEndpoint('copilot-utility');
+		// If it has a 0x multipler, it's free so don't switch them. If it's BYOK, it's free so don't switch them.
 		if (endpoint.multiplier === 0 || request.model.vendor !== 'copilot' || endpoint.multiplier === undefined) {
 			return request;
 		}
-		// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
 		if (this._chatQuotaService.additionalUsageEnabled || !this._chatQuotaService.quotaExhausted) {
 			return request;
 		}
-		const baseEndpoint = await this.endpointProvider.getChatEndpoint('copilot-base');
 		const baseLmModel = (await vscode.lm.selectChatModels({ id: baseEndpoint.model, family: baseEndpoint.family, vendor: 'copilot' }))[0];
 		if (!baseLmModel) {
 			return request;
