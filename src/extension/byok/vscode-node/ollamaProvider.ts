@@ -117,7 +117,10 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 					maxOutputTokens: modelInfo.capabilities.limits?.max_output_tokens ?? 4096,
 					name: modelInfo.name,
 					toolCalling: !!modelInfo.capabilities.supports.tool_calls,
-					vision: !!modelInfo.capabilities.supports.vision
+					vision: !!modelInfo.capabilities.supports.vision,
+					...(modelInfo.capabilities.supports.reasoning_effort?.length
+						? { supportsReasoningEffort: modelInfo.capabilities.supports.reasoning_effort }
+						: {})
 				};
 			}
 
