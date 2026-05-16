@@ -116,7 +116,7 @@ export class NodeFetcher implements IFetcher {
 					hostname,
 				));
 			});
-			req.setTimeout(600 * 1000); // time out after 600s — local Ollama prefill can exceed 60s on large contexts
+			req.setTimeout(60 * 1000); // time out after 60s of receiving no data
 			req.on('error', reject);
 
 			if (body) {

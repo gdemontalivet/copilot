@@ -215,14 +215,14 @@ export async function renderPromptElementJSON<P extends BasePromptElementProps>(
 		const endpointProvider = accessor.get(IEndpointProvider);
 		// ─── BYOK CUSTOM PATCH: renderPromptElementJSON copilot-utility fallback ──
 		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-		// Upstream unconditionally resolves `copilot-utility` here. In BYOK-only
+		// Upstream unconditionally resolves \`copilot-utility\` here. In BYOK-only
 		// mode the fake-token bypass leaves this endpoint unset, so the lookup
 		// throws and every tool that renders its result through this helper
 		// (read_file, list_dir, file_search, grep_search, get_errors, edit tools
 		// via codeMapper, etc.) errors with "Unable to resolve Copilot utility
 		// chat model". Fall back to any registered chat endpoint — this value is
-		// only used for `modelMaxPromptTokens` (which `tokenOptions.tokenBudget`
-		// overrides when present) and as an `IPromptEndpoint` DI fallback.
+		// only used for \`modelMaxPromptTokens\` (which \`tokenOptions.tokenBudget\`
+		// overrides when present) and as an \`IPromptEndpoint\` DI fallback.
 		try {
 			return await endpointProvider.getChatEndpoint('copilot-utility');
 		} catch {
@@ -241,7 +241,7 @@ export async function renderPromptElementJSON<P extends BasePromptElementProps>(
 			return new BYOKStubChatEndpoint();
 			// ─── END BYOK CUSTOM PATCH ───────────────────────
 		}
-		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
+		// ─── END BYOK CUSTOM PATCH ───────────────────────
 	});
 	const hydratedInstaService = instantiationService.createChild(new ServiceCollection([IPromptEndpoint, endpoint]));
 	const renderer = new PromptRendererForJSON(ctor as any, props, tokenOptions, endpoint, hydratedInstaService);

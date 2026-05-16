@@ -117,10 +117,7 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 					maxOutputTokens: modelInfo.capabilities.limits?.max_output_tokens ?? 4096,
 					name: modelInfo.name,
 					toolCalling: !!modelInfo.capabilities.supports.tool_calls,
-					vision: !!modelInfo.capabilities.supports.vision,
-					...(modelInfo.capabilities.supports.reasoning_effort?.length
-						? { supportsReasoningEffort: modelInfo.capabilities.supports.reasoning_effort }
-						: {})
+					vision: !!modelInfo.capabilities.supports.vision
 				};
 			}
 
@@ -151,24 +148,14 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 
 	private async _getOllamaModelInfo(ollamaBaseUrl: string, modelId: string): Promise<IChatModelInformation> {
 		const modelInfo = await this._fetchOllamaModelInformation(ollamaBaseUrl, modelId);
-		const architecture = modelInfo?.model_info?.['general.architecture'];
-		const contextWindow = (architecture && modelInfo?.model_info?.[`${architecture}.context_length`]) ?? 32768;
+		const contextWindow = modelInfo?.model_info?.[`${modelInfo.model_info['general.architecture']}.context_length`] ?? 32768;
 		const outputTokens = contextWindow < 4096 ? Math.floor(contextWindow / 2) : 4096;
-
-		const hasThinkingCapability = Array.isArray(modelInfo?.capabilities) && modelInfo.capabilities.includes('thinking');
-
 		const modelCapabilities = {
-			name: modelInfo?.model_info?.['general.basename'] ?? modelInfo?.remote_model ?? modelId,
+			name: modelInfo?.model_info?.['general.basename'] ?? modelInfo.remote_model ?? modelId,
 			maxOutputTokens: outputTokens,
 			maxInputTokens: contextWindow - outputTokens,
-			vision: Array.isArray(modelInfo?.capabilities) && modelInfo.capabilities.includes('vision'),
-			// Copilot Chat requires toolCalling: true for a model to appear in the chat picker.
-			// Ollama's /api/show does not always report 'tools' for models that support it.
-			toolCalling: true,
-			// Read 'thinking' from Ollama capabilities, fallback to name heuristics for older setups
-			...(hasThinkingCapability || modelId.toLowerCase().includes('qwen') || modelId.toLowerCase().includes('deepseek') || modelId.toLowerCase().includes('thinking') || modelId.toLowerCase().includes('reasoner')
-				? { supportsReasoningEffort: ['none', 'low', 'medium', 'high'] }
-				: {})
+			vision: modelInfo.capabilities.includes('vision'),
+			toolCalling: modelInfo.capabilities.includes('tools')
 		};
 
 		return resolveModelInfo(modelId, this._name, this._knownModels, modelCapabilities);
@@ -237,11 +224,9 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 				throw e;
 			}
 			// If version endpoint fails
-			const originalError = e instanceof Error ? e.message : String(e);
 			throw new Error(
 				`Unable to verify Ollama server version. Please ensure you have Ollama version ${MINIMUM_OLLAMA_VERSION} or higher installed. ` +
-				`If you're running an older version, please upgrade from https://ollama.ai\n` +
-				`Original error: ${originalError}`
+				`If you're running an older version, please upgrade from https://ollama.ai`
 			);
 		}
 	}

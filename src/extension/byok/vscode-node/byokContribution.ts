@@ -2,7 +2,7 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-import { commands, LanguageModelChatInformation, LanguageModelChatProvider, lm } from 'vscode';
+import { LanguageModelChatInformation, LanguageModelChatProvider, lm } from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { IVSCodeExtensionContext } from '../../../platform/extContext/common/extensionContext';
 import { ILogService } from '../../../platform/log/common/logService';
@@ -46,10 +46,6 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		this._byokStorageService = new BYOKStorageService(extensionContext);
 		this._applyPolicy();
 		this._register(this._authService.onDidAuthenticationChange(() => this._applyPolicy()));
-		this._register(commands.registerCommand('github.copilot.chat.byok.refreshOllamaModels', () => {
-			const ollamaProvider = this._providers.get(OllamaLMProvider.providerId) as OllamaLMProvider | undefined;
-			ollamaProvider?.refreshModels();
-		}));
 	}
 
 	private _buildProviders(): void {
@@ -69,7 +65,6 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		this._providers.set(AzureBYOKModelProvider.providerId, instantiationService.createInstance(AzureBYOKModelProvider, this._byokStorageService));
 		this._providers.set(CustomOAIBYOKModelProvider.providerId, instantiationService.createInstance(CustomOAIBYOKModelProvider, this._byokStorageService));
 		this._providers.set(CustomEndpointBYOKModelProvider.providerId, instantiationService.createInstance(CustomEndpointBYOKModelProvider, this._byokStorageService));
-		this._providers.set(DeepSeekBYOKLMProvider.providerId, instantiationService.createInstance(DeepSeekBYOKLMProvider, this._byokStorageService));
 
 		this._knownModelsRefreshTargets = [
 			[AnthropicLMProvider.providerName, anthropic],
@@ -90,17 +85,6 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 			}
 			this._providersRegistered = true;
 			this._logService.info(`BYOK: registered ${this._providers.size} provider(s): ${Array.from(this._providers.keys()).join(', ')}`);
-			// ─── BYOK CUSTOM PATCH: eager Ollama model warm-up (Patch 63) ───────────
-			// After registering providers VS Code lazily calls provideLanguageModel-
-			// ChatInformation only when a chat request arrives. If the model was
-			// previously used and its ID is stored in chatLanguageModels.json, VS Code
-			// throws "Chat provider for model ollama/Ollama/<id> is not registered"
-			// because the LM registry is still empty at that point. Force-discover
-			// Ollama models immediately at activation so the registry is populated
-			// before the first request.
-			void lm.selectChatModels({ vendor: OllamaLMProvider.providerId })
-				.catch(() => { /* best-effort warm-up, ignore failures */ });
-			// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────
 			if (!this._knownModelsRefreshed) {
 				this._knownModelsRefreshed = true;
 				void this._refreshKnownModels().catch(err => {

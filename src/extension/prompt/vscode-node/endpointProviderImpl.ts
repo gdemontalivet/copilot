@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { LanguageModelChat, type ChatRequest } from 'vscode';
+import { LanguageModelChat, lm, type ChatRequest } from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { ChatEndpointFamily, EmbeddingsEndpointFamily, IChatModelInformation, ICompletionModelInformation, IEmbeddingModelInformation, IEndpointProvider } from '../../../platform/endpoint/common/endpointProvider';
@@ -15,6 +15,7 @@ import { IModelMetadataFetcher, ModelMetadataFetcher } from '../../../platform/e
 import { ExtensionContributedChatEndpoint } from '../../../platform/endpoint/vscode-node/extChatEndpoint';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IChatEndpoint, IEmbeddingsEndpoint } from '../../../platform/networking/common/networking';
+import { ITelemetryService } from '../../../platform/telemetry/common/telemetry';
 import { Emitter, Event } from '../../../util/vs/base/common/event';
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
@@ -37,6 +38,7 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 		@IConfigurationService protected readonly _configService: IConfigurationService,
 		@IInstantiationService protected readonly _instantiationService: IInstantiationService,
 		@IAuthenticationService protected readonly _authService: IAuthenticationService,
+		@ITelemetryService protected readonly _telemetryService: ITelemetryService,
 	) {
 		super();
 
@@ -50,7 +52,38 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 			this._embeddingEndpoints.clear();
 			this._onDidModelsRefresh.fire();
 		}));
+
+		// When the user changes their utility model overrides we need to invalidate any
+		// previously-resolved utility alias endpoints so the next request re-resolves.
+		this._register(this._configService.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration(ProductionEndpointProvider.UTILITY_MODEL_CONFIG_KEY) || e.affectsConfiguration(ProductionEndpointProvider.UTILITY_SMALL_MODEL_CONFIG_KEY)) {
+				this._logService.trace(`[ProductionEndpointProvider] Utility model override changed; invalidating alias endpoints.`);
+				// Clear telemetry fingerprints so a re-applied override emits
+				// once for its new value.
+				this._lastOverrideTelemetryFingerprint.clear();
+				this._onDidModelsRefresh.fire();
+			}
+		}));
+
 	}
+
+	// NOTE: Keep in sync with `ChatConfiguration.UtilityModel` /
+	// `ChatConfiguration.UtilitySmallModel` in
+	// `src/vs/workbench/contrib/chat/common/constants.ts`. The setting value
+	// is encoded as `${vendor}/${id}` by
+	// `defaultModelContribution.ts` (storageFormat: 'vendorAndId'). Both
+	// fields are stable identifiers usable directly with
+	// `vscode.lm.selectChatModels({ vendor, id })`.
+	private static readonly UTILITY_MODEL_CONFIG_KEY = 'chat.utilityModel';
+	private static readonly UTILITY_SMALL_MODEL_CONFIG_KEY = 'chat.utilitySmallModel';
+
+	/**
+	 * Per-family marker recording that we already emitted a telemetry event
+	 * for the currently-applied override. Used to dedupe so we emit at most
+	 * once per family per override value. Cleared when the relevant setting
+	 * changes.
+	 */
+	private readonly _lastOverrideTelemetryFingerprint = new Map<ChatEndpointFamily, string>();
 
 	private getOrCreateChatEndpointInstance(modelMetadata: IChatModelInformation): IChatEndpoint {
 		const modelId = modelMetadata.id;
@@ -99,45 +132,127 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 	 * selection for each family lives in the corresponding resolver
 	 * class so callers don't need to know which CAPI family backs each
 	 * purpose.
+
 	 */
-	// ─── BYOK CUSTOM PATCH: utility family BYOK fallback ────────────────────────
-	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-	// In BYOK-only mode the fake-token bypass leaves `_familyMap` and the
-	// `is_chat_fallback` marker unpopulated, so both CopilotUtilityChatEndpoint
-	// and CopilotUtilitySmallChatEndpoint throw. Every consumer of
-	// `getChatEndpoint('copilot-utility[-small]')` — intentDetector, promptCategorizer,
-	// applyPatchTool, mcpToolCallingLoop, summarizer, etc. — propagates this
-	// throw up to the chat turn handler, producing "Unable to resolve Copilot
-	// utility chat model" for every single message regardless of which BYOK model
-	// the user selected.
-	//
-	// We intentionally return BYOKStubChatEndpoint (NOT a real BYOK model) so
-	// that callers which actually invoke makeChatRequest (intentDetector,
-	// promptCategorizer) get a quick, deterministic stub error that VS Code's
-	// ChatParticipantDetectionProvider / categorization wrappers catch and
-	// swallow — letting the main turn proceed with the user's selected BYOK
-	// model. Routing to a real BYOK model would make intent detection "work"
-	// and potentially re-route the request to @workspace or another agent
-	// that requires Copilot search, returning an empty response.
 	private async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
-		if (family !== 'copilot-utility-small' && family !== 'copilot-utility') {
+		const override = await this._resolveUtilityOverride(family);
+		if (override) {
+			return override;
+		}
+		if (family === 'copilot-utility-small') {
+			return CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
+		} else if (family === 'copilot-utility') {
+			return CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
+		} else {
 			throw new Error(`Unrecognized chat endpoint family ${family}`);
 		}
-
-		// Primary: try the real Copilot utility endpoints (work in full Copilot mode).
-		if (family === 'copilot-utility-small') {
-			try { return await CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through */ }
-		}
-		try { return await CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through to stub */ }
-
-		// BYOK stub: prevents the throw that was surfacing as "Unable to resolve
-		// Copilot utility chat model". Callers that attempt makeChatRequest through
-		// the stub get a fast error that their catch handlers swallow gracefully.
-		this._logService.trace(`[BYOK] copilot-utility family resolved via BYOKStubChatEndpoint`);
-		const { BYOKStubChatEndpoint } = await import('../../byok/common/byokStubChatEndpoint');
-		return new BYOKStubChatEndpoint();
 	}
-	// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
+
+	/**
+	 * Resolves the user's `chat.utilityModel` / `chat.utilitySmallModel`
+	 * override (if any) to a concrete chat endpoint.
+	 * Returns `undefined` if no override is configured, if the value is
+	 * malformed, if no matching model is currently available, or if the
+	 * lookup throws.
+	 */
+	private async _resolveUtilityOverride(family: ChatEndpointFamily): Promise<IChatEndpoint | undefined> {
+		let configKey: string;
+		if (family === 'copilot-utility-small') {
+			configKey = ProductionEndpointProvider.UTILITY_SMALL_MODEL_CONFIG_KEY;
+		} else if (family === 'copilot-utility') {
+			configKey = ProductionEndpointProvider.UTILITY_MODEL_CONFIG_KEY;
+		} else {
+			return undefined;
+		}
+
+		const raw = this._configService.getNonExtensionConfig<unknown>(configKey);
+		if (typeof raw !== 'string' || raw.length === 0) {
+			if (raw !== undefined && typeof raw !== 'string') {
+				this._logService.warn(`[ProductionEndpointProvider] Ignoring non-string ${configKey} override of type '${typeof raw}'.`);
+			}
+			return undefined;
+		}
+
+		const slashIdx = raw.indexOf('/');
+		if (slashIdx <= 0 || slashIdx >= raw.length - 1) {
+			this._logService.warn(`[ProductionEndpointProvider] Ignoring malformed ${configKey} override: '${raw}' (expected '\${vendor}/\${id}').`);
+			return undefined;
+		}
+		const vendor = raw.substring(0, slashIdx);
+		const id = raw.substring(slashIdx + 1);
+
+		// For copilot-vendor overrides, resolve directly through the model
+		// fetcher. Going through `lm.selectChatModels` would re-enter the
+		// language-model service for the `copilot` vendor, which is held by
+		// `_resolveLMSequencer` whenever the copilot LM provider is in the
+		// middle of preparing its model list (which is exactly when this
+		// resolution path runs as part of utility-alias publishing). That
+		// re-entrancy deadlocks the picker.
+		if (vendor === 'copilot') {
+			let allModels: IChatModelInformation[];
+			try {
+				allModels = await this._modelFetcher.getAllChatModels();
+			} catch (err) {
+				this._logService.warn(`[ProductionEndpointProvider] Failed to fetch copilot models for ${configKey} override '${raw}'; falling back to default. Error: ${err}`);
+				return undefined;
+			}
+			const matches = allModels.filter(m => m.id === id);
+			if (matches.length === 0) {
+				this._logService.warn(`[ProductionEndpointProvider] No copilot model matched ${configKey} override '${raw}'; falling back to default.`);
+				return undefined;
+			}
+			if (matches.length > 1) {
+				this._logService.warn(`[ProductionEndpointProvider] ${configKey} override '${raw}' matched ${matches.length} copilot models; ignoring (override is ambiguous).`);
+				return undefined;
+			}
+			const modelMetadata = matches[0];
+			this._logService.trace(`[ProductionEndpointProvider] Applying ${configKey} override: copilot/${modelMetadata.id}`);
+			this._reportOverrideAppliedTelemetry(family);
+			return this.getOrCreateChatEndpointInstance(modelMetadata);
+		}
+
+		let models: readonly LanguageModelChat[];
+		try {
+			models = await lm.selectChatModels({ vendor, id });
+		} catch (err) {
+			this._logService.warn(`[ProductionEndpointProvider] Failed to resolve ${configKey} override '${raw}'; falling back to default. Error: ${err}`);
+			return undefined;
+		}
+		if (models.length === 0) {
+			this._logService.warn(`[ProductionEndpointProvider] No model matched ${configKey} override '${raw}'; falling back to default.`);
+			return undefined;
+		}
+		if (models.length > 1) {
+			this._logService.warn(`[ProductionEndpointProvider] ${configKey} override '${raw}' matched ${models.length} models; ignoring (override is ambiguous).`);
+			return undefined;
+		}
+		const model = models[0];
+
+		this._logService.trace(`[ProductionEndpointProvider] Applying ${configKey} override: ${model.vendor}/${model.id}`);
+		this._reportOverrideAppliedTelemetry(family);
+		return this._instantiationService.createInstance(ExtensionContributedChatEndpoint, model);
+	}
+
+	private _reportOverrideAppliedTelemetry(family: ChatEndpointFamily): void {
+		if (this._lastOverrideTelemetryFingerprint.has(family)) {
+			return;
+		}
+		this._lastOverrideTelemetryFingerprint.set(family, 'applied');
+
+		/* __GDPR__
+			"chat.utilityModelOverride" : {
+				"owner": "vrbhardw",
+				"comment": "Tracks adoption of the chat.utilityModel / chat.utilitySmallModel settings. Emitted at most once per family per session when the configured override successfully resolves to a model.",
+				"family": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "Which utility slot was resolved: 'copilot-utility' or 'copilot-utility-small'." }
+			}
+		*/
+		this._telemetryService.sendMSFTTelemetryEvent(
+			'chat.utilityModelOverride',
+			{
+				family,
+			},
+		);
+	}
 
 	async getEmbeddingsEndpoint(family?: EmbeddingsEndpointFamily): Promise<IEmbeddingsEndpoint> {
 		this._logService.trace(`Resolving embedding model`);
