@@ -49,9 +49,14 @@
 // for its DSML control markers because U+FF5C is rare in real text.
 export const DSML_TOOL_CALLS_OPEN = '<\uFF5C\uFF5CDSML\uFF5C\uFF5Ctool_calls>';
 export const DSML_TOOL_CALLS_CLOSE = '</\uFF5C\uFF5CDSML\uFF5C\uFF5Ctool_calls>';
+export const DSML_TOOL_CALLS_OPEN_CORE = '\uFF5C\uFF5CDSML\uFF5C\uFF5Ctool_calls>';
+export const DSML_TOOL_CALLS_CLOSE_CORE = '\uFF5C\uFF5CDSML\uFF5C\uFF5Ctool_calls>';
 
-const DSML_INVOKE_REGEX = /<\uFF5C\uFF5CDSML\uFF5C\uFF5Cinvoke name="([^"]+)">([\s\S]*?)<\/\uFF5C\uFF5CDSML\uFF5C\uFF5Cinvoke>/g;
-const DSML_PARAMETER_REGEX = /<\uFF5C\uFF5CDSML\uFF5C\uFF5Cparameter name="([^"]+)"(?:\s+string="(true|false)")?>([\s\S]*?)<\/\uFF5C\uFF5CDSML\uFF5C\uFF5Cparameter>/g;
+// We use robust regexes because DeepSeek V4 sometimes hallucinates broken tags:
+// missing `<` (e.g. `｜｜DSML｜｜invoke`), missing `/` (e.g. `｜｜DSML｜｜parameter>`),
+// or doubled `<` (e.g. `<<｜｜DSML｜｜invoke>`).
+const DSML_INVOKE_REGEX = /(?:<+)?\/?\uFF5C\uFF5CDSML\uFF5C\uFF5Cinvoke name="([^"]+)">([\s\S]*?)(?:<+)?\/?\uFF5C\uFF5CDSML\uFF5C\uFF5Cinvoke>/g;
+const DSML_PARAMETER_REGEX = /(?:<+)?\/?\uFF5C\uFF5CDSML\uFF5C\uFF5Cparameter name="([^"]+)"(?:\s+string="(true|false)")?>([\s\S]*?)(?:<+)?\/?\uFF5C\uFF5CDSML\uFF5C\uFF5Cparameter>/g;
 
 export interface ParsedDsmlCall {
 	readonly id: string;
@@ -163,10 +168,11 @@ export class DsmlToolCallStripper {
 
 	private _drainOnce(): DsmlStripResult {
 		if (!this._inDsml) {
-			const openIdx = this._buffer.indexOf(DSML_TOOL_CALLS_OPEN);
-			if (openIdx !== -1) {
+			const openMatch = /(?:<+)?\/?\uFF5C\uFF5CDSML\uFF5C\uFF5Ctool_calls>/.exec(this._buffer);
+			if (openMatch) {
+				const openIdx = openMatch.index;
 				const text = this._buffer.slice(0, openIdx);
-				this._buffer = this._buffer.slice(openIdx + DSML_TOOL_CALLS_OPEN.length);
+				this._buffer = this._buffer.slice(openIdx + openMatch[0].length);
 				this._inDsml = true;
 				return { text, calls: [] };
 			}
@@ -178,27 +184,46 @@ export class DsmlToolCallStripper {
 			this._buffer = this._buffer.slice(safeEnd);
 			return { text, calls: [] };
 		}
-		const closeIdx = this._buffer.indexOf(DSML_TOOL_CALLS_CLOSE);
-		if (closeIdx === -1) {
+		const closeMatch = /(?:<+)?\/?\uFF5C\uFF5CDSML\uFF5C\uFF5Ctool_calls>/.exec(this._buffer);
+		if (!closeMatch) {
 			return { text: '', calls: [] };
 		}
+		const closeIdx = closeMatch.index;
 		const payload = this._buffer.slice(0, closeIdx);
-		this._buffer = this._buffer.slice(closeIdx + DSML_TOOL_CALLS_CLOSE.length);
+		this._buffer = this._buffer.slice(closeIdx + closeMatch[0].length);
 		this._inDsml = false;
 		const calls = this._mintCalls(parseDsmlPayload(payload));
 		return { text: '', calls };
 	}
 
 	private _findSafePassthroughEnd(buffer: string): number {
-		const markerLen = DSML_TOOL_CALLS_OPEN.length;
-		const start = Math.max(0, buffer.length - markerLen + 1);
-		for (let i = start; i < buffer.length; i++) {
+		// We look for partial matches of the core marker "\uFF5C\uFF5CDSML\uFF5C\uFF5Ctool_calls>"
+		// and also "<" or "</" since they might precede it.
+		// A safe fallback: if we see any `<` or `\uFF5C`, we stop if it's near the end.
+		const markerCore = '\uFF5C\uFF5CDSML\uFF5C\uFF5Ctool_calls>';
+		const possiblePrefixes = [
+			'<',
+			'</',
+			'<<',
+			'<</'
+		];
+		
+		let earliestMatch = buffer.length;
+		
+		// Check if any suffix of the buffer could be the start of our marker
+		for (let i = 0; i < buffer.length; i++) {
 			const suffix = buffer.slice(i);
-			if (DSML_TOOL_CALLS_OPEN.startsWith(suffix)) {
+			if (markerCore.startsWith(suffix) || possiblePrefixes.includes(suffix)) {
 				return i;
 			}
+			// What if the suffix is part of < + markerCore?
+			for (const prefix of possiblePrefixes) {
+				if ((prefix + markerCore).startsWith(suffix)) {
+					return i;
+				}
+			}
 		}
-		return buffer.length;
+		return earliestMatch;
 	}
 
 	private _mintCalls(parsed: Array<{ name: string; args: Record<string, unknown> }>): ParsedDsmlCall[] {
