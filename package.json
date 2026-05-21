@@ -1236,7 +1236,7 @@
 				"toolReferenceName": "sessionStoreSql",
 				"when": "github.copilot.sessionSearch.enabled",
 				"userDescription": "Query your Copilot session history using SQL",
-				"modelDescription": "Query the local session store containing history from past coding sessions. Uses SQLite SQL syntax.\n\nActions: 'query' (execute SQL — supports JOINs, FTS5 MATCH, aggregations), 'standup' (pre-fetch last 24h data), 'reindex' (rebuild index from debug logs).",
+				"modelDescription": "Query the local session store containing history from past coding sessions. Uses SQLite syntax (NOT DuckDB or Postgres). SQL queries are read-only — only SELECT and WITH are allowed. Use `datetime('now', '-1 day')` for date math (NOT `now() - INTERVAL '1 day'`), FTS5 `MATCH` for text search.\n\nTables: `sessions`, `turns`, `session_files`, `session_refs`, `checkpoints`, `search_index`. For column details and query patterns, use the **chronicle** skill.\n\nActions: 'query' (execute SQL — supports JOINs, FTS5 MATCH, aggregations), 'standup' (pre-fetch last 24h data), 'reindex' (rebuild index from debug logs).",
 				"tags": [],
 				"canBeReferencedInPrompt": false,
 				"inputSchema": {
@@ -2317,49 +2317,49 @@
 				"icon": "$(chat-sparkle)",
 				"title": "%copilot.title%",
 				"content": "%github.copilot.viewsWelcome.individual.expired%",
-				"when": "github.copilot.interactiveSession.individual.expired"
+				"when": "github.copilot.interactiveSession.individual.expired && !github.copilot.hasByokModels"
 			},
 			{
 				"icon": "$(chat-sparkle)",
 				"title": "%copilot.title%",
 				"content": "%github.copilot.viewsWelcome.enterprise%",
-				"when": "github.copilot.interactiveSession.enterprise.disabled"
+				"when": "github.copilot.interactiveSession.enterprise.disabled && !github.copilot.hasByokModels"
 			},
 			{
 				"icon": "$(chat-sparkle)",
 				"title": "%copilot.title%",
 				"content": "%github.copilot.viewsWelcome.offline%",
-				"when": "github.copilot.offline"
+				"when": "github.copilot.offline && !github.copilot.hasByokModels"
 			},
 			{
 				"icon": "$(chat-sparkle)",
 				"title": "%copilot.title%",
 				"content": "%github.copilot.viewsWelcome.invalidToken%",
-				"when": "github.copilot.interactiveSession.invalidToken"
+				"when": "github.copilot.interactiveSession.invalidToken && !github.copilot.hasByokModels"
 			},
 			{
 				"icon": "$(chat-sparkle)",
 				"title": "%copilot.title%",
 				"content": "%github.copilot.viewsWelcome.rateLimited%",
-				"when": "github.copilot.interactiveSession.rateLimited"
+				"when": "github.copilot.interactiveSession.rateLimited && !github.copilot.hasByokModels"
 			},
 			{
 				"icon": "$(chat-sparkle)",
 				"title": "%copilot.title%",
 				"content": "%github.copilot.viewsWelcome.gitHubLoginFailed%",
-				"when": "github.copilot.interactiveSession.gitHubLoginFailed"
+				"when": "github.copilot.interactiveSession.gitHubLoginFailed && !github.copilot.hasByokModels"
 			},
 			{
 				"icon": "$(chat-sparkle)",
 				"title": "%copilot.title%",
 				"content": "%github.copilot.viewsWelcome.contactSupport%",
-				"when": "github.copilot.interactiveSession.contactSupport"
+				"when": "github.copilot.interactiveSession.contactSupport && !github.copilot.hasByokModels"
 			},
 			{
 				"icon": "$(chat-sparkle)",
 				"title": "%copilot.title%",
 				"content": "%github.copilot.viewsWelcome.chatDisabled%",
-				"when": "github.copilot.interactiveSession.chatDisabled"
+				"when": "github.copilot.interactiveSession.chatDisabled && !github.copilot.hasByokModels"
 			},
 			{
 				"icon": "$(chat-sparkle)",
