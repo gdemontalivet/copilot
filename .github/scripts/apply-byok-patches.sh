@@ -4074,29 +4074,49 @@ const fs = require("fs");
 const f = "src/platform/thinking/common/thinking.ts";
 let code = fs.readFileSync(f, "utf8");
 
-if (code.includes("// DeepSeek / OpenAI reasoning field for Completions")) {
-  console.log("thinking.ts reasoning_content already present, skipping");
+if (code.includes("// DeepSeek / OpenAI reasoning field for Completions") && code.includes("reasoning?: string;")) {
+  console.log("thinking.ts reasoning_content + reasoning already present, skipping");
   process.exit(0);
 }
 
 // Add to ThinkingDataInMessage (right after the opening brace)
 const inMsgAnchor = "export interface ThinkingDataInMessage {";
-const inMsgField = "\n\t// DeepSeek / OpenAI reasoning field for Completions\n\treasoning_content?: string;\n";
-if (code.includes(inMsgAnchor)) {
-  code = code.replace(inMsgAnchor, inMsgAnchor + inMsgField);
-  console.log("Patched: ThinkingDataInMessage.reasoning_content (Patch 52 A)");
-} else {
-  console.warn("WARN: ThinkingDataInMessage anchor not found — skipping Patch 52 (A)");
+// reasoning_content: required for DeepSeek/OpenAI thinking pass-back
+// reasoning: generic field used by models like Qwen3 (without _content suffix)
+const inMsgField = "\n\t// DeepSeek / OpenAI reasoning field for Completions\n\treasoning_content?: string;\n\treasoning?: string;\n";
+if (!code.includes("// DeepSeek / OpenAI reasoning field for Completions")) {
+  if (code.includes(inMsgAnchor)) {
+    code = code.replace(inMsgAnchor, inMsgAnchor + inMsgField);
+    console.log("Patched: ThinkingDataInMessage.reasoning_content + reasoning (Patch 52 A)");
+  } else {
+    console.warn("WARN: ThinkingDataInMessage anchor not found — skipping Patch 52 (A)");
+  }
+} else if (!code.includes("reasoning?: string;")) {
+  // reasoning_content already added; just add the reasoning field after it
+  code = code.replace(
+    "\t// DeepSeek / OpenAI reasoning field for Completions\n\treasoning_content?: string;",
+    "\t// DeepSeek / OpenAI reasoning field for Completions\n\treasoning_content?: string;\n\treasoning?: string;"
+  );
+  console.log("Patched: ThinkingDataInMessage.reasoning (Patch 52 A-supplement)");
 }
 
 // Add to RawThinkingDelta (right after the opening brace)
 const rawAnchor = "export interface RawThinkingDelta {";
-const rawField = "\n\t// DeepSeek / OpenAI reasoning field\n\treasoning_content?: string;\n";
-if (code.includes(rawAnchor)) {
-  code = code.replace(rawAnchor, rawAnchor + rawField);
-  console.log("Patched: RawThinkingDelta.reasoning_content (Patch 52 B)");
-} else {
-  console.warn("WARN: RawThinkingDelta anchor not found — skipping Patch 52 (B)");
+const rawField = "\n\t// DeepSeek / OpenAI reasoning field\n\treasoning_content?: string;\n\treasoning?: string;\n";
+if (!code.includes("// DeepSeek / OpenAI reasoning field\n\treasoning_content")) {
+  if (code.includes(rawAnchor)) {
+    code = code.replace(rawAnchor, rawAnchor + rawField);
+    console.log("Patched: RawThinkingDelta.reasoning_content + reasoning (Patch 52 B)");
+  } else {
+    console.warn("WARN: RawThinkingDelta anchor not found — skipping Patch 52 (B)");
+  }
+} else if (!code.includes("// DeepSeek / OpenAI reasoning field\n\treasoning_content?: string;\n\treasoning?:")) {
+  // reasoning_content already added; just add the reasoning field after it
+  code = code.replace(
+    "\t// DeepSeek / OpenAI reasoning field\n\treasoning_content?: string;",
+    "\t// DeepSeek / OpenAI reasoning field\n\treasoning_content?: string;\n\treasoning?: string;"
+  );
+  console.log("Patched: RawThinkingDelta.reasoning (Patch 52 B-supplement)");
 }
 
 fs.writeFileSync(f, code);
@@ -4122,40 +4142,57 @@ let code = fs.readFileSync(f, "utf8");
 
 // Primary sentinel: only present after Sub-fix B is applied
 if (code.includes("BYOK CUSTOM PATCH: synthetic id for reasoning_content")) {
-  console.log("thinkingUtils.ts reasoning_content patches already present, skipping");
-  process.exit(0);
+  // Check if reasoning field (|| thinking.reasoning) is also applied
+  if (code.includes("thinking.reasoning_content || thinking.reasoning")) {
+    console.log("thinkingUtils.ts reasoning_content + reasoning patches already present, skipping");
+    process.exit(0);
+  }
+  // Sentinel present but reasoning field not yet extended — fall through to supplement
 }
 
 let changed = false;
 
-// Sub-fix A: getThinkingDeltaText priority
-const textAnchor = `function getThinkingDeltaText(thinking: RawThinkingDelta | undefined): string | undefined {
+// Sub-fix A: getThinkingDeltaText — prioritise reasoning_content/reasoning over cot_summary.
+// Handles both fresh upstream (no reasoning_content check) and previously patched (has
+// reasoning_content but not || reasoning).
+const textAnchorFresh = `function getThinkingDeltaText(thinking: RawThinkingDelta | undefined): string | undefined {
 \tif (!thinking) {
 \t\treturn '';
 \t}
 \tif (thinking.cot_summary) {`;
+
+const textAnchorPatched = `\tif (thinking.reasoning_content) {
+\t\treturn thinking.reasoning_content;
+\t}`;
 
 const textReplacement = `function getThinkingDeltaText(thinking: RawThinkingDelta | undefined): string | undefined {
 \tif (!thinking) {
 \t\treturn '';
 \t}
-\tif (thinking.reasoning_content) {
-\t\treturn thinking.reasoning_content;
+\tif (thinking.reasoning_content || thinking.reasoning) {
+\t\treturn thinking.reasoning_content || thinking.reasoning;
 \t}
 \tif (thinking.cot_summary) {`;
 
-if (code.includes(textAnchor)) {
-  code = code.replace(textAnchor, textReplacement);
-  console.log("Patched: getThinkingDeltaText reasoning_content priority (Patch 53 A)");
+const textReplacementSupp = `\tif (thinking.reasoning_content || thinking.reasoning) {
+\t\treturn thinking.reasoning_content || thinking.reasoning;
+\t}`;
+
+if (code.includes(textAnchorFresh)) {
+  code = code.replace(textAnchorFresh, textReplacement);
+  console.log("Patched: getThinkingDeltaText reasoning_content|reasoning priority (Patch 53 A)");
   changed = true;
-} else if (!code.includes("if (thinking.reasoning_content) {")) {
+} else if (code.includes(textAnchorPatched)) {
+  code = code.replace(textAnchorPatched, textReplacementSupp);
+  console.log("Patched: getThinkingDeltaText extended with || reasoning (Patch 53 A-supplement)");
+  changed = true;
+} else if (!code.includes("thinking.reasoning_content || thinking.reasoning")) {
   console.warn("WARN: getThinkingDeltaText anchor not found — skipping Patch 53 A");
 } else {
-  console.log("Patch 53 A: getThinkingDeltaText already patched, skipping");
+  console.log("Patch 53 A: getThinkingDeltaText already fully patched, skipping");
 }
 
-// Sub-fix B: getThinkingDeltaId synthetic 'reasoning' id for reasoning_content.
-// Anchor is the tail of getThinkingDeltaId right before extractThinkingDeltaFromChoice.
+// Sub-fix B: getThinkingDeltaId — return stable 'reasoning' sentinel for reasoning_content/reasoning.
 const idAnchor = `\tif (thinking.signature) {
 \t\treturn thinking.signature;
 \t}
@@ -4163,6 +4200,10 @@ const idAnchor = `\tif (thinking.signature) {
 }
 
 export function extractThinkingDeltaFromChoice`;
+
+const idAnchorPatched = `\tif (thinking.reasoning_content) {
+\t\treturn 'reasoning';
+\t}`;
 
 const idReplacement = `\tif (thinking.signature) {
 \t\treturn thinking.signature;
@@ -4175,7 +4216,7 @@ const idReplacement = `\tif (thinking.signature) {
 \t// turn: "The reasoning_content in the thinking mode must be passed back."
 \t// Return a stable sentinel so the block flows through to Patch 54's
 \t// out.reasoning_content re-serialisation.
-\tif (thinking.reasoning_content) {
+\tif (thinking.reasoning_content || thinking.reasoning) {
 \t\treturn 'reasoning';
 \t}
 \t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
@@ -4184,12 +4225,22 @@ const idReplacement = `\tif (thinking.signature) {
 
 export function extractThinkingDeltaFromChoice`;
 
+const idReplacementSupp = `\tif (thinking.reasoning_content || thinking.reasoning) {
+\t\treturn 'reasoning';
+\t}`;
+
 if (code.includes(idAnchor)) {
   code = code.replace(idAnchor, idReplacement);
-  console.log("Patched: getThinkingDeltaId synthetic id for reasoning_content (Patch 53 B)");
+  console.log("Patched: getThinkingDeltaId synthetic id for reasoning_content|reasoning (Patch 53 B)");
   changed = true;
-} else {
+} else if (code.includes(idAnchorPatched)) {
+  code = code.replace(idAnchorPatched, idReplacementSupp);
+  console.log("Patched: getThinkingDeltaId extended with || reasoning (Patch 53 B-supplement)");
+  changed = true;
+} else if (!code.includes("thinking.reasoning_content || thinking.reasoning")) {
   console.warn("WARN: getThinkingDeltaId anchor not found — skipping Patch 53 B");
+} else {
+  console.log("Patch 53 B: getThinkingDeltaId already fully patched, skipping");
 }
 
 if (changed) {
@@ -4465,11 +4516,14 @@ const importReplacement =
   "import { resolveModelInfo } from '../common/byokProvider';\n" +
   "import { byokKnownModelsToAPIInfoWithEffort } from './byokModelInfo';";
 
-if (!code.includes(importAnchor)) {
-  console.warn("WARN: Patch 60 import anchor not found — skipping (already patched or upstream changed)");
-  process.exit(0);
+if (code.includes(importAnchor)) {
+  code = code.replace(importAnchor, importReplacement);
+  console.log("Patch 60 sub-A: swapped import");
+} else {
+  // Upstream already split the import (byokKnownModelsToAPIInfoWithEffort comes from byokModelInfo).
+  // Sub-A is a no-op but we must continue — B and D still need to be applied.
+  console.log("Patch 60 sub-A: import already split upstream, skipping sub-A only");
 }
-code = code.replace(importAnchor, importReplacement);
 
 // ── Sub-replacement B: _getOllamaModelInfo — fix architecture + vision + toolCalling ──
 const modelInfoAnchor =
@@ -4509,10 +4563,10 @@ const modelInfoReplacement =
   "\t\t};";
 
 if (!code.includes(modelInfoAnchor)) {
-  console.warn("WARN: Patch 60 _getOllamaModelInfo anchor not found — skipping (upstream may have changed)");
-  process.exit(0);
+  console.warn("WARN: Patch 60 _getOllamaModelInfo anchor not found — skipping sub-B (upstream may have changed)");
+} else {
+  code = code.replace(modelInfoAnchor, modelInfoReplacement);
 }
-code = code.replace(modelInfoAnchor, modelInfoReplacement);
 
 // ── Sub-replacement C: getAllModels return ────────────────────────────────────
 const returnAnchor = "\t\treturn byokKnownModelsToAPIInfo(this._name, this._knownModels).map(model => ({";
@@ -4714,3 +4768,34 @@ code = code.replace(createAnchor, createReplacement);
 fs.writeFileSync(f, code);
 console.log("Patched: ollamaProvider.ts OllamaEndpoint (Patch 62)");
 PATCH62_EOF
+
+# ── Patch 63: applyPatchTool.tsx — safe deleteFile (ignoreIfNotExists + moveToTrash) ──
+# The upstream ApplyPatchTool calls `workspaceEdit.deleteFile(path)` without options,
+# which throws a hard error when the file doesn't exist (e.g. already deleted by a
+# prior tool call or the model hallucinated the path).  Adding ignoreIfNotExists:true
+# makes delete-absent-file a silent no-op; moveToTrash:true sends the file to the
+# system recycle bin instead of permanently destroying it, giving the user a recovery
+# path after accidental deletes.
+node << 'PATCH63_EOF'
+const fs = require("fs");
+const path = require("path");
+const f = path.join("src", "extension", "tools", "node", "applyPatchTool.tsx");
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("ignoreIfNotExists: true, moveToTrash: true")) {
+  console.log("Patch 63 (applyPatchTool deleteFile safe) already present, skipping");
+  process.exit(0);
+}
+
+const anchor = "workspaceEdit.deleteFile(path);";
+const replacement = "workspaceEdit.deleteFile(path, { ignoreIfNotExists: true, moveToTrash: true });";
+
+if (!code.includes(anchor)) {
+  console.warn("WARN: Patch 63 deleteFile anchor not found — skipping (upstream may have changed)");
+  process.exit(0);
+}
+
+code = code.replace(anchor, replacement);
+fs.writeFileSync(f, code);
+console.log("Patched: applyPatchTool.tsx deleteFile safe options (Patch 63)");
+PATCH63_EOF

@@ -312,7 +312,7 @@ export class ApplyPatchTool implements ICopilotTool<IApplyPatchToolParams> {
 						break;
 					}
 					case ActionType.DELETE: {
-						workspaceEdit.deleteFile(path);
+						workspaceEdit.deleteFile(path, { ignoreIfNotExists: true, moveToTrash: true });
 						resourceToOperation.set(path, { action: ActionType.DELETE });
 						deletedFiles.add(path);
 						break;
