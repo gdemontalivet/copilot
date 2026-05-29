@@ -27,7 +27,7 @@ jobs:
           cache: npm
 
       - name: Install Dependencies
-        run: npm ci
+        run: npm ci --verbose
 
       - name: Apply Patch (Optional)
         # If you prefer to apply the patch dynamically instead of committing it, 
