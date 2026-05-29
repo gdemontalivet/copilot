@@ -270,18 +270,22 @@ export class OpenAIEndpoint extends ChatEndpoint {
 			// Delegate to base ChatEndpoint for Messages API dispatch
 			return super.createRequestBody(options);
 		} else {
-			// Handle CAPI: provide callback for thinking data processing
+			// Handle Chat Completions: provide callback for thinking data processing
+			const supportsThinking = !!this.modelMetadata.capabilities.supports.thinking;
 			const callback: RawMessageConversionCallback = (out, data) => {
 				if (data && data.id) {
 					out.cot_id = data.id;
-					const reasoning = Array.isArray(data.text) ? data.text.join('') : data.text;
-					out.cot_summary = reasoning;
-					// ─── BYOK CUSTOM PATCH: reasoning_content re-serialisation (Patch 54) ──
-					// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-					// DeepSeek v4 requires reasoning_content on every follow-up assistant
-					// message when in thinking mode; without it the API returns HTTP 400.
-					out.reasoning_content = reasoning;
-					// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────
+					const text = Array.isArray(data.text) ? data.text.join('') : data.text;
+					out.cot_summary = text;
+					if (supportsThinking) {
+						// Reasoning models require the assistant message to echo back its
+						// prior reasoning. DeepSeek, Moonshot (Kimi), Minimax, and similar
+						// OpenAI-compatible providers expect `reasoning_content`; OpenRouter's
+						// BYOK proxy expects `reasoning`. Without these, the turn after a tool
+						// call is rejected with HTTP 400.
+						out.reasoning_content = text;
+						out.reasoning = text;
+					}
 				}
 			};
 			const body = createCapiRequestBody(options, this.model, callback);
