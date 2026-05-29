@@ -15,6 +15,7 @@ jobs:
       # clock instead of the runner's default UTC. Swap for another IANA zone
       # (e.g. `America/New_York`) if the maintainer ever changes timezone.
       TZ: Europe/London
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
 
     steps:
       - name: Checkout code
