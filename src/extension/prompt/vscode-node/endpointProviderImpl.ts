@@ -214,6 +214,10 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 		let models: readonly LanguageModelChat[];
 		try {
 			models = await lm.selectChatModels({ vendor, id });
+			if (models.length === 0 && vendor === 'gemini') {
+				const fallbackId = id.startsWith('models/') ? id.substring(7) : `models/${id}`;
+				models = await lm.selectChatModels({ vendor, id: fallbackId });
+			}
 		} catch (err) {
 			this._logService.warn(`[ProductionEndpointProvider] Failed to resolve ${configKey} override '${raw}'; falling back to default. Error: ${err}`);
 			return undefined;

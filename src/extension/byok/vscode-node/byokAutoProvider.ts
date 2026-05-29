@@ -369,7 +369,11 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 				);
 			}
 
-			const explicit = await vscode.lm.selectChatModels({ vendor: parsed.vendor, id: parsed.id });
+			let explicit = await vscode.lm.selectChatModels({ vendor: parsed.vendor, id: parsed.id });
+			if (explicit.length === 0 && parsed.vendor === 'gemini') {
+				const fallbackId = parsed.id.startsWith('models/') ? parsed.id.substring(7) : `models/${parsed.id}`;
+				explicit = await vscode.lm.selectChatModels({ vendor: parsed.vendor, id: fallbackId });
+			}
 			if (explicit.length > 0) {
 				return explicit[0];
 			}
