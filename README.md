@@ -38,12 +38,6 @@ To access GitHub Copilot, an active GitHub Copilot subscription is required. You
 ![Inline chat in VS Code](https://code.visualstudio.com/assets/docs/copilot/copilot-chat/inline-chat-question-example.png)
 
 
-## BYOK Settings & Auto-Routing
-
-Because this is a BYOK (Bring Your Own Key) fork, some features are routed differently to avoid relying on Copilot's cloud APIs:
-- **Background Tasks:** Features like commit message generation, chat title generation, and rename suggestions are routed automatically through a cost-aware fallback router known as **BYOK Auto**.
-- **Utility Models:** By default, VS Code's `chat.utilityModel` and `chat.utilitySmallModel` are pre-configured to use `byokauto/byok-auto`, ensuring background tasks cost as little as possible. You can override these in your `settings.json` if you prefer to use a specific custom model.
-
 ## Customize AI for your workflow
 
 **Agents work best when they understand your project's conventions and have the right tools**. Tailor Copilot so it generates code that fits your codebase from the start.
