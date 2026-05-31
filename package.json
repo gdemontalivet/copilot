@@ -4767,7 +4767,7 @@
 					},
 					"github.copilot.chat.executionSubagent.enabled": {
 						"type": "boolean",
-						"default": true,
+						"default": false,
 						"markdownDescription": "%github.copilot.config.executionSubagent.enabled%",
 						"tags": [
 							"advanced",
