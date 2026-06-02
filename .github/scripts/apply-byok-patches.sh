@@ -2046,8 +2046,8 @@ if (code.includes(importAnchor)) {
 
 // Step 2: register the provider right after the native Gemini provider so the
 // two Gemini surfaces sit together in the provider list.
-const geminiNativeLine = "this._providers.set(GeminiNativeBYOKLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiNativeBYOKLMProvider, knownModels[GeminiNativeBYOKLMProvider.providerName], this._byokStorageService));";
-const registration = geminiNativeLine + "\n\t\t\t// BYOK CUSTOM PATCH: Vertex-hosted Gemini, registered as a separate vendor so it has\n\t\t\t// independent API key / quota state. Auth is SA-JSON or pre-minted Bearer token, not\n\t\t\t// the Gemini public-API apiKey.\n\t\t\tthis._providers.set(VertexGeminiLMProvider.providerName.toLowerCase(), instantiationService.createInstance(VertexGeminiLMProvider, knownModels[GeminiNativeBYOKLMProvider.providerName], this._byokStorageService));";
+const geminiNativeLine = "this._providers.set(GeminiNativeBYOKLMProvider.providerId, gemini);";
+const registration = geminiNativeLine + "\n\t\t// BYOK CUSTOM PATCH: Vertex-hosted Gemini, registered as a separate vendor so it has\n\t\t// independent API key / quota state. Auth is SA-JSON or pre-minted Bearer token, not\n\t\t// the Gemini public-API apiKey.\n\t\tthis._providers.set(VertexGeminiLMProvider.providerName.toLowerCase(), instantiationService.createInstance(VertexGeminiLMProvider, undefined, this._byokStorageService));";
 if (!code.includes(geminiNativeLine)) {
   console.warn("WARN: GeminiNative registration anchor not found — skipping patch 27");
   process.exit(0);

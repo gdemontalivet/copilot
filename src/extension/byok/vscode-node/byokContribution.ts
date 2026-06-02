@@ -23,6 +23,7 @@ import { OllamaLMProvider } from './ollamaProvider';
 import { OAIBYOKLMProvider } from './openAIProvider';
 import { OpenRouterLMProvider } from './openRouterProvider';
 import { VertexAnthropicLMProvider } from './vertexAnthropicProvider';
+import { VertexGeminiLMProvider } from './vertexGeminiProvider';
 import { XAIBYOKLMProvider } from './xAIProvider';
 import { DeepSeekBYOKLMProvider } from './deepseekProvider';
 
@@ -59,6 +60,10 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		this._providers.set(OllamaLMProvider.providerId, instantiationService.createInstance(OllamaLMProvider, this._byokStorageService));
 		this._providers.set(AnthropicLMProvider.providerId, anthropic);
 		this._providers.set(GeminiNativeBYOKLMProvider.providerId, gemini);
+		// BYOK CUSTOM PATCH: Vertex-hosted Gemini, registered as a separate vendor so it has
+		// independent API key / quota state. Auth is SA-JSON or pre-minted Bearer token, not
+		// the Gemini public-API apiKey.
+		this._providers.set(VertexGeminiLMProvider.providerName.toLowerCase(), instantiationService.createInstance(VertexGeminiLMProvider, undefined, this._byokStorageService));
 		this._providers.set(XAIBYOKLMProvider.providerId, xai);
 		this._providers.set(OAIBYOKLMProvider.providerId, openai);
 		this._providers.set(OpenRouterLMProvider.providerId, instantiationService.createInstance(OpenRouterLMProvider, this._byokStorageService));
