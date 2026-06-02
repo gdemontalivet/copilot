@@ -316,6 +316,9 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 
 		const models: vscode.LanguageModelChatInformation[] = [];
 		const allEndpoints = await this._endpointProvider.getAllChatEndpoints();
+		if (!allEndpoints.length) {
+			return this._currentModels;
+		}
 		const chatEndpoints = allEndpoints.filter(e => e.showInModelPicker || e.model === 'gpt-4o-mini');
 
 		// ─── BYOK CUSTOM PATCH: defensive auto endpoint resolution (Patch 36) ─
@@ -514,29 +517,11 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 
 	private async _getEndpointForModel(model: vscode.LanguageModelChatInformation) {
 		if (model.id === AutoChatEndpoint.pseudoModelId) {
-			// ─── BYOK CUSTOM PATCH: guard CAPI-bound auto resolve (Patch 36) ──
-			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-			// `resolveAutoModeEndpoint` POSTs to the CAPI `auto_mode` endpoint
-			// with the Copilot session token. In BYOK that token is the fake
-			// sentinel from Patch 1, so the call 401s and surfaces as
-			// "Language model unavailable" to the user with no actionable
-			// hint. Prefer a clear error that points to BYOK Auto.
 			const allEndpoints = await this._endpointProvider.getAllChatEndpoints();
-			if (allEndpoints.length === 0) {
-				throw new Error(
-					'Copilot Auto is unavailable in BYOK mode. Pick "BYOK Auto" from the model picker (vendor `byokauto`), ' +
-					'or choose any configured BYOK model directly.',
-				);
+			if (!allEndpoints.length) {
+				return undefined;
 			}
-			try {
-				return await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);
-			} catch (err) {
-				throw new Error(
-					`Copilot Auto is unavailable: ${(err as Error).message}. ` +
-					'Switch to "BYOK Auto" (vendor `byokauto`) or pick a concrete model.',
-				);
-			}
-			// ─── END BYOK CUSTOM PATCH ────────────────────────────────
+			return await this._automodeService.resolveAutoModeEndpoint(undefined, allEndpoints);
 		}
 		const aliasEndpoint = this._utilityAliasEndpoints.get(model.id);
 		if (aliasEndpoint) {
