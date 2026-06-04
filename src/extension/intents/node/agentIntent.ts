@@ -49,7 +49,7 @@ import { IDefaultIntentRequestHandlerOptions } from '../../prompt/node/defaultIn
 import { IDocumentContext } from '../../prompt/node/documentContext';
 import { IBuildPromptResult, IIntent, IIntentInvocation } from '../../prompt/node/intents';
 import { AgentPrompt, AgentPromptProps } from '../../prompts/node/agent/agentPrompt';
-import { BackgroundSummarizationState, BackgroundSummarizationThresholds, BackgroundSummarizer, IBackgroundSummarizationResult, shouldKickOffBackgroundSummarization } from '../../prompts/node/agent/backgroundSummarizer';
+import { BackgroundSummarizationState, BackgroundSummarizationThresholds, BackgroundSummarizer, getCompactionTier, IBackgroundSummarizationResult, shouldKickOffBackgroundSummarization } from '../../prompts/node/agent/backgroundSummarizer';
 import { BackgroundTodoDecision, BackgroundTodoProcessor, IBackgroundTodoExecutionContext } from '../../prompts/node/agent/backgroundTodoProcessor';
 import { AgentPromptCustomizations, PromptRegistry } from '../../prompts/node/agent/promptRegistry';
 import { extractSummary, SummarizationUserMessage, SummarizedConversationHistory, SummarizedConversationHistoryMetadata, SummarizedConversationHistoryPropsBuilder, appendTranscriptHintToSummary, computeSummarizationRoundCounts } from '../../prompts/node/agent/summarizedConversationHistory';
@@ -904,9 +904,74 @@ export class AgentIntentInvocation extends EditCodeIntentInvocation implements I
 
 			const cacheWarm = (promptContext.toolCallRounds?.length ?? 0) > 0;
 
-			const kickOff = shouldKickOffBackgroundSummarization(postRenderRatio, cacheWarm, this._thresholdRng);
+			// ─── BYOK CUSTOM PATCH: Tier 3 synchronous compaction ─────────
+			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			//
+			// At >= 90% context usage we block synchronously on background
+			// compaction BEFORE the next LLM call, to avoid hitting Gemini's
+			// 1M input-token cap. Mirrors the proven BudgetExceededError flow
+			// (wait -> apply -> re-render) but triggered proactively on
+			// estimate rather than reactively on a 400 error.
+			// Pass true for useInlineSummarization (= cache-aware: emergency-only
+			// when cold, full tier ladder when warm). Upstream 0.51 removed
+			// the useInlineSummarization variable so we supply the literal true.
+			const __byokTier = getCompactionTier(postRenderRatio, true, cacheWarm, this.endpoint.modelMaxPromptTokens);
+			if (__byokTier >= 3) {
+				this.logService.warn(`[AutoCompact] tier 3 — ratio ${(postRenderRatio * 100).toFixed(1)}% — blocking on compaction`);
+				if (idleOrFailed) {
+					const strippedMessages = ToolCallingLoop.stripInternalToolCallIds(result.messages);
+					const rawEffort = this.request.modelConfiguration?.reasoningEffort;
+					const isSubagent = !!this.request.subAgentInvocationId;
+					const shouldDisableThinking = !!promptContext.isContinuation && isAnthropicFamily(this.endpoint) && !ToolCallingLoop.messagesContainThinking(strippedMessages);
+					this._lastModelCapabilities = {
+						enableThinking: !shouldDisableThinking,
+						reasoningEffort: typeof rawEffort === 'string' ? rawEffort : undefined,
+						enableToolSearch: !isSubagent && !!this.endpoint.supportsToolSearch,
+						enableContextEditing: !isSubagent && isAnthropicContextEditingEnabled(this.endpoint, this.configurationService, this.expService),
+					};
+					this._startBackgroundSummarization(backgroundSummarizer, result.messages, promptContext, props, token, postRenderRatio);
+				}
+				const inFlight = backgroundSummarizer.state === BackgroundSummarizationState.InProgress
+					|| backgroundSummarizer.state === BackgroundSummarizationState.Completed;
+				if (inFlight) {
+					let tier3Trigger: string;
+					if (backgroundSummarizer.state === BackgroundSummarizationState.InProgress) {
+						tier3Trigger = 'tier3Waited';
+						const summaryPromise = backgroundSummarizer.waitForCompletion();
+						progress.report(new ChatResponseProgressPart2(
+							l10n.t('Compacting conversation ({0}%)...', Math.round(postRenderRatio * 100)),
+							async () => { try { await summaryPromise; } catch { } return l10n.t('Compacted conversation'); },
+						));
+						try { await summaryPromise; } catch { }
+					} else {
+						tier3Trigger = 'tier3Ready';
+						progress.report(new ChatResponseProgressPart2(l10n.t('Compacted conversation'), async () => l10n.t('Compacted conversation')));
+					}
+					const bgResult = backgroundSummarizer.consumeAndReset();
+					if (bgResult) {
+						this._applySummaryToRounds(bgResult, promptContext);
+						this._persistSummaryOnTurn(bgResult, promptContext, contextLengthBefore);
+						this._sendBackgroundCompactionTelemetry(tier3Trigger, 'applied', postRenderRatio, promptContext);
+						didSummarizeThisIteration = true;
+						try {
+							const reRenderer = PromptRenderer.create(this.instantiationService, endpoint, this.prompt, { ...props, promptContext });
+							result = await reRenderer.render(progress, token);
+							this._lastRenderTokenCount = result.tokenCount;
+						} catch (e) {
+							this.logService.warn(`[AutoCompact] tier 3 re-render failed: ${e instanceof Error ? e.message : String(e)} — continuing`);
+						}
+					} else {
+						this._recordBackgroundCompactionFailure(promptContext, tier3Trigger);
+					}
+				}
+			}
+			// ─── END BYOK CUSTOM PATCH ────────────────────────────────────
 
-			if (kickOff && idleOrFailed) {
+			// Skip the legacy kick-off if tier 3 already ran compaction.
+			const kickOff = !didSummarizeThisIteration
+				&& (__byokTier >= 1 || shouldKickOffBackgroundSummarization(postRenderRatio, cacheWarm, this._thresholdRng));
+
+			if (kickOff && idleOrFailed && !didSummarizeThisIteration) {
 				// Compute and cache model capabilities from the current render's
 				// messages. These must match the main agent fetch for cache parity.
 				const strippedMessages = ToolCallingLoop.stripInternalToolCallIds(result.messages);

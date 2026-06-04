@@ -128,6 +128,17 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 		super(GeminiNativeBYOKLMProvider.providerId, GeminiNativeBYOKLMProvider.providerName, knownModels, byokStorageService, logService);
 	}
 
+	// ─── BYOK CUSTOM PATCH: createClient hook ──────────────────────────────────
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Factors out `new GoogleGenAI({ apiKey })` so subclasses (e.g.
+	// VertexGeminiLMProvider) can return a differently-configured client
+	// (Vertex endpoint, service-account auth) without re-implementing the
+	// entire streaming + OTel pipeline in `provideLanguageModelChatResponse`.
+	protected createClient(apiKey: string, _model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>): GoogleGenAI {
+		return new GoogleGenAI({ apiKey });
+	}
+	// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────
+
 	protected async getAllModels(silent: boolean, apiKey: string | undefined): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
 		if (!apiKey && silent) {
 			return [];
@@ -200,7 +211,9 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				throw new Error('API key not found for the model');
 			}
 
-			const client = new GoogleGenAI({ apiKey });
+			// BYOK CUSTOM PATCH: route through createClient() hook so subclasses
+			// (VertexGeminiLMProvider) can swap in a Vertex-configured client.
+			const client = this.createClient(apiKey, model);
 			// Convert the messages from the API format into messages that we can use against Gemini
 			const { contents, systemInstruction } = apiMessageToGeminiMessage(messages as LanguageModelChatMessage[]);
 
@@ -279,17 +292,6 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				if (result.ttft) {
 					pendingLoggedChatRequest.markTimeToFirstToken(result.ttft);
 				}
-				// ─── BYOK CUSTOM PATCH: emit TokenUsage to context-window ring ───
-				// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).
-				// The LM API host (extChatEndpoint.ts) otherwise hardcodes usage
-				// to zeros, leaving the UI ring indicator empty on every BYOK turn.
-				if (result.usage) {
-					progress.report(new LanguageModelDataPart(
-						new TextEncoder().encode(JSON.stringify(result.usage)),
-						CustomDataPartMimeTypes.TokenUsage
-					));
-				}
-				// ─── END BYOK CUSTOM PATCH ───────────────────────────────
 				pendingLoggedChatRequest.resolve({
 					type: ChatFetchResponseType.Success,
 					requestId,

@@ -85,6 +85,9 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 	private _lastFetchTime: number = 0;
 	private readonly _taskSingler = new TaskSingler<IModelAPIResponse | undefined | void>();
 	private _lastFetchError: any;
+	// BYOK CUSTOM PATCH: remember that we've already short-circuited on the fake token,
+	// so subsequent calls don't re-await `getCopilotToken()` or re-enter the bypass.
+	private _fakeTokenShortCircuited: boolean = false;
 
 	private readonly _onDidModelRefresh = new Emitter<void>();
 	public onDidModelsRefresh = this._onDidModelRefresh.event;
@@ -249,6 +252,18 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 	}
 
 	private async _fetchModels(force?: boolean): Promise<void> {
+		// ─── BYOK CUSTOM PATCH: fake-token early-out ─────────────────────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Once we've confirmed we're running with the offline fake token there
+		// is nothing to refresh here — `_familyMap` stays empty by design, so
+		// `_shouldRefreshModels()` below would otherwise return `true` on every
+		// call, re-awaiting `getCopilotToken()` and re-firing the refresh event
+		// (which triggers a feedback loop with `languageModelAccess`'s model
+		// change listener). Skip the whole body on subsequent calls.
+		if (this._fakeTokenShortCircuited) {
+			return;
+		}
+		// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────
 		if (!force && !this._shouldRefreshModels()) {
 			return;
 		}
@@ -257,6 +272,21 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 		let copilotToken: string;
 		try {
 			copilotToken = (await this._authService.getCopilotToken()).token;
+
+			// ─── BYOK CUSTOM PATCH: fake-token bypass ─────────────────────
+			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			// Skip the API call when using a fake/offline token (BYOK-only mode).
+			// The fake token will always 401 against the Copilot API, so avoid
+			// the network round-trip and error log spam. Crucially, do NOT fire
+			// `_onDidModelRefresh` — nothing was actually refreshed, and firing
+			// triggers `languageModelAccess` to re-query models, which re-enters
+			// this function and firehoses a feedback loop.
+			if (copilotToken === 'fake-token') {
+				this._fakeTokenShortCircuited = true;
+				this._lastFetchTime = Date.now();
+				return;
+			}
+			// ─── END BYOK CUSTOM PATCH ────────────────────────────────────
 		} catch (e) {
 			// No Copilot auth (e.g. signed-out BYOK-only mode).
 			this._lastFetchTime = Date.now();
@@ -310,7 +340,9 @@ export class ModelMetadataFetcher extends Disposable implements IModelMetadataFe
 		} catch (e) {
 			this._logService.error(e, `Failed to fetch models (${requestId})`);
 			this._lastFetchError = e;
-			this._lastFetchTime = 0;
+			// BYOK CUSTOM PATCH: 1-min backoff instead of hot-loop retry
+			this._lastFetchTime = Date.now() - 9 * 60 * 1000;
+			this._onDidModelRefresh.fire();
 		}
 	}
 

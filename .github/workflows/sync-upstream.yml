@@ -54,11 +54,22 @@ jobs:
       - name: Apply BYOK patches
         run: bash .github/scripts/apply-byok-patches.sh
 
-      - name: Commit and push if changed
+      - name: LLM Review of Upstream Sync
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           git add -A
           if git diff --cached --quiet; then
             echo "No upstream changes detected"
+          else
+            echo "Upstream changes detected, running LLM review..."
+            node .github/scripts/llm-reviewer.js
+          fi
+
+      - name: Commit and push if changed
+        run: |
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
           else
             git commit -m "Sync upstream copilot extension + apply BYOK patches"
             git push origin main

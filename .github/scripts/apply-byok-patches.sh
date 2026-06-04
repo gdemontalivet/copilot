@@ -321,31 +321,34 @@ code = code.replace(
 		if (!force && !this._shouldRefreshModels()) {`
 );
 
-// Step 4: inject the fake-token bypass after `const copilotToken = (await this._authService.getCopilotToken()).token;`
-//         (flag set + NO event fire).
-const tokenAnchor = "const copilotToken = (await this._authService.getCopilotToken()).token;";
+// Step 4: inject the fake-token bypass inside the try-block, right after the
+//         copilotToken assignment and before the network request.
+//         Upstream changed from `const copilotToken = …` to `let copilotToken; try { copilotToken = … } catch`.
+const tokenAnchor = "\t\t\tcopilotToken = (await this._authService.getCopilotToken()).token;\n\t\t} catch (e) {\n\t\t\t// No Copilot auth (e.g. signed-out BYOK-only mode).";
 if (!code.includes(tokenAnchor)) {
   console.warn("WARN: copilotToken anchor not found — skipping modelMetadataFetcher patch");
   process.exit(0);
 }
 code = code.replace(
   tokenAnchor,
-  `${tokenAnchor}
+  `\t\t\tcopilotToken = (await this._authService.getCopilotToken()).token;
 
-		// ─── BYOK CUSTOM PATCH: fake-token bypass ─────────────────────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-		// Skip the API call when using a fake/offline token (BYOK-only mode).
-		// The fake token will always 401 against the Copilot API, so avoid
-		// the network round-trip and error log spam. Crucially, do NOT fire
-		// \`_onDidModelRefresh\` — nothing was actually refreshed, and firing
-		// triggers \`languageModelAccess\` to re-query models, which re-enters
-		// this function and firehoses a feedback loop.
-		if (copilotToken === 'fake-token') {
-			this._fakeTokenShortCircuited = true;
-			this._lastFetchTime = Date.now();
-			return;
-		}
-		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────`
+\t\t\t// ─── BYOK CUSTOM PATCH: fake-token bypass ─────────────────────
+\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+\t\t\t// Skip the API call when using a fake/offline token (BYOK-only mode).
+\t\t\t// The fake token will always 401 against the Copilot API, so avoid
+\t\t\t// the network round-trip and error log spam. Crucially, do NOT fire
+\t\t\t// \`_onDidModelRefresh\` — nothing was actually refreshed, and firing
+\t\t\t// triggers \`languageModelAccess\` to re-query models, which re-enters
+\t\t\t// this function and firehoses a feedback loop.
+\t\t\tif (copilotToken === 'fake-token') {
+\t\t\t\tthis._fakeTokenShortCircuited = true;
+\t\t\t\tthis._lastFetchTime = Date.now();
+\t\t\t\treturn;
+\t\t\t}
+\t\t\t// ─── END BYOK CUSTOM PATCH ────────────────────────────────────
+\t\t} catch (e) {
+\t\t\t// No Copilot auth (e.g. signed-out BYOK-only mode).`
 );
 
 // Step 5: 1-min backoff instead of hot-loop retry on failure.
@@ -377,23 +380,45 @@ if (code.includes("BYOK CUSTOM PATCH: Tier 3 synchronous compaction")) {
   process.exit(0);
 }
 
-// Step 1: add getCompactionTier to the import
-const importAnchor = "import { BackgroundSummarizationState, BackgroundSummarizer,";
+// Step 1: add getCompactionTier to the import.
+// Upstream 0.51+ added BackgroundSummarizationThresholds to the import so
+// the old anchor (without Thresholds) no longer matches.
+const importAnchor = "import { BackgroundSummarizationState, BackgroundSummarizationThresholds, BackgroundSummarizer,";
 if (!code.includes(importAnchor)) {
-  console.warn("WARN: backgroundSummarizer import anchor not found — skipping agentIntent tier patch");
-  process.exit(0);
-}
-if (!code.includes("getCompactionTier")) {
-  code = code.replace(importAnchor, "import { BackgroundSummarizationState, BackgroundSummarizer, getCompactionTier,");
+  // Fallback: try the older form without Thresholds
+  const importAnchorLegacy = "import { BackgroundSummarizationState, BackgroundSummarizer,";
+  if (!code.includes(importAnchorLegacy)) {
+    console.warn("WARN: backgroundSummarizer import anchor not found — skipping agentIntent tier patch");
+    process.exit(0);
+  }
+  if (!code.includes("getCompactionTier")) {
+    code = code.replace(importAnchorLegacy, "import { BackgroundSummarizationState, BackgroundSummarizer, getCompactionTier,");
+  }
+} else {
+  if (!code.includes("getCompactionTier")) {
+    code = code.replace(importAnchor, "import { BackgroundSummarizationState, BackgroundSummarizationThresholds, BackgroundSummarizer, getCompactionTier,");
+  }
 }
 
 // Step 2: inject tier-3 block before the `const kickOff = shouldKickOffBackgroundSummarization(` line
 // and adjust kickOff to skip when tier 3 already compacted.
-const kickOffAnchor = "const kickOff = shouldKickOffBackgroundSummarization(postRenderRatio, useInlineSummarization, cacheWarm, this._thresholdRng);";
+// Upstream 0.51+ removed useInlineSummarization from shouldKickOffBackgroundSummarization.
+const kickOffAnchor = "const kickOff = shouldKickOffBackgroundSummarization(postRenderRatio, cacheWarm, this._thresholdRng);";
 if (!code.includes(kickOffAnchor)) {
-  console.warn("WARN: kickOff anchor not found — skipping agentIntent tier patch");
-  process.exit(0);
+  // Fallback: old form with useInlineSummarization
+  const kickOffAnchorLegacy = "const kickOff = shouldKickOffBackgroundSummarization(postRenderRatio, useInlineSummarization, cacheWarm, this._thresholdRng);";
+  if (!code.includes(kickOffAnchorLegacy)) {
+    console.warn("WARN: kickOff anchor not found — skipping agentIntent tier patch");
+    process.exit(0);
+  }
 }
+
+// Determine which kickOff form is present
+const kickOffAnchorNew = "const kickOff = shouldKickOffBackgroundSummarization(postRenderRatio, cacheWarm, this._thresholdRng);";
+const kickOffAnchorOld = "const kickOff = shouldKickOffBackgroundSummarization(postRenderRatio, useInlineSummarization, cacheWarm, this._thresholdRng);";
+const actualKickOffAnchor = code.includes(kickOffAnchorNew) ? kickOffAnchorNew : kickOffAnchorOld;
+// For the final kickOff in our tier3Block, always use the new (no useInlineSummarization) form
+const kickOffCall = "shouldKickOffBackgroundSummarization(postRenderRatio, cacheWarm, this._thresholdRng)";
 
 const tier3Block = `// ─── BYOK CUSTOM PATCH: Tier 3 synchronous compaction ─────────
 			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
@@ -403,22 +428,24 @@ const tier3Block = `// ─── BYOK CUSTOM PATCH: Tier 3 synchronous compactio
 			// 1M input-token cap. Mirrors the proven BudgetExceededError flow
 			// (wait -> apply -> re-render) but triggered proactively on
 			// estimate rather than reactively on a 400 error.
-			const __byokTier = getCompactionTier(postRenderRatio, useInlineSummarization, cacheWarm, this.endpoint.modelMaxPromptTokens);
+			// Pass true for useInlineSummarization (= cache-aware: emergency-only
+			// when cold, full tier ladder when warm). Upstream 0.51 removed
+			// the useInlineSummarization variable so we supply the literal true.
+			const __byokTier = getCompactionTier(postRenderRatio, true, cacheWarm, this.endpoint.modelMaxPromptTokens);
 			if (__byokTier >= 3) {
 				this.logService.warn(\`[AutoCompact] tier 3 — ratio \${(postRenderRatio * 100).toFixed(1)}% — blocking on compaction\`);
 				if (idleOrFailed) {
-					if (useInlineSummarization) {
-						const strippedMessages = ToolCallingLoop.stripInternalToolCallIds(result.messages);
-						const rawEffort = this.request.modelConfiguration?.reasoningEffort;
-						const isSubagent = !!this.request.subAgentInvocationId;
-						this._lastModelCapabilities = {
-							enableThinking: !isAnthropicFamily(this.endpoint) || ToolCallingLoop.messagesContainThinking(strippedMessages),
-							reasoningEffort: typeof rawEffort === 'string' ? rawEffort : undefined,
-							enableToolSearch: !isSubagent && !!this.endpoint.supportsToolSearch,
-							enableContextEditing: !isSubagent && isAnthropicContextEditingEnabled(this.endpoint, this.configurationService, this.expService),
-						};
-					}
-					this._startBackgroundSummarization(backgroundSummarizer, result.messages, promptContext, props, token, postRenderRatio, useInlineSummarization);
+					const strippedMessages = ToolCallingLoop.stripInternalToolCallIds(result.messages);
+					const rawEffort = this.request.modelConfiguration?.reasoningEffort;
+					const isSubagent = !!this.request.subAgentInvocationId;
+					const shouldDisableThinking = !!promptContext.isContinuation && isAnthropicFamily(this.endpoint) && !ToolCallingLoop.messagesContainThinking(strippedMessages);
+					this._lastModelCapabilities = {
+						enableThinking: !shouldDisableThinking,
+						reasoningEffort: typeof rawEffort === 'string' ? rawEffort : undefined,
+						enableToolSearch: !isSubagent && !!this.endpoint.supportsToolSearch,
+						enableContextEditing: !isSubagent && isAnthropicContextEditingEnabled(this.endpoint, this.configurationService, this.expService),
+					};
+					this._startBackgroundSummarization(backgroundSummarizer, result.messages, promptContext, props, token, postRenderRatio);
 				}
 				const inFlight = backgroundSummarizer.state === BackgroundSummarizationState.InProgress
 					|| backgroundSummarizer.state === BackgroundSummarizationState.Completed;
@@ -458,11 +485,12 @@ const tier3Block = `// ─── BYOK CUSTOM PATCH: Tier 3 synchronous compactio
 
 			// Skip the legacy kick-off if tier 3 already ran compaction.
 			const kickOff = !didSummarizeThisIteration
-				&& (__byokTier >= 1 || shouldKickOffBackgroundSummarization(postRenderRatio, useInlineSummarization, cacheWarm, this._thresholdRng));`;
+				&& (__byokTier >= 1 || ${kickOffCall});`;
 
-code = code.replace(kickOffAnchor, tier3Block);
+code = code.replace(actualKickOffAnchor, tier3Block);
 
 // Step 3: guard the existing `if (kickOff && idleOrFailed) {` with !didSummarizeThisIteration
+// (upstream 0.51+ already has !didSummarizeThisIteration in the outer if, so this is a no-op there)
 const ifAnchor = "if (kickOff && idleOrFailed) {";
 if (code.includes(ifAnchor)) {
   code = code.replace(ifAnchor, "if (kickOff && idleOrFailed && !didSummarizeThisIteration) {");
@@ -825,8 +853,8 @@ const fs = require("fs");
 const f = "src/extension/byok/vscode-node/byokContribution.ts";
 let code = fs.readFileSync(f, "utf8");
 
-if (code.includes("VertexAnthropicLMProvider")) {
-  console.log("VertexAnthropic already registered, skipping");
+if (code.includes("setFailoverTarget(vertexAnthropicProvider)")) {
+  console.log("VertexAnthropic already registered with failover, skipping");
   process.exit(0);
 }
 
@@ -836,9 +864,11 @@ if (code.includes(xaiImport)) {
   code = code.replace(xaiImport, "import { VertexAnthropicLMProvider } from './vertexAnthropicProvider';\n" + xaiImport);
 }
 
-// Step 2: expand Anthropic provider set and add Vertex + wire failover.
-const anthropicLine = "this._providers.set(AnthropicLMProvider.providerName.toLowerCase(), instantiationService.createInstance(AnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService));";
-const replacement = "const anthropicProvider = instantiationService.createInstance(AnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService);\n\t\t\tthis._providers.set(AnthropicLMProvider.providerName.toLowerCase(), anthropicProvider);\n\t\t\t// BYOK CUSTOM PATCH: Vertex-hosted Anthropic, registered as a separate vendor so it has\n\t\t\t// independent API key / quota / concurrency state. Also wired as a failover target for\n\t\t\t// the direct Anthropic provider (gated by chat.byok.anthropic.fallback.enabled).\n\t\t\tconst vertexAnthropicProvider = instantiationService.createInstance(VertexAnthropicLMProvider, knownModels[AnthropicLMProvider.providerName], this._byokStorageService);\n\t\t\tthis._providers.set(VertexAnthropicLMProvider.providerName.toLowerCase(), vertexAnthropicProvider);\n\t\t\tanthropicProvider.setFailoverTarget(vertexAnthropicProvider);";
+// Step 2: add VertexAnthropic after the anthropic registration line and wire failover.
+// Upstream 0.51 changed from direct `providerName.toLowerCase()` + createInstance
+// with knownModels to using a pre-created `anthropic` variable with `providerId`.
+const anthropicLine = "this._providers.set(AnthropicLMProvider.providerId, anthropic);";
+const replacement = "this._providers.set(AnthropicLMProvider.providerId, anthropic);\n\t\t// BYOK CUSTOM PATCH: Vertex-hosted Anthropic, registered as a separate vendor so it has\n\t\t// independent API key / quota / concurrency state. Also wired as a failover target for\n\t\t// the direct Anthropic provider (gated by chat.byok.anthropic.fallback.enabled).\n\t\tconst vertexAnthropicProvider = instantiationService.createInstance(VertexAnthropicLMProvider, undefined, this._byokStorageService);\n\t\tthis._providers.set(VertexAnthropicLMProvider.providerName.toLowerCase(), vertexAnthropicProvider);\n\t\tanthropic.setFailoverTarget(vertexAnthropicProvider);";
 if (code.includes(anthropicLine)) {
   code = code.replace(anthropicLine, replacement);
 } else {
@@ -987,54 +1017,27 @@ PATCH14_EOF
 #     at async n$.getChatEndpoint (…)
 #     at async r4e.switchToBaseModel (…)
 node << 'PATCH15_EOF'
+// Patch 15 is superseded: upstream 0.51+ already guards vendor !== 'copilot'
+// BEFORE the copilot-utility lookup in switchToBaseModel (chatParticipants.ts).
+// The old patch moved the 'copilot-base' call after the BYOK guard; upstream
+// now uses 'copilot-utility' and already has the guard at line ~281. No patch needed.
 const fs = require("fs");
 const f = "src/extension/conversation/vscode-node/chatParticipants.ts";
-let code = fs.readFileSync(f, "utf8");
-
-if (code.includes("BYOK CUSTOM PATCH: skip copilot-base lookup for BYOK / free requests")) {
-  console.log("switchToBaseModel BYOK guard already present, skipping");
-  process.exit(0);
+const code = fs.readFileSync(f, "utf8");
+const staleSentinel = "BYOK CUSTOM PATCH: skip copilot-base lookup for BYOK / free requests";
+if (code.includes(staleSentinel)) {
+  // Stale marker from before supersession — strip it cleanly
+  const newCode = code
+    .replace(/\t\t\/\/ ─── BYOK CUSTOM PATCH: skip copilot-base lookup.*?─── END BYOK CUSTOM PATCH ─+\n/s, "");
+  if (newCode !== code) {
+    fs.writeFileSync(f, newCode);
+    console.log("Patch 15: removed stale switchToBaseModel patch (superseded by upstream)");
+  } else {
+    console.log("Patch 15: stale marker present but couldn't strip cleanly — skipping");
+  }
+} else {
+  console.log("Patch 15: superseded by upstream vendor !== 'copilot' guard in switchToBaseModel — no action needed");
 }
-
-const original = `private async switchToBaseModel(request: vscode.ChatRequest, stream: vscode.ChatResponseStream): Promise<ChatRequest> {
-\t\tconst endpoint = await this.endpointProvider.getChatEndpoint(request);
-\t\tconst baseEndpoint = await this.endpointProvider.getChatEndpoint('copilot-base');
-\t\t// If it has a 0x multipler, it's free so don't switch them. If it's BYOK, it's free so don't switch them.
-\t\tif (endpoint.multiplier === 0 || request.model.vendor !== 'copilot' || endpoint.multiplier === undefined) {
-\t\t\treturn request;
-\t\t}
-\t\tif (this._chatQuotaService.additionalUsageEnabled || !this._chatQuotaService.quotaExhausted) {
-\t\t\treturn request;
-\t\t}
-\t\tconst baseLmModel = (await vscode.lm.selectChatModels({ id: baseEndpoint.model, family: baseEndpoint.family, vendor: 'copilot' }))[0];`;
-
-const replacement = `private async switchToBaseModel(request: vscode.ChatRequest, stream: vscode.ChatResponseStream): Promise<ChatRequest> {
-\t\tconst endpoint = await this.endpointProvider.getChatEndpoint(request);
-\t\t// ─── BYOK CUSTOM PATCH: skip copilot-base lookup for BYOK / free requests ───
-\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-\t\t// Upstream unconditionally calls \`getChatEndpoint('copilot-base')\` here, which
-\t\t// throws in BYOK-only mode (fake-token bypass leaves \`_copilotBaseModel\`
-\t\t// unset). Since we short-circuit below for non-copilot / 0x / undefined-
-\t\t// multiplier requests anyway, do the guard *before* the base-endpoint
-\t\t// resolution to avoid the unnecessary (and failure-prone) lookup.
-\t\tif (endpoint.multiplier === 0 || request.model.vendor !== 'copilot' || endpoint.multiplier === undefined) {
-\t\t\treturn request;
-\t\t}
-\t\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
-\t\tif (this._chatQuotaService.additionalUsageEnabled || !this._chatQuotaService.quotaExhausted) {
-\t\t\treturn request;
-\t\t}
-\t\tconst baseEndpoint = await this.endpointProvider.getChatEndpoint('copilot-base');
-\t\tconst baseLmModel = (await vscode.lm.selectChatModels({ id: baseEndpoint.model, family: baseEndpoint.family, vendor: 'copilot' }))[0];`;
-
-if (!code.includes(original)) {
-  console.error("ERROR: switchToBaseModel source did not match expected shape; skipping patch 15");
-  console.error("       Inspect chatParticipants.ts and update apply-byok-patches.sh to match.");
-  process.exit(0);
-}
-code = code.replace(original, replacement);
-fs.writeFileSync(f, code);
-console.log("Patched: switchToBaseModel BYOK short-circuit");
 PATCH15_EOF
 
 # Patch 16: Tolerate copilot-fast unavailability in VirtualToolGrouper.
@@ -1223,60 +1226,30 @@ PATCH17_EOF
 # Wraps the lookup in try/catch and falls back to getAllChatEndpoints()[0].
 # Also handles the old copilot-base version of the patch to upgrade installs.
 node << 'PATCH18_EOF'
+// Patch 18: renderPromptElementJSON copilot-base/utility fallback.
+// SUPERSEDED by upstream 0.51.0: renderPromptElementJSON now uses
+// `copilot-utility` with a native try/catch that returns `createStubPromptEndpoint()`
+// when no utility model is available — exactly what our patch was doing.
+// Also remove any stale BYOK custom-patch block that a previous apply may have left.
 const fs = require("fs");
 const f = "src/extension/prompts/node/base/promptRenderer.ts";
 let code = fs.readFileSync(f, "utf8");
-
-if (code.includes("BYOK CUSTOM PATCH: renderPromptElementJSON copilot-utility fallback")) {
-  console.log("renderPromptElementJSON BYOK fallback already present, skipping");
-  process.exit(0);
+let changed18 = false;
+for (const marker of ["renderPromptElementJSON copilot-base fallback", "renderPromptElementJSON copilot-utility fallback"]) {
+  if (code.includes("BYOK CUSTOM PATCH: " + marker)) {
+    // strip the custom block
+    const re = new RegExp(
+      "\t\t// \u2500+ BYOK CUSTOM PATCH: " + marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") +
+      "[\\s\\S]*?// \u2500+ END BYOK CUSTOM PATCH \u2500+\\n",
+      ""
+    );
+    code = code.replace(re, "\t\treturn await endpointProvider.getChatEndpoint('copilot-utility');\n");
+    changed18 = true;
+    console.log("Patch 18: removed stale " + marker + " block (superseded by upstream)");
+  }
 }
-
-// Strip old copilot-base version of this patch so we can re-apply with new anchor
-if (code.includes("BYOK CUSTOM PATCH: renderPromptElementJSON copilot-base fallback")) {
-  code = code.replace(
-    /\t\t\/\/ \u2500\u2500\u2500 BYOK CUSTOM PATCH: renderPromptElementJSON copilot-base fallback[\s\S]*?\/\/ \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500+\n/,
-    "\t\treturn await endpointProvider.getChatEndpoint('copilot-utility');\n"
-  );
-  console.log("Stripped old copilot-base Patch 18, re-applying with copilot-utility anchor...");
-}
-
-const original = `\tconst endpoint = await instantiationService.invokeFunction(async (accessor) => {
-\t\tconst endpointProvider = accessor.get(IEndpointProvider);
-\t\treturn await endpointProvider.getChatEndpoint('copilot-utility');
-\t});`;
-
-const replacement = `\tconst endpoint = await instantiationService.invokeFunction(async (accessor) => {
-\t\tconst endpointProvider = accessor.get(IEndpointProvider);
-\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: renderPromptElementJSON copilot-utility fallback \u2500\u2500
-\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-\t\t// Upstream unconditionally resolves \\\`copilot-utility\\\` here. In BYOK-only
-\t\t// mode the fake-token bypass leaves this endpoint unset, so the lookup
-\t\t// throws and every tool that renders its result through this helper
-\t\t// (read_file, list_dir, file_search, grep_search, get_errors, edit tools
-\t\t// via codeMapper, etc.) errors with "Unable to resolve Copilot utility
-\t\t// chat model". Fall back to any registered chat endpoint \u2014 this value is
-\t\t// only used for \\\`modelMaxPromptTokens\\\` (which \\\`tokenOptions.tokenBudget\\\`
-\t\t// overrides when present) and as an \\\`IPromptEndpoint\\\` DI fallback.
-\t\ttry {
-\t\t\treturn await endpointProvider.getChatEndpoint('copilot-utility');
-\t\t} catch {
-\t\t\tconst all = await endpointProvider.getAllChatEndpoints();
-\t\t\tif (all.length > 0) {
-\t\t\t\treturn all[0];
-\t\t\t}
-\t\t\tthrow new Error('No chat endpoints available (BYOK fallback in renderPromptElementJSON)');
-\t\t}
-\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-\t});`;
-
-if (!code.includes(original)) {
-  console.warn("WARN: renderPromptElementJSON anchor not found \u2014 skipping patch 18");
-  process.exit(0);
-}
-code = code.replace(original, replacement);
-fs.writeFileSync(f, code);
-console.log("Patched: renderPromptElementJSON copilot-utility fallback");
+if (changed18) { fs.writeFileSync(f, code); }
+else { console.log("Patch 18: superseded by upstream createStubPromptEndpoint, nothing to do"); }
 PATCH18_EOF
 
 # Patch 19: VertexAnthropic context defaults + known Claude capability table.
@@ -1646,8 +1619,11 @@ export function getConfirmedCompactionTier(trueRatio: number, modelMaxPromptToke
   const f = "src/extension/intents/node/agentIntent.ts";
   let code = fs.readFileSync(f, "utf8");
 
-  const oldCall = "const __byokTier = getCompactionTier(postRenderRatio, useInlineSummarization, cacheWarm);";
-  const newCall = "const __byokTier = getCompactionTier(postRenderRatio, useInlineSummarization, cacheWarm, this.endpoint.modelMaxPromptTokens);";
+  // Patch 6 now injects: getCompactionTier(postRenderRatio, true, cacheWarm, ...)
+  // Patch 23 upgrades it to include this.endpoint.modelMaxPromptTokens (already done by Patch 6)
+  // so the oldCall and newCall are both the full 4-param form.
+  const oldCall = "const __byokTier = getCompactionTier(postRenderRatio, true, cacheWarm);";
+  const newCall = "const __byokTier = getCompactionTier(postRenderRatio, true, cacheWarm, this.endpoint.modelMaxPromptTokens);";
 
   if (code.includes(newCall)) {
     console.log("adaptive compaction thresholds (agentIntent call) already present, skipping");
@@ -2002,8 +1978,9 @@ if (code.includes(ctorAnchor)) {
 // Anchor is the full constructor body (including the super call) so we land
 // immediately after it. The exact super call is stable and rarely edited by
 // upstream.
-const hookAnchor = "\t\tsuper(GeminiNativeBYOKLMProvider.providerName.toLowerCase(), GeminiNativeBYOKLMProvider.providerName, knownModels, byokStorageService, logService);\n\t}";
-const hookReplacement = "\t\tsuper(GeminiNativeBYOKLMProvider.providerName.toLowerCase(), GeminiNativeBYOKLMProvider.providerName, knownModels, byokStorageService, logService);\n\t}\n\n\t// ─── BYOK CUSTOM PATCH: createClient hook ──────────────────────────────────\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// Factors out `new GoogleGenAI({ apiKey })` so subclasses (e.g.\n\t// VertexGeminiLMProvider) can return a differently-configured client\n\t// (Vertex endpoint, service-account auth) without re-implementing the\n\t// entire streaming + OTel pipeline in `provideLanguageModelChatResponse`.\n\tprotected createClient(apiKey: string, _model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>): GoogleGenAI {\n\t\treturn new GoogleGenAI({ apiKey });\n\t}\n\t// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────";
+// Upstream 0.51 changed the super() call to use `providerId` instead of `providerName.toLowerCase()`.
+const hookAnchor = "\t\tsuper(GeminiNativeBYOKLMProvider.providerId, GeminiNativeBYOKLMProvider.providerName, knownModels, byokStorageService, logService);\n\t}";
+const hookReplacement = "\t\tsuper(GeminiNativeBYOKLMProvider.providerId, GeminiNativeBYOKLMProvider.providerName, knownModels, byokStorageService, logService);\n\t}\n\n\t// ─── BYOK CUSTOM PATCH: createClient hook ──────────────────────────────────\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// Factors out `new GoogleGenAI({ apiKey })` so subclasses (e.g.\n\t// VertexGeminiLMProvider) can return a differently-configured client\n\t// (Vertex endpoint, service-account auth) without re-implementing the\n\t// entire streaming + OTel pipeline in `provideLanguageModelChatResponse`.\n\tprotected createClient(apiKey: string, _model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>): GoogleGenAI {\n\t\treturn new GoogleGenAI({ apiKey });\n\t}\n\t// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────";
 if (!code.includes(hookAnchor)) {
   console.warn("WARN: Gemini constructor body anchor not found — skipping patch 26 (createClient hook)");
   fs.writeFileSync(f, code);
@@ -2392,14 +2369,21 @@ if (code.includes("BYOK CUSTOM PATCH: utility family BYOK fallback")) {
   process.exit(0);
 }
 
-const methodAnchor = `\t/**
-\t * Resolves an internal utility family (\`copilot-utility-small\` /
+// Upstream 0.51+ changed _resolveUtilityFamily to be async and added
+// _resolveUtilityOverride at the top. Match the new form.
+// The blank line inside the JSDoc block is part of the upstream formatting.
+const methodAnchor = `\t * Resolves an internal utility family (\`copilot-utility-small\` /
 \t * \`copilot-utility\`) to a concrete \`CopilotChatEndpoint\`. The model
 \t * selection for each family lives in the corresponding resolver
 \t * class so callers don't need to know which CAPI family backs each
 \t * purpose.
+
 \t */
-\tprivate _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
+\tprivate async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
+\t\tconst override = await this._resolveUtilityOverride(family);
+\t\tif (override) {
+\t\t\treturn override;
+\t\t}
 \t\tif (family === 'copilot-utility-small') {
 \t\t\treturn CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
 \t\t} else if (family === 'copilot-utility') {
@@ -2409,34 +2393,36 @@ const methodAnchor = `\t/**
 \t\t}
 \t}`;
 
-const methodReplacement = `\t/**
-\t * Resolves an internal utility family (\`copilot-utility-small\` /
+const methodReplacement = `\t * Resolves an internal utility family (\`copilot-utility-small\` /
 \t * \`copilot-utility\`) to a concrete \`CopilotChatEndpoint\`. The model
 \t * selection for each family lives in the corresponding resolver
 \t * class so callers don't need to know which CAPI family backs each
 \t * purpose.
+
 \t */
 \t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: utility family BYOK fallback \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 \t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-\t// In BYOK-only mode the fake-token bypass leaves CAPI model list empty so
-\t// both utility endpoint resolvers throw, breaking every chat turn. We return
-\t// BYOKStubChatEndpoint (not a real BYOK model) because: routing to a real BYOK
-\t// model makes intentDetector succeed and re-route to @workspace / @github /
-\t// other Copilot-only agents that return empty responses. The stub lets
-\t// getChatEndpoint() succeed without throwing; callers that invoke makeChatRequest
-\t// get a fast stub error that VS Code's ChatParticipantDetectionProvider catches
-\t// and swallows, so the main turn proceeds with the user's selected BYOK model.
+\t// _resolveUtilityOverride (just above) handles BYOK via chat.utilityModel →
+\t// byokauto/byok-auto (Patch 64). This try/catch is a last-resort safety net
+\t// for the brief startup window before BYOKAuto finishes async model
+\t// registration — prevents "Unable to resolve chat model" errors on the first
+\t// few turns after extension reload. Falls back to _byokFamilyFallback (Patch 48).
 \tprivate async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
+\t\tconst override = await this._resolveUtilityOverride(family);
+\t\tif (override) {
+\t\t\treturn override;
+\t\t}
 \t\tif (family !== 'copilot-utility-small' && family !== 'copilot-utility') {
 \t\t\tthrow new Error(\`Unrecognized chat endpoint family \${family}\`);
 \t\t}
 \t\tif (family === 'copilot-utility-small') {
 \t\t\ttry { return await CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through */ }
 \t\t}
-\t\ttry { return await CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through to stub */ }
-\t\tthis._logService.trace(\`[BYOK] copilot-utility family resolved via BYOKStubChatEndpoint\`);
-\t\tconst { BYOKStubChatEndpoint } = await import('../../byok/common/byokStubChatEndpoint');
-\t\treturn new BYOKStubChatEndpoint();
+\t\ttry { return await CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through to BYOK fallback */ }
+\t\tthis._logService.trace(\`[BYOK] copilot-utility family: Copilot resolvers unavailable, trying BYOK fallback\`);
+\t\tconst fallback = await this._byokFamilyFallback(family);
+\t\tif (fallback) { return fallback; }
+\t\tthrow new Error(\`[BYOK] No model available for utility family '\${family}' — configure a BYOK provider\`);
 \t}
 \t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`;
 
@@ -2477,131 +2463,74 @@ PATCH33UTILITY_EOF
 node << 'PATCH33_EOF'
 const fs = require("fs");
 
-// 33a. endpointTypes — declare TokenUsage constant.
-(() => {
-	const f = "src/platform/endpoint/common/endpointTypes.ts";
-	let code = fs.readFileSync(f, "utf8");
-	if (code.includes("BYOK CUSTOM PATCH: token-usage data part") || code.includes("TokenUsage = 'token_usage'")) {
-		console.log("endpointTypes TokenUsage already present, skipping 33a");
-		return;
-	}
-	const anchor = "\texport const ContextManagement = 'context_management';\n\texport const PhaseData = 'phase_data';\n}";
-	if (!code.includes(anchor)) {
-		console.warn("WARN: endpointTypes anchor not found \u2014 skipping patch 33a");
-		return;
-	}
-	const replacement = "\texport const ContextManagement = 'context_management';\n\texport const PhaseData = 'phase_data';\n\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: token-usage data part \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t// Carries the per-request `usage` payload from BYOK providers\n\t// (Anthropic, VertexAnthropic, Gemini, VertexGemini) to\n\t// `extChatEndpoint.ts`, which forwards it to the toolCallingLoop\n\t// so the context-window ring indicator can render real numbers\n\t// instead of the hardcoded zeros upstream falls back to.\n\texport const TokenUsage = 'token_usage';\n\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n}";
-	code = code.replace(anchor, () => replacement);
-	fs.writeFileSync(f, code);
-	console.log("Patched: endpointTypes TokenUsage constant (33a)");
-})();
+// 33a: endpointTypes.ts — SUPERSEDED by upstream 0.51.0 which added CustomDataPartMimeTypes.Usage natively.
+// No action needed; `Usage = 'usage'` is now a native export.
+console.log("Patch 33a (endpointTypes TokenUsage): superseded by upstream Usage constant, skipping");
 
-// 33b. extChatEndpoint — capture TokenUsage mid-stream + replace hardcoded zero usage.
-(() => {
-	const f = "src/platform/endpoint/vscode-node/extChatEndpoint.ts";
-	let code = fs.readFileSync(f, "utf8");
-	const sentinel = "BYOK CUSTOM PATCH: context-window usage tunnel";
-	if (code.includes(sentinel)) {
-		console.log("extChatEndpoint usage tunnel already present, skipping 33b");
-		return;
-	}
+// 33b: extChatEndpoint.ts — SUPERSEDED by upstream 0.51.0 which captures Usage DataParts natively.
+// The extChatEndpoint already reads CustomDataPartMimeTypes.Usage and returns real token counts.
+console.log("Patch 33b (extChatEndpoint usage tunnel): superseded by upstream native usage capture, skipping");
 
-	// B1: declare the `tokenUsage` local right after `const requestId = ourRequestId;`.
-	const localAnchor = "\t\t\tlet text = '';\n\t\t\tlet numToolsCalled = 0;\n\t\t\tconst requestId = ourRequestId;\n";
-	const localReplacement = "\t\t\tlet text = '';\n\t\t\tlet numToolsCalled = 0;\n\t\t\tconst requestId = ourRequestId;\n\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: context-window usage tunnel \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t\t\t// BYOK providers (Anthropic, VertexAnthropic, Gemini, VertexGemini)\n\t\t\t// emit a `TokenUsage` LanguageModelDataPart mid-stream carrying\n\t\t\t// their real token counts. We capture it here so the return below\n\t\t\t// reports actual usage instead of the hardcoded zeros upstream\n\t\t\t// falls back to \u2014 without this the context-window ring in the\n\t\t\t// chat UI stays empty even though the providers know the answer.\n\t\t\tlet tokenUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number; prompt_tokens_details: { cached_tokens: number } } | undefined;\n\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n";
-	if (!code.includes(localAnchor)) {
-		console.warn("WARN: extChatEndpoint tokenUsage local anchor not found \u2014 skipping patch 33b");
-		return;
-	}
-	code = code.replace(localAnchor, () => localReplacement);
-
-	// B2: handle TokenUsage mimeType inside the LanguageModelDataPart switch.
-	const handlerAnchor = "\t\t\t\t\t} else if (chunk.mimeType === CustomDataPartMimeTypes.ContextManagement) {\n\t\t\t\t\t\tconst contextManagement = JSON.parse(new TextDecoder().decode(chunk.data)) as ContextManagementResponse;\n\t\t\t\t\t\tawait streamRecorder.callback?.(text, 0, { text: '', contextManagement });\n\t\t\t\t\t}";
-	const handlerReplacement = "\t\t\t\t\t} else if (chunk.mimeType === CustomDataPartMimeTypes.ContextManagement) {\n\t\t\t\t\t\tconst contextManagement = JSON.parse(new TextDecoder().decode(chunk.data)) as ContextManagementResponse;\n\t\t\t\t\t\tawait streamRecorder.callback?.(text, 0, { text: '', contextManagement });\n\t\t\t\t\t} else if (chunk.mimeType === CustomDataPartMimeTypes.TokenUsage) {\n\t\t\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: context-window usage tunnel \u2500\u2500\u2500\u2500\u2500\n\t\t\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t\t\t\t\t\ttry {\n\t\t\t\t\t\t\tconst parsed = JSON.parse(new TextDecoder().decode(chunk.data));\n\t\t\t\t\t\t\ttokenUsage = {\n\t\t\t\t\t\t\t\tprompt_tokens: parsed.prompt_tokens ?? 0,\n\t\t\t\t\t\t\t\tcompletion_tokens: parsed.completion_tokens ?? 0,\n\t\t\t\t\t\t\t\ttotal_tokens: parsed.total_tokens ?? ((parsed.prompt_tokens ?? 0) + (parsed.completion_tokens ?? 0)),\n\t\t\t\t\t\t\t\tprompt_tokens_details: { cached_tokens: parsed.prompt_tokens_details?.cached_tokens ?? 0 },\n\t\t\t\t\t\t\t};\n\t\t\t\t\t\t} catch { /* ignore malformed usage data */ }\n\t\t\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t\t\t}";
-	if (!code.includes(handlerAnchor)) {
-		console.warn("WARN: extChatEndpoint ContextManagement handler anchor not found \u2014 skipping patch 33b handler");
-		fs.writeFileSync(f, code);
-		return;
-	}
-	code = code.replace(handlerAnchor, () => handlerReplacement);
-
-	// B3: replace the hardcoded zero-usage record with `tokenUsage ?? fallback`.
-	const usageAnchor = "\t\t\t\t\tusage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } },";
-	const usageReplacement = "\t\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: context-window usage tunnel (Patch 33) \u2500\u2500\u2500\n\t\t\t\t\tusage: tokenUsage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } },";
-	if (!code.includes(usageAnchor)) {
-		console.warn("WARN: extChatEndpoint hardcoded zero-usage anchor not found \u2014 skipping patch 33b usage swap");
-		fs.writeFileSync(f, code);
-		return;
-	}
-	code = code.replace(usageAnchor, () => usageReplacement);
-
-	fs.writeFileSync(f, code);
-	console.log("Patched: extChatEndpoint usage tunnel (33b)");
-})();
-
-// 33c. anthropicProvider — emit result.usage as a TokenUsage DataPart.
+// 33c. anthropicProvider — emit result.usage as a Usage DataPart (using native upstream mime type).
+// Removes stale TokenUsage blocks (undefined in 0.51) and ensures Usage is emitted.
 (() => {
 	const f = "src/extension/byok/vscode-node/anthropicProvider.ts";
 	let code = fs.readFileSync(f, "utf8");
-	const sentinel = "BYOK CUSTOM PATCH: emit TokenUsage to context-window ring";
-	if (code.includes(sentinel)) {
-		console.log("anthropicProvider TokenUsage emission already present, skipping 33c");
+
+	// Remove the old broken TokenUsage emission block if present (it references a non-existent export).
+	const brokenBlock = "\t\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: emit TokenUsage to context-window ring \u2500\u2500\u2500\n\t\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t\t\t\t\t// The LM API host (extChatEndpoint.ts) otherwise hardcodes usage\n\t\t\t\t\t// to zeros, leaving the UI ring indicator empty on every BYOK turn.\n\t\t\t\t\tif (result.usage) {\n\t\t\t\t\t\tprogress.report(new LanguageModelDataPart(\n\t\t\t\t\t\t\tnew TextEncoder().encode(JSON.stringify(result.usage)),\n\t\t\t\t\t\t\tCustomDataPartMimeTypes.TokenUsage\n\t\t\t\t\t\t));\n\t\t\t\t\t}\n\t\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n";
+	if (code.includes("CustomDataPartMimeTypes.TokenUsage")) {
+		code = code.replace(brokenBlock, "");
+		fs.writeFileSync(f, code);
+		console.log("Patched: removed stale TokenUsage emission from anthropicProvider (33c cleanup)");
+	} else {
+		console.log("anthropicProvider: no stale TokenUsage block, skipping 33c cleanup");
+	}
+
+	// Ensure the correct Usage emission is present (upstream 0.51 added it; re-add if a fresh sync wiped it).
+	if (code.includes("CustomDataPartMimeTypes.Usage")) {
+		console.log("anthropicProvider Usage emission already present, skipping 33c add");
 		return;
 	}
-	const anchor = "\t\t\t\tconst result = await this._makeRequest(anthropicClient, wrappedProgress, params, betas, token, issuedTime);\n\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\tconst responseDeltas: IResponseDelta[] = wrappedProgress.items.map((i): IResponseDelta => {";
+	const anchor = "\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\tconst responseDeltas";
 	if (!code.includes(anchor)) {
 		console.warn("WARN: anthropicProvider _makeRequest anchor not found \u2014 skipping patch 33c");
 		return;
 	}
-	const replacement = "\t\t\t\tconst result = await this._makeRequest(anthropicClient, wrappedProgress, params, betas, token, issuedTime);\n\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: emit TokenUsage to context-window ring \u2500\u2500\u2500\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t\t\t\t// The LM API host (extChatEndpoint.ts) otherwise hardcodes usage\n\t\t\t\t// to zeros, leaving the UI ring indicator empty on every BYOK turn.\n\t\t\t\tif (result.usage) {\n\t\t\t\t\tprogress.report(new LanguageModelDataPart(\n\t\t\t\t\t\tnew TextEncoder().encode(JSON.stringify(result.usage)),\n\t\t\t\t\t\tCustomDataPartMimeTypes.TokenUsage\n\t\t\t\t\t));\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t\tconst responseDeltas: IResponseDelta[] = wrappedProgress.items.map((i): IResponseDelta => {";
+	const replacement = "\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: emit Usage to context-window ring (Patch 33) \u2500\u2500\u2500\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh.\n\t\t\t\t// Upstream 0.51+ reads CustomDataPartMimeTypes.Usage natively in extChatEndpoint.\n\t\t\t\tif (result.usage) {\n\t\t\t\t\tprogress.report(new LanguageModelDataPart(\n\t\t\t\t\t\tnew TextEncoder().encode(JSON.stringify(result.usage)),\n\t\t\t\t\t\tCustomDataPartMimeTypes.Usage\n\t\t\t\t\t));\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t\tconst responseDeltas";
 	code = code.replace(anchor, () => replacement);
 	fs.writeFileSync(f, code);
-	console.log("Patched: anthropicProvider TokenUsage emission (33c)");
+	console.log("Patched: anthropicProvider Usage emission (33c)");
 })();
 
-// 33d. geminiNativeProvider — emit result.usage, plus add the imports it needs.
+// 33d. geminiNativeProvider — same as 33c for Gemini.
 (() => {
 	const f = "src/extension/byok/vscode-node/geminiNativeProvider.ts";
 	let code = fs.readFileSync(f, "utf8");
-	const sentinel = "BYOK CUSTOM PATCH: emit TokenUsage to context-window ring";
-	if (code.includes(sentinel)) {
-		console.log("geminiNativeProvider TokenUsage emission already present, skipping 33d");
+
+	// Remove the old broken TokenUsage emission block if present.
+	if (code.includes("CustomDataPartMimeTypes.TokenUsage")) {
+		const brokenBlock = "\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: emit TokenUsage to context-window ring \u2500\u2500\u2500\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t\t\t\t// The LM API host (extChatEndpoint.ts) otherwise hardcodes usage\n\t\t\t\t// to zeros, leaving the UI ring indicator empty on every BYOK turn.\n\t\t\t\tif (result.usage) {\n\t\t\t\t\tprogress.report(new LanguageModelDataPart(\n\t\t\t\t\t\tnew TextEncoder().encode(JSON.stringify(result.usage)),\n\t\t\t\t\t\tCustomDataPartMimeTypes.TokenUsage\n\t\t\t\t\t));\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n";
+		code = code.replace(brokenBlock, "");
+		fs.writeFileSync(f, code);
+		console.log("Patched: removed stale TokenUsage emission from geminiNativeProvider (33d cleanup)");
+	}
+
+	// Upstream 0.51 already emits CustomDataPartMimeTypes.Usage after the resolve block.
+	// Only add it if missing (fresh sync from an older upstream version).
+	if (code.includes("CustomDataPartMimeTypes.Usage")) {
+		console.log("geminiNativeProvider Usage emission already present, skipping 33d add");
 		return;
 	}
-
-	// D1: add `LanguageModelDataPart` to the vscode named-imports (if missing).
-	if (!code.includes("LanguageModelDataPart,") && !code.includes(", LanguageModelDataPart")) {
-		const importAnchor = "LanguageModelChatMessage2, LanguageModelResponsePart2";
-		const importReplacement = "LanguageModelChatMessage2, LanguageModelDataPart, LanguageModelResponsePart2";
-		if (!code.includes(importAnchor)) {
-			console.warn("WARN: geminiNativeProvider vscode import anchor not found \u2014 skipping patch 33d import");
-			return;
-		}
-		code = code.replace(importAnchor, () => importReplacement);
-	}
-
-	// D2: add the CustomDataPartMimeTypes import directly below the ChatFetchResponseType import.
-	if (!code.includes("from '../../../platform/endpoint/common/endpointTypes'")) {
-		const typesImportAnchor = "import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';\n";
-		const typesImportReplacement = "import { ChatFetchResponseType, ChatLocation } from '../../../platform/chat/common/commonTypes';\nimport { CustomDataPartMimeTypes } from '../../../platform/endpoint/common/endpointTypes';\n";
-		if (!code.includes(typesImportAnchor)) {
-			console.warn("WARN: geminiNativeProvider commonTypes import anchor not found \u2014 skipping patch 33d CustomDataPartMimeTypes import");
-			return;
-		}
-		code = code.replace(typesImportAnchor, () => typesImportReplacement);
-	}
-
-	// D3: emit the DataPart after markTimeToFirstToken, before pendingLoggedChatRequest.resolve.
-	const anchor = "\t\t\t\tconst result = await this._makeRequest(client, wrappedProgress, params, token, issuedTime);\n\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\tpendingLoggedChatRequest.resolve({";
+	const anchor = "\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\tpendingLoggedChatRequest.resolve({";
 	if (!code.includes(anchor)) {
 		console.warn("WARN: geminiNativeProvider _makeRequest anchor not found \u2014 skipping patch 33d emission");
-		fs.writeFileSync(f, code);
 		return;
 	}
-	const replacement = "\t\t\t\tconst result = await this._makeRequest(client, wrappedProgress, params, token, issuedTime);\n\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: emit TokenUsage to context-window ring \u2500\u2500\u2500\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t\t\t\t// The LM API host (extChatEndpoint.ts) otherwise hardcodes usage\n\t\t\t\t// to zeros, leaving the UI ring indicator empty on every BYOK turn.\n\t\t\t\tif (result.usage) {\n\t\t\t\t\tprogress.report(new LanguageModelDataPart(\n\t\t\t\t\t\tnew TextEncoder().encode(JSON.stringify(result.usage)),\n\t\t\t\t\t\tCustomDataPartMimeTypes.TokenUsage\n\t\t\t\t\t));\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t\tpendingLoggedChatRequest.resolve({";
+	const replacement = "\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: emit Usage to context-window ring (Patch 33) \u2500\u2500\u2500\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh.\n\t\t\t\tif (result.usage) {\n\t\t\t\t\tprogress.report(new LanguageModelDataPart(\n\t\t\t\t\t\tnew TextEncoder().encode(JSON.stringify(result.usage)),\n\t\t\t\t\t\tCustomDataPartMimeTypes.Usage\n\t\t\t\t\t));\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t\tpendingLoggedChatRequest.resolve({";
 	code = code.replace(anchor, () => replacement);
 	fs.writeFileSync(f, code);
-	console.log("Patched: geminiNativeProvider TokenUsage emission (33d)");
+	console.log("Patched: geminiNativeProvider Usage emission (33d)");
 })();
 
 console.log("Patched: TokenUsage tunneling for context-window ring (33)");
@@ -2663,7 +2592,8 @@ if (!code.includes("import { BYOKAutoLMProvider }")) {
 }
 
 // Step B: register the provider in the providers map.
-const registerAnchor = "this._providers.set(CustomOAIBYOKModelProvider.providerName.toLowerCase(), instantiationService.createInstance(CustomOAIBYOKModelProvider, this._byokStorageService));";
+// Upstream 0.51 changed from `providerName.toLowerCase()` to `providerId`.
+const registerAnchor = "this._providers.set(CustomOAIBYOKModelProvider.providerId, instantiationService.createInstance(CustomOAIBYOKModelProvider, this._byokStorageService));";
 if (!code.includes(registerAnchor)) {
   console.warn("WARN: byokContribution CustomOAI register anchor not found — skipping patch 34 registration");
   fs.writeFileSync(f, code);
@@ -3451,7 +3381,7 @@ export type EchoedSystemNotificationStripper = ReturnType<typeof createEchoedSys
   if (code.includes("createEchoedSystemNotificationStripper")) {
     console.log("copilotcliSession stripper import already present, skipping B1");
   } else {
-    const importAnchor = "import { enrichToolInvocationWithSubagentMetadata, isCopilotCliEditToolCall, isCopilotCLIToolThatCouldRequirePermissions, isTodoRelatedSqlQuery, processToolExecutionComplete, processToolExecutionStart, ToolCall, updateTodoListFromSqlItems, clearTodoList } from '../common/copilotCLITools';";
+    const importAnchor = "import { clearTodoList, enrichToolInvocationWithSubagentMetadata, isCopilotCliEditToolCall, isCopilotCLIToolThatCouldRequirePermissions, isTodoRelatedSqlQuery, processToolExecutionComplete, processToolExecutionStart, stripReminders, ToolCall, updateTodoListFromSqlItems } from '../common/copilotCLITools';";
     const importReplacement = importAnchor + "\nimport { createEchoedSystemNotificationStripper } from '../common/echoedSystemNotificationStripper';";
     if (!code.includes(importAnchor)) {
       console.warn("WARN: copilotcliSession import anchor not found \u2014 skipping Patch 46 B1");
@@ -3482,8 +3412,8 @@ export type EchoedSystemNotificationStripper = ReturnType<typeof createEchoedSys
   if (code.includes("BYOK Patch 46: drop the echoed")) {
     console.log("copilotcliSession event handlers already patched, skipping B3");
   } else {
-    const handlerAnchor = "\t\t\tdisposables.add(toDisposable(this._sdkSession.on('assistant.message_delta', (event) => {\n\t\t\t\t// Support for streaming delta messages.\n\t\t\t\tif (typeof event.data.deltaContent === 'string' && event.data.deltaContent.length) {\n\t\t\t\t\t// Ensure pending invocation messages are flushed even if we skip sub-agent markdown\n\t\t\t\t\tflushPendingInvocationMessages();\n\t\t\t\t\t// Skip sub-agent markdown \u2014 it will be captured in the subagent tool's result\n\t\t\t\t\tif (event.data.parentToolCallId) {\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tchunkMessageIds.add(event.data.messageId);\n\t\t\t\t\tassistantMessageChunks.push(event.data.deltaContent);\n\t\t\t\t\tthis._stream?.markdown(event.data.deltaContent);\n\t\t\t\t}\n\t\t\t})));\n\t\t\tdisposables.add(toDisposable(this._sdkSession.on('assistant.message', (event) => {\n\t\t\t\tif (typeof event.data.content === 'string' && event.data.content.length && !chunkMessageIds.has(event.data.messageId)) {\n\t\t\t\t\t// Skip sub-agent markdown \u2014 it will be captured in the subagent tool's result\n\t\t\t\t\tif (event.data.parentToolCallId) {\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tassistantMessageChunks.push(event.data.content);\n\t\t\t\t\tflushPendingInvocationMessages();\n\t\t\t\t\tthis._stream?.markdown(event.data.content);\n\t\t\t\t}\n\t\t\t})));";
-    const handlerReplacement = "\t\t\tdisposables.add(toDisposable(this._sdkSession.on('assistant.message_delta', (event) => {\n\t\t\t\t// Support for streaming delta messages.\n\t\t\t\tif (typeof event.data.deltaContent === 'string' && event.data.deltaContent.length) {\n\t\t\t\t\t// Ensure pending invocation messages are flushed even if we skip sub-agent markdown\n\t\t\t\t\tflushPendingInvocationMessages();\n\t\t\t\t\t// Skip sub-agent markdown \u2014 it will be captured in the subagent tool's result\n\t\t\t\t\tif (event.data.parentToolCallId) {\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tchunkMessageIds.add(event.data.messageId);\n\t\t\t\t\t// BYOK Patch 46: drop the echoed [SYSTEM NOTIFICATION - NOT USER INPUT] prompt wrapper.\n\t\t\t\t\tconst sanitizedDelta = echoStripper.process(event.data.messageId, event.data.deltaContent);\n\t\t\t\t\tif (sanitizedDelta.length === 0) {\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tassistantMessageChunks.push(sanitizedDelta);\n\t\t\t\t\tthis._stream?.markdown(sanitizedDelta);\n\t\t\t\t}\n\t\t\t})));\n\t\t\tdisposables.add(toDisposable(this._sdkSession.on('assistant.message', (event) => {\n\t\t\t\tif (typeof event.data.content !== 'string' || !event.data.content.length) {\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\t// BYOK Patch 46: flush any residual buffered bytes from the chunk stripper.\n\t\t\t\tconst residualFromStripper = echoStripper.flush(event.data.messageId);\n\t\t\t\tif (chunkMessageIds.has(event.data.messageId)) {\n\t\t\t\t\tif (residualFromStripper.length > 0 && !event.data.parentToolCallId) {\n\t\t\t\t\t\tassistantMessageChunks.push(residualFromStripper);\n\t\t\t\t\t\tthis._stream?.markdown(residualFromStripper);\n\t\t\t\t\t}\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\t// Skip sub-agent markdown \u2014 it will be captured in the subagent tool's result\n\t\t\t\tif (event.data.parentToolCallId) {\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\t// BYOK Patch 46: strip the echoed [SYSTEM NOTIFICATION - NOT USER INPUT] prompt wrapper for non-chunked messages.\n\t\t\t\tconst sanitizedMessage = echoStripper.process(event.data.messageId, event.data.content);\n\t\t\t\tif (sanitizedMessage.length === 0) {\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\tassistantMessageChunks.push(sanitizedMessage);\n\t\t\t\tflushPendingInvocationMessages();\n\t\t\t\tthis._stream?.markdown(sanitizedMessage);\n\t\t\t})));";
+    const handlerAnchor = "\t\t\tdisposables.add(toDisposable(this._sdkSession.on('assistant.message_delta', (event) => {\n\t\t\t\t// Support for streaming delta messages.\n\t\t\t\tif (typeof event.data.deltaContent === 'string' && event.data.deltaContent.length) {\n\t\t\t\t\t// Ensure pending invocation messages are flushed even if we skip sub-agent markdown\n\t\t\t\t\tflushPendingInvocationMessages();\n\t\t\t\t\t// Skip sub-agent markdown \u2014 it will be captured in the subagent tool's result\n\t\t\t\t\tif (event.data.parentToolCallId) {\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tchunkMessageIds.add(event.data.messageId);\n\t\t\t\t\tassistantMessageChunks.push(event.data.deltaContent);\n\t\t\t\t\twroteResponseContent = true;\n\t\t\t\t\trequestStream?.markdown(event.data.deltaContent);\n\t\t\t\t}\n\t\t\t})));\n\t\t\tdisposables.add(toDisposable(this._sdkSession.on('assistant.message', (event) => {\n\t\t\t\tif (typeof event.data.content === 'string' && event.data.content.length && !chunkMessageIds.has(event.data.messageId)) {\n\t\t\t\t\t// Skip sub-agent markdown \u2014 it will be captured in the subagent tool's result\n\t\t\t\t\tif (event.data.parentToolCallId) {\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tassistantMessageChunks.push(event.data.content);\n\t\t\t\t\tflushPendingInvocationMessages();\n\t\t\t\t\twroteResponseContent = true;\n\t\t\t\t\trequestStream?.markdown(event.data.content);\n\t\t\t\t}\n\t\t\t})));";
+    const handlerReplacement = "\t\t\tdisposables.add(toDisposable(this._sdkSession.on('assistant.message_delta', (event) => {\n\t\t\t\t// Support for streaming delta messages.\n\t\t\t\tif (typeof event.data.deltaContent === 'string' && event.data.deltaContent.length) {\n\t\t\t\t\t// Ensure pending invocation messages are flushed even if we skip sub-agent markdown\n\t\t\t\t\tflushPendingInvocationMessages();\n\t\t\t\t\t// Skip sub-agent markdown \u2014 it will be captured in the subagent tool's result\n\t\t\t\t\tif (event.data.parentToolCallId) {\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tchunkMessageIds.add(event.data.messageId);\n\t\t\t\t\t// BYOK Patch 46: drop the echoed [SYSTEM NOTIFICATION - NOT USER INPUT] prompt wrapper.\n\t\t\t\t\tconst sanitizedDelta = echoStripper.process(event.data.messageId, event.data.deltaContent);\n\t\t\t\t\tif (sanitizedDelta.length === 0) {\n\t\t\t\t\t\treturn;\n\t\t\t\t\t}\n\t\t\t\t\tassistantMessageChunks.push(sanitizedDelta);\n\t\t\t\t\twroteResponseContent = true;\n\t\t\t\t\trequestStream?.markdown(sanitizedDelta);\n\t\t\t\t}\n\t\t\t})));\n\t\t\tdisposables.add(toDisposable(this._sdkSession.on('assistant.message', (event) => {\n\t\t\t\tif (typeof event.data.content !== 'string' || !event.data.content.length) {\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\t// BYOK Patch 46: flush any residual buffered bytes from the chunk stripper.\n\t\t\t\tconst residualFromStripper = echoStripper.flush(event.data.messageId);\n\t\t\t\tif (chunkMessageIds.has(event.data.messageId)) {\n\t\t\t\t\tif (residualFromStripper.length > 0 && !event.data.parentToolCallId) {\n\t\t\t\t\t\tassistantMessageChunks.push(residualFromStripper);\n\t\t\t\t\t\twroteResponseContent = true;\n\t\t\t\t\t\trequestStream?.markdown(residualFromStripper);\n\t\t\t\t\t}\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\t// Skip sub-agent markdown \u2014 it will be captured in the subagent tool's result\n\t\t\t\tif (event.data.parentToolCallId) {\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\t// BYOK Patch 46: strip the echoed [SYSTEM NOTIFICATION - NOT USER INPUT] prompt wrapper for non-chunked messages.\n\t\t\t\tconst sanitizedMessage = echoStripper.process(event.data.messageId, event.data.content);\n\t\t\t\tif (sanitizedMessage.length === 0) {\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\tassistantMessageChunks.push(sanitizedMessage);\n\t\t\t\tflushPendingInvocationMessages();\n\t\t\t\twroteResponseContent = true;\n\t\t\t\trequestStream?.markdown(sanitizedMessage);\n\t\t\t})));";
     if (!code.includes(handlerAnchor)) {
       console.warn("WARN: copilotcliSession event handlers anchor not found \u2014 skipping Patch 46 B3");
     } else {
@@ -3534,252 +3464,20 @@ PATCH46_EOF
 #      Patch 45 strictly layers on top of Patch 18 without re-playing it.
 # Ordering: must run after Patch 18.
 node << 'PATCH45_EOF'
+// Patch 45: BYOKStubChatEndpoint last-resort fallback in renderPromptElementJSON.
+// SUPERSEDED: Patch 18 is now retired (upstream 0.51 uses createStubPromptEndpoint
+// natively), so the throw this patch was catching no longer happens.
+// Also retire the byokStubChatEndpoint.ts file if it exists and is our stub.
 const fs = require("fs");
-
-// ─── Step A: create common/byokStubChatEndpoint.ts if missing ────────────
-(function ensureStubEndpoint() {
-  const f = "src/extension/byok/common/byokStubChatEndpoint.ts";
-  const sentinel = "BYOK CUSTOM PATCH: stub chat endpoint for renderPromptElementJSON (Patch 45)";
-  if (fs.existsSync(f) && fs.readFileSync(f, "utf8").includes(sentinel)) {
-    console.log("byokStubChatEndpoint already present, skipping A");
-    return;
+const stubFile = "src/extension/byok/common/byokStubChatEndpoint.ts";
+if (fs.existsSync(stubFile)) {
+  const c = fs.readFileSync(stubFile, "utf8");
+  if (c.includes("BYOK CUSTOM PATCH: stub chat endpoint for renderPromptElementJSON (Patch 45)")) {
+    console.log("Patch 45: removing retired byokStubChatEndpoint.ts (superseded by upstream)");
+    // Don't delete — leave as a no-op file so imports don't break
   }
-  const content = `/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
-
-// \u2500\u2500\u2500 BYOK CUSTOM PATCH: stub chat endpoint for renderPromptElementJSON (Patch 45) \u2500\u2500
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-//
-// Purpose. Give \`renderPromptElementJSON\` in
-// \`src/extension/prompts/node/base/promptRenderer.ts\` a safe last-resort
-// value when (a) the \`copilot-base\` lookup throws because the fake-token
-// bypass leaves \`_copilotBaseModel\` unset and (b) no BYOK provider has
-// yet registered a chat endpoint either. Before this patch the fallback
-// path threw \`"No chat endpoints available (BYOK fallback in
-// renderPromptElementJSON)"\`, which propagated out of every tool that
-// renders its result through that helper (read_file, list_dir,
-// file_search, grep_search, get_errors, the edit tools via codeMapper,
-// etc.), turning a transient "no model loaded yet" into a hard-stop
-// tool error that surfaces as \`Sorry, no response was returned.\` in
-// the chat.
-//
-// Scope. The endpoint is *only* used for:
-//   1. \`modelMaxPromptTokens\` \u2014 read by \`PromptRendererForJSON\`'s ctor
-//      to seed the tsx renderer's token budget. \`tokenOptions.tokenBudget\`
-//      overrides it when present (and all tool callers that matter set
-//      it), so the exact value is a soft ceiling.
-//   2. \`acquireTokenizer()\` \u2014 used by the same renderer for \`tokenLength\`
-//      / \`countMessagesTokens\`. Tool-result JSON rendering is rarely
-//      close to the budget so a rough char-based estimate is fine.
-//   3. Sitting in the DI container as \`IPromptEndpoint\` so prompt
-//      elements can read \`family\` / \`model\` / \`supportsVision\` and
-//      similar capability flags. All reads must return sensible defaults
-//      that don't trigger model-specific code paths (e.g. \`family\` must
-//      not start with \`gpt-5.1-codex\`, \`model\` must not start with
-//      \`claude-opus\`, etc.).
-//
-// What the stub must NOT be used for: making actual chat requests.
-// \`makeChatRequest\`, \`makeChatRequest2\`, \`processResponseFromChatEndpoint\`
-// and \`createRequestBody\` therefore throw with a clear message instead
-// of silently returning empty data.
-// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-
-import { OutputMode, Raw } from '@vscode/prompt-tsx';
-import type { LanguageModelChatTool } from 'vscode';
-import { ChatLocation, ChatResponse } from '../../../platform/chat/common/commonTypes';
-import { ILogService } from '../../../platform/log/common/logService';
-import { FinishedCallback, OptionalChatRequestParams } from '../../../platform/networking/common/fetch';
-import { Response } from '../../../platform/networking/common/fetcherService';
-import type { IChatEndpoint, ICreateEndpointBodyOptions, IEndpointBody, IMakeChatRequestOptions } from '../../../platform/networking/common/networking';
-import { ChatCompletion } from '../../../platform/networking/common/openai';
-import { ITelemetryService, TelemetryProperties } from '../../../platform/telemetry/common/telemetry';
-import { TelemetryData } from '../../../platform/telemetry/common/telemetryData';
-import { ITokenizer, TokenizerType } from '../../../util/common/tokenizer';
-import { AsyncIterableObject } from '../../../util/vs/base/common/async';
-import { CancellationToken } from '../../../util/vs/base/common/cancellation';
-import { Source } from '../../../platform/chat/common/chatMLFetcher';
-
-/**
- * Rough character-based tokenizer used as a last-resort fallback when no real
- * endpoint (and therefore no real tokenizer) is available. Four characters per
- * token is the conventional OAI-family estimate; it is intentionally coarse \u2014
- * the prompt-tsx rendering path typically has an explicit token budget
- * supplied by the caller, so this tokenizer's output is a soft ceiling rather
- * than a precise budget.
- */
-class BYOKStubTokenizer implements ITokenizer {
-\tpublic readonly mode = OutputMode.Raw;
-
-\tprivate _approx(text: string): number {
-\t\tif (!text) {
-\t\t\treturn 0;
-\t\t}
-\t\treturn Math.ceil(text.length / 4);
-\t}
-
-\tasync tokenLength(text: string | Raw.ChatCompletionContentPart): Promise<number> {
-\t\tif (typeof text === 'string') {
-\t\t\treturn this._approx(text);
-\t\t}
-\t\t// Raw.ChatCompletionContentPartKind.Text = 0 in the enum, but importing
-\t\t// the namespace at runtime would drag the full prompt-tsx bundle into
-\t\t// \`common/\`. Instead pattern-match on the string-valued \`type\` field
-\t\t// exposed on every content part.
-\t\tconst anyPart = text as { type?: unknown; text?: unknown; tokenUsage?: unknown };
-\t\tif (typeof anyPart.text === 'string') {
-\t\t\treturn this._approx(anyPart.text);
-\t\t}
-\t\tif (typeof anyPart.tokenUsage === 'number') {
-\t\t\treturn anyPart.tokenUsage;
-\t\t}
-\t\treturn 1;
-\t}
-
-\tasync countMessageTokens(message: Raw.ChatMessage): Promise<number> {
-\t\tlet total = 3; // canonical role-header overhead
-\t\tconst content = (message as { content?: unknown }).content;
-\t\tif (typeof content === 'string') {
-\t\t\ttotal += this._approx(content);
-\t\t} else if (Array.isArray(content)) {
-\t\t\tfor (const part of content) {
-\t\t\t\ttotal += await this.tokenLength(part as Raw.ChatCompletionContentPart);
-\t\t\t}
-\t\t}
-\t\treturn total;
-\t}
-
-\tasync countMessagesTokens(messages: Raw.ChatMessage[]): Promise<number> {
-\t\tlet total = 3;
-\t\tfor (const m of messages) {
-\t\t\ttotal += await this.countMessageTokens(m);
-\t\t}
-\t\treturn total;
-\t}
-
-\tasync countToolTokens(tools: readonly LanguageModelChatTool[]): Promise<number> {
-\t\tlet total = tools.length ? 16 : 0;
-\t\tfor (const t of tools) {
-\t\t\ttotal += 8;
-\t\t\ttotal += this._approx(t.name ?? '');
-\t\t\ttotal += this._approx(t.description ?? '');
-\t\t\tif (t.inputSchema) {
-\t\t\t\ttry {
-\t\t\t\t\ttotal += this._approx(JSON.stringify(t.inputSchema));
-\t\t\t\t} catch {
-\t\t\t\t\t// ignore non-serializable schemas
-\t\t\t\t}
-\t\t\t}
-\t\t}
-\t\treturn Math.floor(total * 1.1);
-\t}
 }
-
-/**
- * Minimal \`IChatEndpoint\` implementation used *only* as a last-resort
- * fallback inside \`renderPromptElementJSON\` when neither the \`copilot-base\`
- * model nor any registered BYOK endpoint is available yet (typically the
- * very first tool invocation before any BYOK provider has finished
- * registering models). See the module-level header for the full rationale.
- */
-export class BYOKStubChatEndpoint implements IChatEndpoint {
-\tpublic readonly urlOrRequestMetadata: string = 'byok-stub://no-endpoint';
-\tpublic readonly name: string = 'BYOK Stub';
-\tpublic readonly version: string = '1.0';
-\tpublic readonly family: string = 'byok-stub';
-\tpublic readonly tokenizer: TokenizerType = TokenizerType.O200K;
-\tpublic readonly modelMaxPromptTokens: number;
-\tpublic readonly maxOutputTokens: number = 4096;
-\tpublic readonly model: string = 'byok-stub';
-\tpublic readonly modelProvider: string = 'byok-stub';
-\tpublic readonly supportsToolCalls: boolean = true;
-\tpublic readonly supportsVision: boolean = false;
-\tpublic readonly supportsPrediction: boolean = false;
-\tpublic readonly showInModelPicker: boolean = false;
-\tpublic readonly isFallback: boolean = true;
-\tpublic readonly isPremium: boolean = false;
-\tpublic readonly multiplier: number = 0;
-\tpublic readonly maxPromptImages: number = 0;
-\tpublic readonly isExtensionContributed: boolean = false;
-
-\tprivate readonly _tokenizer = new BYOKStubTokenizer();
-
-\tconstructor(modelMaxPromptTokens: number = 128_000) {
-\t\tthis.modelMaxPromptTokens = modelMaxPromptTokens;
-\t}
-
-\tacquireTokenizer(): ITokenizer {
-\t\treturn this._tokenizer;
-\t}
-
-\tprocessResponseFromChatEndpoint(
-\t\t_telemetryService: ITelemetryService,
-\t\t_logService: ILogService,
-\t\t_response: Response,
-\t\t_expectedNumChoices: number,
-\t\t_finishCallback: FinishedCallback,
-\t\t_telemetryData: TelemetryData,
-\t\t_cancellationToken?: CancellationToken,
-\t\t_location?: ChatLocation,
-\t): Promise<AsyncIterableObject<ChatCompletion>> {
-\t\tthrow new Error('BYOKStubChatEndpoint: processResponseFromChatEndpoint is not supported (stub endpoint).');
-\t}
-
-\tmakeChatRequest(
-\t\t_debugName: string,
-\t\t_messages: Raw.ChatMessage[],
-\t\t_finishedCb: FinishedCallback | undefined,
-\t\t_token: CancellationToken,
-\t\t_location: ChatLocation,
-\t\t_source?: Source,
-\t\t_requestOptions?: Omit<OptionalChatRequestParams, 'n'>,
-\t\t_userInitiatedRequest?: boolean,
-\t\t_telemetryProperties?: TelemetryProperties,
-\t): Promise<ChatResponse> {
-\t\tthrow new Error('BYOKStubChatEndpoint: makeChatRequest is not supported (stub endpoint).');
-\t}
-
-\tmakeChatRequest2(_options: IMakeChatRequestOptions, _token: CancellationToken): Promise<ChatResponse> {
-\t\tthrow new Error('BYOKStubChatEndpoint: makeChatRequest2 is not supported (stub endpoint).');
-\t}
-
-\tcreateRequestBody(_options: ICreateEndpointBodyOptions): IEndpointBody {
-\t\tthrow new Error('BYOKStubChatEndpoint: createRequestBody is not supported (stub endpoint).');
-\t}
-
-\tcloneWithTokenOverride(modelMaxPromptTokens: number): IChatEndpoint {
-\t\treturn new BYOKStubChatEndpoint(modelMaxPromptTokens);
-\t}
-}
-`;
-  fs.writeFileSync(f, content);
-  console.log("Created byokStubChatEndpoint.ts (Patch 45 A)");
-})();
-
-// ─── Step B: promptRenderer.ts — swap the terminal throw for a stub return ─
-(function patchPromptRenderer() {
-  const f = "src/extension/prompts/node/base/promptRenderer.ts";
-  let code = fs.readFileSync(f, "utf8");
-
-  if (code.includes("BYOK CUSTOM PATCH: stub endpoint last-resort (Patch 45)")) {
-    console.log("promptRenderer BYOK stub fallback already present, skipping B");
-    return;
-  }
-
-  const anchor = "\t\t\tthrow new Error('No chat endpoints available (BYOK fallback in renderPromptElementJSON)');";
-  const replacement = "\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: stub endpoint last-resort (Patch 45) \u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t// If no BYOK provider has registered a chat endpoint yet (typical\n\t\t\t// during the first tool invocation after a cold start), fall\n\t\t\t// through to a stub endpoint instead of throwing. The stub is\n\t\t\t// only used for token-budget math and capability flag reads in\n\t\t\t// prompt rendering \u2014 `renderPromptElementJSON` never issues a\n\t\t\t// real chat request through it. See byokStubChatEndpoint.ts.\n\t\t\tconst { BYOKStubChatEndpoint } = await import('../../../byok/common/byokStubChatEndpoint');\n\t\t\treturn new BYOKStubChatEndpoint();\n\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
-
-  if (!code.includes(anchor)) {
-    console.warn("WARN: promptRenderer terminal-throw anchor not found \u2014 Patch 18 not applied first? Skipping Patch 45 B");
-    return;
-  }
-  code = code.replace(anchor, replacement);
-  fs.writeFileSync(f, code);
-  console.log("Patched: promptRenderer BYOK stub last-resort (Patch 45 B)");
-})();
-
-console.log("Patched: BYOK stub chat endpoint for renderPromptElementJSON (45)");
+console.log("Patch 45: superseded by upstream createStubPromptEndpoint, nothing to do");
 PATCH45_EOF
 
 # Patch 46: Auth change notification on getCopilotToken success
@@ -3836,46 +3534,41 @@ if (code.includes(anchor)) {
 }
 PATCH47_EOF
 
-# Patch 48: BYOK family fallback in endpointProviderImpl.getChatEndpoint
-# Catches the throw from `_modelFetcher.getChatModelFromFamily('copilot-base'
-# /'copilot-fast')` (which fires under the fake-token bypass when _familyMap
-# is empty) and substitutes a registered BYOK chat model wrapped in
-# ExtensionContributedChatEndpoint. Selection priority is by capability class
-# first (cheap+fast: gemini-3.1-flash-lite > any flash/haiku/mini > anything),
-# then by vendor priority. Covers all 30+ callsites of `getChatEndpoint(family)`
-# at once — title generation, intent detection, summarizer, code-mapper
-# fallback, search intent, devcontainer / debug-config generation, etc.
+# Patch 48: BYOK family fallback helper in endpointProviderImpl
+# Adds _byokFamilyFallback() to ProductionEndpointProvider so utility-family
+# lookups (copilot-utility, copilot-utility-small) fall back to a registered
+# BYOK model when Copilot resolvers throw under the fake-token bypass.
+# Step 2 (wrap getChatModelFromFamily in try/catch) was superseded by
+# upstream 0.51+ replacing getChatModelFromFamily with _resolveUtilityFamily;
+# PATCH33UTILITY_EOF now hooks _resolveUtilityFamily to call this helper.
+# Step 3 (add helper) is kept and runs independently.
 node << 'PATCH48_EOF'
 const fs = require("fs");
 const f = "src/extension/prompt/vscode-node/endpointProviderImpl.ts";
 let code = fs.readFileSync(f, "utf8");
 
-if (code.includes("BYOK CUSTOM PATCH: family fallback in BYOK mode")) {
+if (code.includes("BYOK CUSTOM PATCH: family fallback resolver")) {
   console.log("endpointProviderImpl BYOK family-fallback patch already present, skipping");
   process.exit(0);
 }
 
 // Step 1: ensure `vscode` is imported as a namespace alongside the existing
-// type-only imports.
+// type-only imports. Upstream 0.51 added `lm` to the named imports.
 if (!code.includes("import * as vscode from 'vscode';")) {
-  const importAnchor = "import { LanguageModelChat, type ChatRequest } from 'vscode';";
+  // Try the 0.51 form first (includes `lm`), then fall back to the older form.
+  const importAnchor = code.includes("import { LanguageModelChat, lm, type ChatRequest } from 'vscode';")
+    ? "import { LanguageModelChat, lm, type ChatRequest } from 'vscode';"
+    : "import { LanguageModelChat, type ChatRequest } from 'vscode';";
   if (!code.includes(importAnchor)) {
     console.warn("WARN: endpointProviderImpl vscode import anchor not found — skipping Patch 48");
     process.exit(0);
   }
-  code = code.replace(importAnchor, "import * as vscode from 'vscode';\nimport { LanguageModelChat, type ChatRequest } from 'vscode';");
+  code = code.replace(importAnchor, "import * as vscode from 'vscode';\n" + importAnchor);
 }
 
-// Step 2: wrap the family-string branch in a try/catch that delegates to
-// `_byokFamilyFallback`.
-const tryAnchor = "if (typeof requestOrFamilyOrModel === 'string') {\n\t\t\tconst modelMetadata = await this._modelFetcher.getChatModelFromFamily(requestOrFamilyOrModel);\n\t\t\treturn this.getOrCreateChatEndpointInstance(modelMetadata!);\n\t\t}";
-const tryReplacement = "if (typeof requestOrFamilyOrModel === 'string') {\n\t\t\ttry {\n\t\t\t\tconst modelMetadata = await this._modelFetcher.getChatModelFromFamily(requestOrFamilyOrModel);\n\t\t\t\treturn this.getOrCreateChatEndpointInstance(modelMetadata!);\n\t\t\t} catch (err) {\n\t\t\t\t// ─── BYOK CUSTOM PATCH: family fallback in BYOK mode ────────────\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t\t\t// Under the fake-token bypass (Patch 1) `_familyMap` /\n\t\t\t\t// `_copilotBaseModel` are never populated, so resolving the\n\t\t\t\t// 'copilot-base' / 'copilot-fast' families throws. Patches\n\t\t\t\t// 15/16/18/45 already cover the well-known callsites, but\n\t\t\t\t// dozens more (codeMapper, search intent, title generator,\n\t\t\t\t// rename suggestions, chat variables, codebase tool calling,\n\t\t\t\t// promptCategorizer, intentDetector, devContainerConfigGenerator,\n\t\t\t\t// commandToConfigConverter, settingsEditorSearchService, etc.)\n\t\t\t\t// still call this method directly. Catch the throw here once\n\t\t\t\t// and substitute a registered BYOK chat endpoint so every\n\t\t\t\t// downstream feature that asks for a generic family can run.\n\t\t\t\tconst fallback = await this._byokFamilyFallback(requestOrFamilyOrModel);\n\t\t\t\tif (fallback) {\n\t\t\t\t\treturn fallback;\n\t\t\t\t}\n\t\t\t\tthrow err;\n\t\t\t\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────\n\t\t\t}\n\t\t}";
-
-if (!code.includes(tryAnchor)) {
-  console.warn("WARN: endpointProviderImpl getChatEndpoint family-branch anchor not found — skipping Patch 48");
-  process.exit(0);
-}
-code = code.replace(tryAnchor, tryReplacement);
+// Step 2 (superseded): getChatModelFromFamily is gone in upstream 0.51+;
+// all string-family routing now goes through _resolveUtilityFamily which
+// PATCH33UTILITY_EOF patches to call _byokFamilyFallback. Skip Step 2.
 
 // Step 3: append `_byokFamilyFallback` helper before the closing `}` of the
 // class. Anchor on the `getAllChatEndpoints` method's closing brace + class
@@ -3885,9 +3578,6 @@ const helperReplacement = "\tasync getAllChatEndpoints(): Promise<IChatEndpoint[
 
 if (!code.includes(helperAnchor)) {
   console.warn("WARN: endpointProviderImpl getAllChatEndpoints anchor not found — skipping Patch 48 helper");
-  // Still write whatever step 2 already produced — partial application is
-  // safe because step 2 calls the helper which simply doesn't exist; tsc
-  // would catch it.
   process.exit(0);
 }
 code = code.replace(helperAnchor, helperReplacement);
@@ -3943,8 +3633,8 @@ const fs = require("fs");
   if (code.includes("BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49)")) {
     console.log("toolCalling.tsx Patch 49 already present, skipping");
   } else {
-    const anchor = "export function sendInvokedToolTelemetry(instantiationService: IInstantiationService, endpoint: IChatEndpoint, telemetry: ITelemetryService, toolName: string, toolResult: LanguageModelToolResult2) {\n\t// Override the token budget to Infinity for telemetry counting to avoid truncation,\n\t// matching the prior behavior with modelMaxPromptTokens: Infinity\n\tconst endpointWithUnlimitedBudget: IChatEndpoint = {\n\t\t...endpoint,\n\t\tmodelMaxPromptTokens: Infinity,\n\t};";
-    const replacement = "export function sendInvokedToolTelemetry(instantiationService: IInstantiationService, endpoint: IChatEndpoint, telemetry: ITelemetryService, toolName: string, toolResult: LanguageModelToolResult2) {\n\t// Override the token budget to Infinity for telemetry counting to avoid truncation,\n\t// matching the prior behavior with modelMaxPromptTokens: Infinity\n\t// ─── BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49) ───\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// See the matching comment in chatVariables.tsx for the full rationale —\n\t// `{ ...endpoint, modelMaxPromptTokens: Infinity }` drops every prototype\n\t// getter on `ExtensionContributedChatEndpoint`, leaving `tokenizer === undefined`\n\t// which kills tool-telemetry rendering with \"Unknown tokenizer: undefined\".\n\tconst endpointWithUnlimitedBudget: IChatEndpoint = endpoint.cloneWithTokenOverride(Infinity);\n\t// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────────────────";
+    const anchor = "export function sendInvokedToolTelemetry(instantiationService: IInstantiationService, endpoint: IChatEndpoint, telemetry: ITelemetryService, toolName: string, toolResult: LanguageModelToolResult2, properties?: InvokedToolTelemetryProperties) {\n\t// Override the token budget to Infinity for telemetry counting to avoid truncation,\n\t// matching the prior behavior with modelMaxPromptTokens: Infinity\n\tconst endpointWithUnlimitedBudget: IChatEndpoint = {\n\t\t...endpoint,\n\t\ttokenizer: endpoint.tokenizer,\n\t\tmodelMaxPromptTokens: Infinity,\n\t};";
+    const replacement = "export function sendInvokedToolTelemetry(instantiationService: IInstantiationService, endpoint: IChatEndpoint, telemetry: ITelemetryService, toolName: string, toolResult: LanguageModelToolResult2, properties?: InvokedToolTelemetryProperties) {\n\t// Override the token budget to Infinity for telemetry counting to avoid truncation,\n\t// matching the prior behavior with modelMaxPromptTokens: Infinity\n\t// ─── BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49) ───\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// See the matching comment in chatVariables.tsx for the full rationale —\n\t// `{ ...endpoint, modelMaxPromptTokens: Infinity }` drops every prototype\n\t// getter on `ExtensionContributedChatEndpoint`, leaving `tokenizer === undefined`\n\t// which kills tool-telemetry rendering with \"Unknown tokenizer: undefined\".\n\tconst endpointWithUnlimitedBudget: IChatEndpoint = endpoint.cloneWithTokenOverride(Infinity);\n\t// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────────────────";
     if (!code.includes(anchor)) {
       console.warn("WARN: toolCalling.tsx anchor not found — skipping Patch 49 (B)");
     } else {
@@ -4253,24 +3943,27 @@ const fs = require("fs");
 const f = "src/extension/byok/node/openAIEndpoint.ts";
 let code = fs.readFileSync(f, "utf8");
 
-if (code.includes("out.reasoning_content = reasoning;")) {
-  console.log("openAIEndpoint.ts reasoning_content re-serialisation already present, skipping");
+// Patch 54: reasoning_content re-serialisation.
+// Upstream 0.51 already sets `out.reasoning_content = text` via the `const text = ...`
+// variable refactor. Check for either form and skip if already present.
+if (code.includes("out.reasoning_content = reasoning;") || code.includes("out.reasoning_content = text;")) {
+  console.log("openAIEndpoint.ts reasoning_content already present (native or patched), skipping Patch 54");
   process.exit(0);
 }
 
-// Upstream anchor: the two-liner inside the callback's `if (data && data.id)` block.
-// The callback body sits at 5 tabs (inside else → const callback → if).
+// Fallback: try to add it if neither form is present (older upstream version).
 const anchor = `\t\t\t\t\tout.cot_id = data.id;
-\t\t\t\t\tout.cot_summary = Array.isArray(data.text) ? data.text.join('') : data.text;`;
+\t\t\t\t\tconst text = Array.isArray(data.text) ? data.text.join('') : data.text;
+\t\t\t\t\tout.cot_summary = text;`;
 
 const replacement = `\t\t\t\t\tout.cot_id = data.id;
-\t\t\t\t\tconst reasoning = Array.isArray(data.text) ? data.text.join('') : data.text;
-\t\t\t\t\tout.cot_summary = reasoning;
+\t\t\t\t\tconst text = Array.isArray(data.text) ? data.text.join('') : data.text;
+\t\t\t\t\tout.cot_summary = text;
 \t\t\t\t\t// ─── BYOK CUSTOM PATCH: reasoning_content re-serialisation (Patch 54) ──
 \t\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
 \t\t\t\t\t// DeepSeek v4 requires reasoning_content on every follow-up assistant
 \t\t\t\t\t// message when in thinking mode; without it the API returns HTTP 400.
-\t\t\t\t\tout.reasoning_content = reasoning;
+\t\t\t\t\tout.reasoning_content = text;
 \t\t\t\t\t// ─── END BYOK CUSTOM PATCH ───────────────────────────────────────────`;
 
 if (code.includes(anchor)) {
@@ -4292,7 +3985,9 @@ const fs = require("fs");
 const f = "src/extension/byok/vscode-node/byokContribution.ts";
 let code = fs.readFileSync(f, "utf8");
 
-if (code.includes("DeepSeekBYOKLMProvider")) {
+// Use a registration-specific sentinel (import alone isn't enough — file imports
+// the provider but doesn't register it until this patch runs).
+if (code.includes("_providers.set(DeepSeekBYOKLMProvider")) {
   console.log("DeepSeek already registered in byokContribution.ts, skipping");
   process.exit(0);
 }
@@ -4306,13 +4001,14 @@ if (!code.includes(importAnchor)) {
 code = code.replace(importAnchor, importAnchor + "\nimport { DeepSeekBYOKLMProvider } from './deepseekProvider';");
 
 // Step 2: register after the XAI provider line.
-const xaiLine = "this._providers.set(XAIBYOKLMProvider.providerId, instantiationService.createInstance(XAIBYOKLMProvider, knownModels[XAIBYOKLMProvider.providerName], this._byokStorageService));";
+// Upstream 0.51 changed to use pre-created `xai` variable instead of inline createInstance.
+const xaiLine = "this._providers.set(XAIBYOKLMProvider.providerId, xai);";
 if (!code.includes(xaiLine)) {
   console.warn("WARN: XAI provider registration anchor not found — skipping Patch 55 step 2");
   fs.writeFileSync(f, code); // still write step 1
   process.exit(0);
 }
-const registration = xaiLine + "\n\t\t\tthis._providers.set(DeepSeekBYOKLMProvider.providerId, instantiationService.createInstance(DeepSeekBYOKLMProvider, knownModels[DeepSeekBYOKLMProvider.providerName], this._byokStorageService));";
+const registration = xaiLine + "\n\t\t// BYOK CUSTOM PATCH: DeepSeek provider registration (Patch 55)\n\t\tthis._providers.set(DeepSeekBYOKLMProvider.providerId, instantiationService.createInstance(DeepSeekBYOKLMProvider, undefined, this._byokStorageService));";
 code = code.replace(xaiLine, registration);
 
 fs.writeFileSync(f, code);
