@@ -17,6 +17,7 @@ import { BYOKModelCapabilities } from '../common/byokProvider';
 import { OpenAIEndpoint } from '../node/openAIEndpoint';
 import { AbstractOpenAICompatibleLMProvider, LanguageModelChatConfiguration, OpenAICompatibleLanguageModelChatInformation } from './abstractLanguageModelChatProvider';
 import { IBYOKStorageService } from './byokStorageService';
+import { byokKnownModelToAPIInfoWithEffort } from './byokModelInfo';
 
 interface OpenRouterModelData {
 	id: string;
@@ -62,6 +63,40 @@ export class OpenRouterLMProvider extends AbstractOpenAICompatibleLMProvider {
 
 	protected override getModelsDiscoveryUrl(modelsBaseUrl: string): string {
 		return `${modelsBaseUrl}/models?supported_parameters=tools`;
+	}
+
+	protected override async getAllModels(silent: boolean, apiKey: string | undefined, configuration: LanguageModelChatConfiguration | undefined): Promise<OpenAICompatibleLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
+		const models = await super.getAllModels(silent, apiKey, configuration);
+		const modelsUrl = this.getModelsBaseUrl(configuration);
+		if (!modelsUrl) {
+			return models;
+		}
+
+		const fusionId = 'openrouter/fusion';
+		if (!this._knownModels) {
+			this._knownModels = {};
+		}
+		if (!this._knownModels[fusionId]) {
+			this._knownModels[fusionId] = {
+				name: 'OpenRouter Fusion (Deliberation Router)',
+				maxInputTokens: 128000,
+				maxOutputTokens: 8192,
+				toolCalling: true,
+				vision: true,
+			};
+		}
+
+		if (!models.some(m => m.id === fusionId)) {
+			const fusionInfo = byokKnownModelToAPIInfoWithEffort(this._name, fusionId, this._knownModels[fusionId]);
+			models.push({
+				...fusionInfo,
+				url: modelsUrl,
+				apiKey,
+				configuration,
+			});
+		}
+
+		return models;
 	}
 
 	protected override resolveModelCapabilities(modelData: unknown): BYOKModelCapabilities | undefined {

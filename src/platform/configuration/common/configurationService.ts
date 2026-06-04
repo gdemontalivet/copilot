@@ -954,6 +954,29 @@ export namespace ConfigKey {
 	export const ByokAutoDefaultModel = defineSetting<string>('chat.byok.auto.defaultModel', ConfigType.Simple, '');
 
 	/**
+	 * BYOK Fusion. Target models to run in parallel for Capability Fusion,
+	 * formatted as an array of `vendor/modelId` strings (e.g.
+	 * `["gemini/gemini-2.5-pro", "anthropic/claude-3-5-sonnet", "openai/gpt-4o"]`).
+	 * If empty, we automatically pick the best available model from up to 3
+	 * different configured providers.
+	 */
+	export const ByokFusionModels = defineSetting<string[]>('chat.byok.fusion.models', ConfigType.Simple, []);
+
+	/**
+	 * BYOK Fusion. The model used to merge candidate responses,
+	 * formatted as `vendor/modelId` (e.g. `gemini/gemini-2.5-pro`).
+	 * If empty, we automatically use the most capable model among the candidates.
+	 */
+	export const ByokFusionMergerModel = defineSetting<string>('chat.byok.fusion.mergerModel', ConfigType.Simple, '');
+
+	/**
+	 * BYOK Fusion. When enabled, `BYOKFusionLMProvider` prepends a
+	 * structured progress indicator to every response showing the status
+	 * of parallel model generations and the final merging step.
+	 */
+	export const ByokFusionShowHint = defineSetting<boolean>('chat.byok.fusion.showHint', ConfigType.Simple, true);
+
+	/**
 	 * BYOK Auto (Patch 38). When enabled, `BYOKAutoLMProvider` prepends a
 	 * one-line italic markdown hint to every response showing the concrete
 	 * `vendor/modelId` the request was routed to. Useful once the B3

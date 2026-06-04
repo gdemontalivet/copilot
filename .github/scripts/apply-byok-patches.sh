@@ -4516,3 +4516,34 @@ if (changed) {
   console.log("Patch 64 (configurationDefaults for BYOK Auto utilities) already present, skipping");
 }
 PATCH64_EOF
+
+# ── Patch 65: Declare byokfusion vendor in package.json ─────────────────────
+# Declares byokfusion under languageModelChatProviders so VS Code registers the
+# BYOKFusionLMProvider successfully.
+node << 'PATCH65_EOF'
+const fs = require("fs");
+const f = "package.json";
+const pkg = JSON.parse(fs.readFileSync(f, "utf8"));
+const contributes = pkg.contributes || {};
+const providers = contributes.languageModelChatProviders;
+if (!Array.isArray(providers)) {
+  console.log("languageModelChatProviders missing, skipping byokfusion registration");
+  process.exit(0);
+}
+
+if (providers.some(p => p && p.vendor === "byokfusion")) {
+  console.log("byokfusion vendor already declared, skipping Patch 65");
+  process.exit(0);
+}
+
+const entry = {
+  vendor: "byokfusion",
+  displayName: "BYOK Fusion"
+};
+providers.push(entry);
+contributes.languageModelChatProviders = providers;
+pkg.contributes = contributes;
+fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+console.log("Patched: byokfusion vendor declared in package.json (Patch 65)");
+PATCH65_EOF
+

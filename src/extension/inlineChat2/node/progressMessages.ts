@@ -94,7 +94,7 @@ export class InlineChatProgressMessages {
 		}
 
 		try {
-			const endpoint = await this._endpointProvider.getChatEndpoint('copilot-utility-small');
+			const endpoint = await this._endpointProvider.getChatEndpoint('copilot-chat');
 
 			const selectedCode = documentContext.selection.isEmpty
 				? undefined

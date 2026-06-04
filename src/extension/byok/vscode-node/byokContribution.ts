@@ -22,6 +22,7 @@ import { GeminiNativeBYOKLMProvider } from './geminiNativeProvider';
 import { OllamaLMProvider } from './ollamaProvider';
 import { OAIBYOKLMProvider } from './openAIProvider';
 import { OpenRouterLMProvider } from './openRouterProvider';
+import { BYOKFusionLMProvider } from './byokFusionProvider';
 import { VertexAnthropicLMProvider } from './vertexAnthropicProvider';
 import { VertexGeminiLMProvider } from './vertexGeminiProvider';
 import { VertexAnthropicLMProvider } from './vertexAnthropicProvider';
@@ -77,6 +78,7 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		this._providers.set(DeepSeekBYOKLMProvider.providerId, instantiationService.createInstance(DeepSeekBYOKLMProvider, undefined, this._byokStorageService));
 		this._providers.set(OAIBYOKLMProvider.providerId, openai);
 		this._providers.set(OpenRouterLMProvider.providerId, instantiationService.createInstance(OpenRouterLMProvider, this._byokStorageService));
+		this._providers.set(BYOKFusionLMProvider.vendorId, instantiationService.createInstance(BYOKFusionLMProvider));
 		this._providers.set(AzureBYOKModelProvider.providerId, instantiationService.createInstance(AzureBYOKModelProvider, this._byokStorageService));
 		this._providers.set(CustomOAIBYOKModelProvider.providerId, instantiationService.createInstance(CustomOAIBYOKModelProvider, this._byokStorageService));
 

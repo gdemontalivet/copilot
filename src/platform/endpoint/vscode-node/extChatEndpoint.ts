@@ -354,7 +354,13 @@ export function convertToApiChatMessage(messages: Raw.ChatMessage[]): Array<vsco
 		} else if (message.role === Raw.ChatRole.Assistant) {
 			if (message.toolCalls) {
 				for (const toolCall of message.toolCalls) {
-					apiContent.push(new vscode.LanguageModelToolCallPart(toolCall.id, toolCall.function.name, JSON.parse(toolCall.function.arguments)));
+					let parsedArgs: any = {};
+					try {
+						parsedArgs = JSON.parse(toolCall.function.arguments || '{}');
+					} catch {
+						// Handle malformed/truncated JSON gracefully
+					}
+					apiContent.push(new vscode.LanguageModelToolCallPart(toolCall.id, toolCall.function.name, parsedArgs));
 				}
 			}
 			apiMessages.push({
