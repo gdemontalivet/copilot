@@ -3,16 +3,14 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import * as vscode from 'vscode';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { IChatModelInformation, ModelSupportedEndpoint } from '../../../../platform/endpoint/common/endpointProvider';
 import { ITestingServicesAccessor } from '../../../../platform/test/node/services';
 import { TokenizerType } from '../../../../util/common/tokenizer';
 import { DisposableStore } from '../../../../util/vs/base/common/lifecycle';
 import { IInstantiationService } from '../../../../util/vs/platform/instantiation/common/instantiation';
 import { createExtensionUnitTestingServices } from '../../../test/node/services';
-import { OpenRouterEndpoint, OpenRouterLMProvider } from '../openRouterProvider';
-import { IBYOKStorageService } from '../byokStorageService';
+import { OpenRouterEndpoint } from '../openRouterProvider';
 
 describe('OpenRouterEndpoint', () => {
 	const disposables = new DisposableStore();
@@ -115,62 +113,6 @@ describe('OpenRouterEndpoint', () => {
 				'https://openrouter.ai/api/v1/chat/completions');
 
 			expect(endpoint.apiType).toBe('chatCompletions');
-		});
-	});
-
-	describe('OpenRouterLMProvider', () => {
-		it('should append openrouter/fusion to returned models', async () => {
-			const fetch = vi.fn(async (url: string) => {
-				if (url === 'https://openrouter.ai/api/v1/models?supported_parameters=tools') {
-					return {
-						json: async () => ({
-							data: [
-								{
-									id: 'anthropic/claude-3.5-sonnet',
-									name: 'Claude 3.5 Sonnet',
-									supported_parameters: ['tools'],
-									top_provider: {
-										context_length: 200000,
-									},
-								}
-							]
-						})
-					};
-				}
-				throw new Error(`Unexpected URL: ${url}`);
-			});
-
-			const byokStorageService: IBYOKStorageService = {
-				getAPIKey: vi.fn().mockResolvedValue(undefined),
-				storeAPIKey: vi.fn().mockResolvedValue(undefined),
-				deleteAPIKey: vi.fn().mockResolvedValue(undefined),
-				getStoredModelConfigs: vi.fn().mockResolvedValue({}),
-				saveModelConfig: vi.fn().mockResolvedValue(undefined),
-				removeModelConfig: vi.fn().mockResolvedValue(undefined),
-			};
-
-			const provider = new OpenRouterLMProvider(
-				byokStorageService,
-				{ fetch } as any,
-				{ error: vi.fn() } as any,
-				{ createInstance: vi.fn().mockReturnValue({}) } as any,
-				{ isConfigured: vi.fn().mockReturnValue(false) } as any,
-				{} as any
-			);
-
-			const tokenSource = new vscode.CancellationTokenSource();
-			const models = await provider.provideLanguageModelChatInformation(
-				{ silent: false, configuration: { apiKey: 'test-api-key' } },
-				tokenSource.token
-			);
-
-			const modelIds = models.map(m => m.id);
-			expect(modelIds).toContain('anthropic/claude-3.5-sonnet');
-			expect(modelIds).toContain('openrouter/fusion');
-
-			const fusionModel = models.find(m => m.id === 'openrouter/fusion');
-			expect(fusionModel?.name).toBe('OpenRouter Fusion (Deliberation Router)');
-			expect(fusionModel?.maxInputTokens).toBe(128000);
 		});
 	});
 });

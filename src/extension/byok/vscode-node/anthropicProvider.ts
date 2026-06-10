@@ -308,6 +308,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		// This handles the case where AsyncLocalStorage context was lost crossing VS Code IPC.
 		const correlationId = (options as { modelOptions?: OTelModelOptions }).modelOptions?._capturingTokenCorrelationId;
 		const capturingToken = correlationId ? retrieveCapturingTokenByCorrelation(correlationId) : undefined;
+		const telemetryTurn = (options as { modelOptions?: OTelModelOptions }).modelOptions?._telemetryTurn;
 
 		// Restore OTel trace context to link spans back to the agent trace
 		const parentTraceContext = (options as { modelOptions?: OTelModelOptions }).modelOptions?._otelTraceContext ?? undefined;
@@ -568,17 +569,6 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				if (result.ttft) {
 					pendingLoggedChatRequest.markTimeToFirstToken(result.ttft);
 				}
-				// ─── BYOK CUSTOM PATCH: emit TokenUsage to context-window ring ───
-				// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).
-				// The LM API host (extChatEndpoint.ts) otherwise hardcodes usage
-				// to zeros, leaving the UI ring indicator empty on every BYOK turn.
-				if (result.usage) {
-					progress.report(new LanguageModelDataPart(
-						new TextEncoder().encode(JSON.stringify(result.usage)),
-						CustomDataPartMimeTypes.TokenUsage
-					));
-				}
-				// ─── END BYOK CUSTOM PATCH ───────────────────────────────
 				const responseDeltas: IResponseDelta[] = wrappedProgress.items.map((i): IResponseDelta => {
 					if (i instanceof LanguageModelTextPart) {
 						return { text: i.value };
@@ -735,6 +725,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 					requestId,
 				}, {
 					totalTokenMax: model.maxInputTokens ?? -1,
+					...(telemetryTurn !== undefined ? { turn: telemetryTurn } : {}),
 					tokenCountMax: model.maxOutputTokens ?? -1,
 					promptTokenCount: result.usage?.prompt_tokens,
 					promptCacheTokenCount: result.usage?.prompt_tokens_details?.cached_tokens,
