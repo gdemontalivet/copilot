@@ -4098,3 +4098,55 @@ fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
 console.log("Patched: byokfusion vendor declared in package.json (Patch 65)");
 PATCH65_EOF
 
+
+# Patch 33c: BYOK stub fallback in endpointProviderImpl._resolveUtilityFamily.
+#
+# In BYOK mode the fake-token bypass leaves CAPI's model list empty, so both
+# CopilotUtilityChatEndpoint and CopilotUtilitySmallChatEndpoint throw when
+# their resolver calls getChatModelFromCapiFamily(). Every consumer of
+# getChatEndpoint('copilot-utility[-small]') propagates this throw to
+# the chat turn handler, producing "Unable to resolve chat model" for EVERY message.
+node << 'PATCH33UTILITY_EOF'
+const fs = require("fs");
+const f = "src/extension/prompt/vscode-node/endpointProviderImpl.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: utility family BYOK fallback")) {
+  console.log("endpointProviderImpl utility family BYOK fallback already present, skipping");
+  process.exit(0);
+}
+
+const startStr = "\tprivate async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {";
+const endStr = "\t\tconst modelMetadata = await this._modelFetcher.getChatModelFromCapiFamily(family);\n\t\treturn this.getOrCreateChatEndpointInstance(modelMetadata);\n\t}";
+
+const startIndex = code.indexOf(startStr);
+const endIndex = code.indexOf(endStr) + endStr.length;
+
+if (startIndex === -1 || code.indexOf(endStr) === -1) {
+  console.warn("WARN: endpointProviderImpl _resolveUtilityFamily anchor not found — skipping patch 33c");
+  process.exit(0);
+}
+
+const methodAnchor = code.substring(startIndex, endIndex);
+
+const methodReplacement = methodAnchor.replace(
+  "\t\tif (family === 'copilot-utility-small') {",
+  "\t// ─── BYOK CUSTOM PATCH: utility family BYOK fallback ────────────────────────\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// _resolveUtilityOverride (just above) handles BYOK via chat.utilityModel →\n\t// byokauto/byok-auto (Patch 64). This try/catch is a last-resort safety net\n\t// for the brief startup window before BYOKAuto finishes async model\n\t// registration — prevents \"Unable to resolve chat model\" errors on the first\n\t// few turns after extension reload. Falls back to _byokFamilyFallback (Patch 48).\n\t\tif (family !== 'copilot-utility-small' && family !== 'copilot-utility') {\n\t\t\tthrow new Error(`Unrecognized chat endpoint family ${family}`);\n\t\t}\n\t\tif (family === 'copilot-utility-small') {"
+)
+.replace(
+  "\t\t\treturn CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService);",
+  "\t\t\ttry { return await CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through */ }"
+)
+.replace(
+  "\t\t} else if (family === 'copilot-utility') {\n\t\t\treturn CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService);\n\t\t}",
+  "\t\t}\n\t\ttry { return await CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through to BYOK fallback */ }\n\t\tthis._logService.trace(`[BYOK] copilot-utility family: Copilot resolvers unavailable, trying BYOK fallback`);\n\t\tconst fallback = await this._byokFamilyFallback(family);\n\t\tif (fallback) { return fallback; }\n\t\tthrow new Error(`[BYOK] No model available for utility family '${family}' — configure a BYOK provider`);\n\t}\n\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────"
+)
+.replace(
+  "\n\t\tconst modelMetadata = await this._modelFetcher.getChatModelFromCapiFamily(family);\n\t\treturn this.getOrCreateChatEndpointInstance(modelMetadata);\n\t}",
+  ""
+);
+
+code = code.replace(methodAnchor, methodReplacement);
+fs.writeFileSync(f, code);
+console.log("Patched: endpointProviderImpl utility family BYOK fallback");
+PATCH33UTILITY_EOF
