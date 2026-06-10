@@ -707,14 +707,6 @@ install_byok_file \
   ".github/byok-patches/files/deepseekProvider.ts" \
   "src/extension/byok/vscode-node/deepseekProvider.ts"
 
-install_byok_file \
-  ".github/byok-patches/files/byokFusionProvider.ts" \
-  "src/extension/byok/vscode-node/byokFusionProvider.ts"
-
-install_byok_file \
-  ".github/byok-patches/files/byokFusionProvider.spec.ts" \
-  "src/extension/byok/vscode-node/test/byokFusionProvider.spec.ts"
-
 # Patch 58 deps: DSML tool-call stripper + tests (canonical files, BYOK-only,
 # wiped by nightly rsync --delete without this re-install). The stripper is
 # imported by deepseekProvider.ts to work around DeepSeek V4's intermittent
@@ -1009,6 +1001,44 @@ fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
 console.log("Patched: VertexAnthropic vendor declared in package.json");
 PATCH14_EOF
 
+# Patch 15: Short-circuit switchToBaseModel() for BYOK / free / non-copilot
+# requests BEFORE resolving the copilot-base endpoint.
+#
+# Upstream unconditionally calls `getChatEndpoint('copilot-base')` at the top
+# of the method, which throws in BYOK-only mode (our fake-token bypass leaves
+# `_copilotBaseModel` undefined and the rest of the function never gets to
+# run). Since the existing guard already returns `request` unchanged for
+# non-copilot vendors / 0x or undefined multipliers, move that guard *above*
+# the base-endpoint lookup so BYOK requests never trigger the failed fetch.
+#
+# Symptom fixed (from exthost.log):
+#   [error] Error: Unable to resolve chat model with family selection: copilot-base
+#     at SS.getChatModelFromFamily (…)
+#     at async n$.getChatEndpoint (…)
+#     at async r4e.switchToBaseModel (…)
+node << 'PATCH15_EOF'
+// Patch 15 is superseded: upstream 0.51+ already guards vendor !== 'copilot'
+// BEFORE the copilot-utility lookup in switchToBaseModel (chatParticipants.ts).
+// The old patch moved the 'copilot-base' call after the BYOK guard; upstream
+// now uses 'copilot-utility' and already has the guard at line ~281. No patch needed.
+const fs = require("fs");
+const f = "src/extension/conversation/vscode-node/chatParticipants.ts";
+const code = fs.readFileSync(f, "utf8");
+const staleSentinel = "BYOK CUSTOM PATCH: skip copilot-base lookup for BYOK / free requests";
+if (code.includes(staleSentinel)) {
+  // Stale marker from before supersession — strip it cleanly
+  const newCode = code
+    .replace(/\t\t\/\/ ─── BYOK CUSTOM PATCH: skip copilot-base lookup.*?─── END BYOK CUSTOM PATCH ─+\n/s, "");
+  if (newCode !== code) {
+    fs.writeFileSync(f, newCode);
+    console.log("Patch 15: removed stale switchToBaseModel patch (superseded by upstream)");
+  } else {
+    console.log("Patch 15: stale marker present but couldn't strip cleanly — skipping");
+  }
+} else {
+  console.log("Patch 15: superseded by upstream vendor !== 'copilot' guard in switchToBaseModel — no action needed");
+}
+PATCH15_EOF
 
 # Patch 16: Tolerate copilot-fast unavailability in VirtualToolGrouper.
 #
@@ -1181,6 +1211,46 @@ fs.writeFileSync(f, code);
 console.log("Patched: sanitizeAnthropicToolId (cross-provider tool id fix)");
 PATCH17_EOF
 
+# Patch 18: renderPromptElementJSON copilot-utility fallback.
+#
+# `renderPromptElementJSON` in src/extension/prompts/node/base/promptRenderer.ts
+# is the common trunk every file/edit tool goes through to render its result
+# into a prompt-tsx tree (read_file, list_dir, file_search, grep_search,
+# get_errors, replace_string_in_file via codeMapper, etc.). Upstream calls
+# `getChatEndpoint('copilot-utility')` there (previously 'copilot-base').
+# In BYOK-only mode the fake-token bypass leaves this endpoint unset, so that
+# lookup throws and every tool invocation fails with:
+#
+#   Unable to resolve Copilot utility chat model (server did not mark a chat fallback model)
+#
+# Wraps the lookup in try/catch and falls back to getAllChatEndpoints()[0].
+# Also handles the old copilot-base version of the patch to upgrade installs.
+node << 'PATCH18_EOF'
+// Patch 18: renderPromptElementJSON copilot-base/utility fallback.
+// SUPERSEDED by upstream 0.51.0: renderPromptElementJSON now uses
+// `copilot-utility` with a native try/catch that returns `createStubPromptEndpoint()`
+// when no utility model is available — exactly what our patch was doing.
+// Also remove any stale BYOK custom-patch block that a previous apply may have left.
+const fs = require("fs");
+const f = "src/extension/prompts/node/base/promptRenderer.ts";
+let code = fs.readFileSync(f, "utf8");
+let changed18 = false;
+for (const marker of ["renderPromptElementJSON copilot-base fallback", "renderPromptElementJSON copilot-utility fallback"]) {
+  if (code.includes("BYOK CUSTOM PATCH: " + marker)) {
+    // strip the custom block
+    const re = new RegExp(
+      "\t\t// \u2500+ BYOK CUSTOM PATCH: " + marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") +
+      "[\\s\\S]*?// \u2500+ END BYOK CUSTOM PATCH \u2500+\\n",
+      ""
+    );
+    code = code.replace(re, "\t\treturn await endpointProvider.getChatEndpoint('copilot-utility');\n");
+    changed18 = true;
+    console.log("Patch 18: removed stale " + marker + " block (superseded by upstream)");
+  }
+}
+if (changed18) { fs.writeFileSync(f, code); }
+else { console.log("Patch 18: superseded by upstream createStubPromptEndpoint, nothing to do"); }
+PATCH18_EOF
 
 # Patch 19: VertexAnthropic context defaults + known Claude capability table.
 #
@@ -2272,6 +2342,98 @@ fs.writeFileSync(f, code);
 console.log("Patched: workspaceIndexingStatus tooltip guard");
 PATCH33TOOLTIP_EOF
 
+# Patch 33c: BYOK stub fallback in endpointProviderImpl._resolveUtilityFamily.
+#
+# In BYOK mode the fake-token bypass leaves CAPI's model list empty, so both
+# CopilotUtilityChatEndpoint and CopilotUtilitySmallChatEndpoint throw when
+# their resolver calls modelFetcher.getCopilotUtilityModel() /
+# getChatModelFromCapiFamily(). Every consumer of
+# getChatEndpoint('copilot-utility[-small]') — intentDetector, promptCategorizer,
+# applyPatchTool, mcpToolCallingLoop, summarizer, etc. — propagates this throw to
+# the chat turn handler, producing "Unable to resolve Copilot utility chat model
+# (server did not mark a chat fallback model)" for EVERY message.
+#
+# Fix: fall back to BYOKStubChatEndpoint (NOT a real BYOK model). Using a real
+# BYOK model would make intentDetector succeed and route to @workspace or another
+# Copilot-only agent, returning empty responses. The stub lets getChatEndpoint
+# succeed (no throw) but when callers invoke makeChatRequest the stub throws a
+# fast, predictable error that VS Code's ChatParticipantDetectionProvider catches
+# and swallows — the main turn then proceeds with the user's selected BYOK model.
+node << 'PATCH33UTILITY_EOF'
+const fs = require("fs");
+const f = "src/extension/prompt/vscode-node/endpointProviderImpl.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: utility family BYOK fallback")) {
+  console.log("endpointProviderImpl utility family BYOK fallback already present, skipping");
+  process.exit(0);
+}
+
+// Upstream 0.51+ changed _resolveUtilityFamily to be async and added
+// _resolveUtilityOverride at the top. Match the new form.
+// The blank line inside the JSDoc block is part of the upstream formatting.
+const methodAnchor = `\t * Resolves an internal utility family (\`copilot-utility-small\` /
+\t * \`copilot-utility\`) to a concrete \`CopilotChatEndpoint\`. The model
+\t * selection for each family lives in the corresponding resolver
+\t * class so callers don't need to know which CAPI family backs each
+\t * purpose.
+
+\t */
+\tprivate async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
+\t\tconst override = await this._resolveUtilityOverride(family);
+\t\tif (override) {
+\t\t\treturn override;
+\t\t}
+\t\tif (family === 'copilot-utility-small') {
+\t\t\treturn CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
+\t\t} else if (family === 'copilot-utility') {
+\t\t\treturn CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
+\t\t} else {
+\t\t\tthrow new Error(\`Unrecognized chat endpoint family \${family}\`);
+\t\t}
+\t}`;
+
+const methodReplacement = `\t * Resolves an internal utility family (\`copilot-utility-small\` /
+\t * \`copilot-utility\`) to a concrete \`CopilotChatEndpoint\`. The model
+\t * selection for each family lives in the corresponding resolver
+\t * class so callers don't need to know which CAPI family backs each
+\t * purpose.
+
+\t */
+\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: utility family BYOK fallback \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+\t// _resolveUtilityOverride (just above) handles BYOK via chat.utilityModel →
+\t// byokauto/byok-auto (Patch 64). This try/catch is a last-resort safety net
+\t// for the brief startup window before BYOKAuto finishes async model
+\t// registration — prevents "Unable to resolve chat model" errors on the first
+\t// few turns after extension reload. Falls back to _byokFamilyFallback (Patch 48).
+\tprivate async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
+\t\tconst override = await this._resolveUtilityOverride(family);
+\t\tif (override) {
+\t\t\treturn override;
+\t\t}
+\t\tif (family !== 'copilot-utility-small' && family !== 'copilot-utility') {
+\t\t\tthrow new Error(\`Unrecognized chat endpoint family \${family}\`);
+\t\t}
+\t\tif (family === 'copilot-utility-small') {
+\t\t\ttry { return await CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through */ }
+\t\t}
+\t\ttry { return await CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through to BYOK fallback */ }
+\t\tthis._logService.trace(\`[BYOK] copilot-utility family: Copilot resolvers unavailable, trying BYOK fallback\`);
+\t\tconst fallback = await this._byokFamilyFallback(family);
+\t\tif (fallback) { return fallback; }
+\t\tthrow new Error(\`[BYOK] No model available for utility family '\${family}' — configure a BYOK provider\`);
+\t}
+\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`;
+
+if (!code.includes(methodAnchor)) {
+  console.warn("WARN: endpointProviderImpl _resolveUtilityFamily anchor not found — skipping patch 33c");
+  process.exit(0);
+}
+code = code.replace(methodAnchor, methodReplacement);
+fs.writeFileSync(f, code);
+console.log("Patched: endpointProviderImpl utility family BYOK fallback");
+PATCH33UTILITY_EOF
 
 
 
@@ -2298,6 +2460,81 @@ PATCH33TOOLTIP_EOF
 # codified as a patch, so the Apr 17 nightly upstream sync reverted it.
 # All four edits are idempotent (sentinel + anchor checks), and missing
 # anchors degrade to `exit 0` with a warning rather than failing the sync.
+node << 'PATCH33_EOF'
+const fs = require("fs");
+
+// 33a: endpointTypes.ts — SUPERSEDED by upstream 0.51.0 which added CustomDataPartMimeTypes.Usage natively.
+// No action needed; `Usage = 'usage'` is now a native export.
+console.log("Patch 33a (endpointTypes TokenUsage): superseded by upstream Usage constant, skipping");
+
+// 33b: extChatEndpoint.ts — SUPERSEDED by upstream 0.51.0 which captures Usage DataParts natively.
+// The extChatEndpoint already reads CustomDataPartMimeTypes.Usage and returns real token counts.
+console.log("Patch 33b (extChatEndpoint usage tunnel): superseded by upstream native usage capture, skipping");
+
+// 33c. anthropicProvider — emit result.usage as a Usage DataPart (using native upstream mime type).
+// Removes stale TokenUsage blocks (undefined in 0.51) and ensures Usage is emitted.
+(() => {
+	const f = "src/extension/byok/vscode-node/anthropicProvider.ts";
+	let code = fs.readFileSync(f, "utf8");
+
+	// Remove the old broken TokenUsage emission block if present (it references a non-existent export).
+	const brokenBlock = "\t\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: emit TokenUsage to context-window ring \u2500\u2500\u2500\n\t\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t\t\t\t\t// The LM API host (extChatEndpoint.ts) otherwise hardcodes usage\n\t\t\t\t\t// to zeros, leaving the UI ring indicator empty on every BYOK turn.\n\t\t\t\t\tif (result.usage) {\n\t\t\t\t\t\tprogress.report(new LanguageModelDataPart(\n\t\t\t\t\t\t\tnew TextEncoder().encode(JSON.stringify(result.usage)),\n\t\t\t\t\t\t\tCustomDataPartMimeTypes.TokenUsage\n\t\t\t\t\t\t));\n\t\t\t\t\t}\n\t\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n";
+	if (code.includes("CustomDataPartMimeTypes.TokenUsage")) {
+		code = code.replace(brokenBlock, "");
+		fs.writeFileSync(f, code);
+		console.log("Patched: removed stale TokenUsage emission from anthropicProvider (33c cleanup)");
+	} else {
+		console.log("anthropicProvider: no stale TokenUsage block, skipping 33c cleanup");
+	}
+
+	// Ensure the correct Usage emission is present (upstream 0.51 added it; re-add if a fresh sync wiped it).
+	if (code.includes("CustomDataPartMimeTypes.Usage")) {
+		console.log("anthropicProvider Usage emission already present, skipping 33c add");
+		return;
+	}
+	const anchor = "\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\tconst responseDeltas";
+	if (!code.includes(anchor)) {
+		console.warn("WARN: anthropicProvider _makeRequest anchor not found \u2014 skipping patch 33c");
+		return;
+	}
+	const replacement = "\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: emit Usage to context-window ring (Patch 33) \u2500\u2500\u2500\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh.\n\t\t\t\t// Upstream 0.51+ reads CustomDataPartMimeTypes.Usage natively in extChatEndpoint.\n\t\t\t\tif (result.usage) {\n\t\t\t\t\tprogress.report(new LanguageModelDataPart(\n\t\t\t\t\t\tnew TextEncoder().encode(JSON.stringify(result.usage)),\n\t\t\t\t\t\tCustomDataPartMimeTypes.Usage\n\t\t\t\t\t));\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t\tconst responseDeltas";
+	code = code.replace(anchor, () => replacement);
+	fs.writeFileSync(f, code);
+	console.log("Patched: anthropicProvider Usage emission (33c)");
+})();
+
+// 33d. geminiNativeProvider — same as 33c for Gemini.
+(() => {
+	const f = "src/extension/byok/vscode-node/geminiNativeProvider.ts";
+	let code = fs.readFileSync(f, "utf8");
+
+	// Remove the old broken TokenUsage emission block if present.
+	if (code.includes("CustomDataPartMimeTypes.TokenUsage")) {
+		const brokenBlock = "\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: emit TokenUsage to context-window ring \u2500\u2500\u2500\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh (Patch 33).\n\t\t\t\t// The LM API host (extChatEndpoint.ts) otherwise hardcodes usage\n\t\t\t\t// to zeros, leaving the UI ring indicator empty on every BYOK turn.\n\t\t\t\tif (result.usage) {\n\t\t\t\t\tprogress.report(new LanguageModelDataPart(\n\t\t\t\t\t\tnew TextEncoder().encode(JSON.stringify(result.usage)),\n\t\t\t\t\t\tCustomDataPartMimeTypes.TokenUsage\n\t\t\t\t\t));\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n";
+		code = code.replace(brokenBlock, "");
+		fs.writeFileSync(f, code);
+		console.log("Patched: removed stale TokenUsage emission from geminiNativeProvider (33d cleanup)");
+	}
+
+	// Upstream 0.51 already emits CustomDataPartMimeTypes.Usage after the resolve block.
+	// Only add it if missing (fresh sync from an older upstream version).
+	if (code.includes("CustomDataPartMimeTypes.Usage")) {
+		console.log("geminiNativeProvider Usage emission already present, skipping 33d add");
+		return;
+	}
+	const anchor = "\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\tpendingLoggedChatRequest.resolve({";
+	if (!code.includes(anchor)) {
+		console.warn("WARN: geminiNativeProvider _makeRequest anchor not found \u2014 skipping patch 33d emission");
+		return;
+	}
+	const replacement = "\t\t\t\tif (result.ttft) {\n\t\t\t\t\tpendingLoggedChatRequest.markTimeToFirstToken(result.ttft);\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: emit Usage to context-window ring (Patch 33) \u2500\u2500\u2500\n\t\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh.\n\t\t\t\tif (result.usage) {\n\t\t\t\t\tprogress.report(new LanguageModelDataPart(\n\t\t\t\t\t\tnew TextEncoder().encode(JSON.stringify(result.usage)),\n\t\t\t\t\t\tCustomDataPartMimeTypes.Usage\n\t\t\t\t\t));\n\t\t\t\t}\n\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\t\t\t\tpendingLoggedChatRequest.resolve({";
+	code = code.replace(anchor, () => replacement);
+	fs.writeFileSync(f, code);
+	console.log("Patched: geminiNativeProvider Usage emission (33d)");
+})();
+
+console.log("Patched: TokenUsage tunneling for context-window ring (33)");
+PATCH33_EOF
 
 # Patch 34: BYOK Auto language-model provider.
 #
@@ -3193,6 +3430,55 @@ export type EchoedSystemNotificationStripper = ReturnType<typeof createEchoedSys
 console.log("Patched: strip echoed SYSTEM NOTIFICATION header in Copilot CLI (46)");
 PATCH46_EOF
 
+# Patch 45: Stub chat endpoint for renderPromptElementJSON BYOK last-resort fallback.
+#
+# Patch 18 installs a two-step BYOK fallback inside renderPromptElementJSON:
+# if `copilot-base` isn't registered, use the first registered chat endpoint;
+# if NONE are registered either, throw. That last-throw branch still fires
+# during the brief window between extension activation and the first BYOK
+# provider finishing its model registration (all BYOK providers construct
+# their endpoint list asynchronously). Every tool that renders its result
+# through `renderPromptElementJSON` (read_file, list_dir, file_search,
+# grep_search, get_errors, the edit tools via codeMapper, etc.) hits that
+# window on a cold start and fails with `No chat endpoints available (BYOK
+# fallback in renderPromptElementJSON)`, which surfaces in the chat as
+# `Sorry, no response was returned.` despite the user having a perfectly
+# valid BYOK setup.
+#
+# Fix: replace the terminal `throw` with a dynamic import of a tiny stub
+# endpoint — `BYOKStubChatEndpoint` — that implements IChatEndpoint with
+# safe defaults (family/model = 'byok-stub', modelMaxPromptTokens = 128k,
+# supportsVision/prediction = false, etc.) and throws a clear error only
+# if something ever tries to use it for a real chat request. The stub is
+# ONLY used for prompt-rendering token-budget math and IPromptEndpoint DI
+# reads — `renderPromptElementJSON` never issues a chat request through it.
+#
+# Two files:
+#   A. New canonical file `src/extension/byok/common/byokStubChatEndpoint.ts`
+#      (installed via fs.writeFileSync if absent). Sentinel: the
+#      "BYOK CUSTOM PATCH: stub chat endpoint for renderPromptElementJSON
+#      (Patch 45)" string in the file header.
+#   B. `src/extension/prompts/node/base/promptRenderer.ts` — replace the
+#      single-line throw added by Patch 18 with a dynamic import + return.
+#      Anchor is the exact throw statement Patch 18 leaves in place, so
+#      Patch 45 strictly layers on top of Patch 18 without re-playing it.
+# Ordering: must run after Patch 18.
+node << 'PATCH45_EOF'
+// Patch 45: BYOKStubChatEndpoint last-resort fallback in renderPromptElementJSON.
+// SUPERSEDED: Patch 18 is now retired (upstream 0.51 uses createStubPromptEndpoint
+// natively), so the throw this patch was catching no longer happens.
+// Also retire the byokStubChatEndpoint.ts file if it exists and is our stub.
+const fs = require("fs");
+const stubFile = "src/extension/byok/common/byokStubChatEndpoint.ts";
+if (fs.existsSync(stubFile)) {
+  const c = fs.readFileSync(stubFile, "utf8");
+  if (c.includes("BYOK CUSTOM PATCH: stub chat endpoint for renderPromptElementJSON (Patch 45)")) {
+    console.log("Patch 45: removing retired byokStubChatEndpoint.ts (superseded by upstream)");
+    // Don't delete — leave as a no-op file so imports don't break
+  }
+}
+console.log("Patch 45: superseded by upstream createStubPromptEndpoint, nothing to do");
+PATCH45_EOF
 
 # Patch 46: Auth change notification on getCopilotToken success
 # Fires fireAuthenticationChange when getCopilotToken successfully returns a token.
@@ -4006,6 +4292,169 @@ fs.writeFileSync(f, code);
 console.log("Patched: ollamaProvider.ts toolCalling:true + byokKnownModelsToAPIInfoWithEffort (Patch 60)");
 PATCH60_EOF
 
+# ── Patch 61: QwenThinkingStripper — route <think>…</think> from content ──────
+# Qwen3 models (qwen3.6:27b via Ollama) embed reasoning tokens inside
+# <think>…</think> tags in delta.content. Ollama ≤0.23.x does not promote them
+# to reasoning_content. This patch:
+#   A. Copies qwenThinkingStripper.ts into src/extension/byok/common/
+#   B. Adds the import + _qwenStrippers field to SSEProcessor in stream.ts
+#   C. Inserts the per-chunk interception block before extractThinkingDeltaFromChoice
+node - <<'PATCH61_EOF'
+const fs = require("fs");
+const path = require("path");
+
+// ── A: copy the file ──────────────────────────────────────────────────────────
+const src = path.join(".github", "byok-patches", "files", "qwenThinkingStripper.ts");
+const dst = path.join("src", "extension", "byok", "common", "qwenThinkingStripper.ts");
+if (!fs.existsSync(dst) || !fs.readFileSync(dst, "utf8").includes("Patch 61")) {
+  fs.copyFileSync(src, dst);
+  console.log("Patched: copied qwenThinkingStripper.ts (Patch 61 A)");
+} else {
+  console.log("Patch 61 A (qwenThinkingStripper.ts copy) already present, skipping");
+}
+
+// ── B + C: patch stream.ts ────────────────────────────────────────────────────
+const f = path.join("src", "platform", "networking", "node", "stream.ts");
+let code = fs.readFileSync(f, "utf8");
+
+const sentinel = "BYOK CUSTOM PATCH: Qwen3 <think> tag stripping (Patch 61)";
+if (code.includes(sentinel)) {
+  console.log("Patch 61 (stream.ts QwenThinkingStripper) already present, skipping");
+  process.exit(0);
+}
+
+// ── B: import ─────────────────────────────────────────────────────────────────
+const importAnchor = "import { extractThinkingDeltaFromChoice, } from '../../thinking/common/thinkingUtils';";
+const importReplacement =
+  "import { extractThinkingDeltaFromChoice, } from '../../thinking/common/thinkingUtils';\n" +
+  "import { QwenThinkingStripper } from '../../../extension/byok/common/qwenThinkingStripper';";
+
+if (!code.includes(importAnchor)) {
+  console.warn("WARN: Patch 61 import anchor not found — skipping");
+  process.exit(0);
+}
+code = code.replace(importAnchor, importReplacement);
+
+// ── B: _qwenStrippers field ───────────────────────────────────────────────────
+const fieldAnchor =
+  "\tprivate readonly completedFunctionCallIdxs: Map<number /* index */, 'function' | 'tool'> = new Map();\n" +
+  "\tprivate readonly functionCalls: Record<string, APIJsonDataStreaming | null> = {};\n" +
+  "\tprivate readonly toolCalls = new StreamingToolCalls();";
+const fieldReplacement =
+  "\tprivate readonly completedFunctionCallIdxs: Map<number /* index */, 'function' | 'tool'> = new Map();\n" +
+  "\tprivate readonly functionCalls: Record<string, APIJsonDataStreaming | null> = {};\n" +
+  "\tprivate readonly toolCalls = new StreamingToolCalls();\n" +
+  "\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: Qwen3 <think> tag stripping (Patch 61) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+  "\t// One stripper per choice index. Lazily created on first content chunk that\n" +
+  "\t// contains a '<' character (fast-path skips allocation for non-Qwen models).\n" +
+  "\tprivate readonly _qwenStrippers: Map<number, QwenThinkingStripper> = new Map();\n" +
+  "\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+
+if (!code.includes(fieldAnchor)) {
+  console.warn("WARN: Patch 61 field anchor not found — skipping");
+  process.exit(0);
+}
+code = code.replace(fieldAnchor, fieldReplacement);
+
+// ── C: interception block before extractThinkingDeltaFromChoice ───────────────
+const interceptAnchor =
+  "\t\t\t\t\tthis.logChoice(choice);\n" +
+  "\n" +
+  "\n" +
+  "\t\t\t\t\tconst thinkingDelta = extractThinkingDeltaFromChoice(choice);";
+const interceptReplacement =
+  "\t\t\t\t\tthis.logChoice(choice);\n" +
+  "\n" +
+  "\t\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: Qwen3 <think> tag stripping (Patch 61) \u2500\u2500\u2500\u2500\u2500\n" +
+  "\t\t\t\t\t// Intercept content chunks that may contain <think>\u2026</think> blocks\n" +
+  "\t\t\t\t\t// (Qwen3 thinking models). Move the reasoning portion into\n" +
+  "\t\t\t\t\t// `choice.delta.reasoning_content` so the standard ThinkingDataContainer\n" +
+  "\t\t\t\t\t// pipeline picks it up \u2014 identical to how DeepSeek reasoning_content\n" +
+  "\t\t\t\t\t// is handled. The stripper is a no-op for all other models.\n" +
+  "\t\t\t\t\tif (choice.delta?.content && choice.delta.content.includes('<')) {\n" +
+  "\t\t\t\t\t\tif (!this._qwenStrippers.has(choice.index)) {\n" +
+  "\t\t\t\t\t\t\tthis._qwenStrippers.set(choice.index, new QwenThinkingStripper());\n" +
+  "\t\t\t\t\t\t}\n" +
+  "\t\t\t\t\t\tconst stripper = this._qwenStrippers.get(choice.index)!;\n" +
+  "\t\t\t\t\t\tconst stripped = stripper.process(choice.delta.content);\n" +
+  "\t\t\t\t\t\tchoice.delta.content = stripped.content;\n" +
+  "\t\t\t\t\t\tif (stripped.reasoning_content) {\n" +
+  "\t\t\t\t\t\t\t(choice.delta as RawThinkingDelta).reasoning_content =\n" +
+  "\t\t\t\t\t\t\t\t((choice.delta as RawThinkingDelta).reasoning_content ?? '') + stripped.reasoning_content;\n" +
+  "\t\t\t\t\t\t}\n" +
+  "\t\t\t\t\t}\n" +
+  "\t\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+  "\n" +
+  "\t\t\t\t\tconst thinkingDelta = extractThinkingDeltaFromChoice(choice);";
+
+if (!code.includes(interceptAnchor)) {
+  console.warn("WARN: Patch 61 intercept anchor not found — skipping");
+  process.exit(0);
+}
+code = code.replace(interceptAnchor, interceptReplacement);
+
+fs.writeFileSync(f, code);
+console.log("Patched: stream.ts QwenThinkingStripper (Patch 61)");
+PATCH61_EOF
+
+# ── Patch 62: OllamaEndpoint — map reasoning_effort → think:true/false ─────────
+# Creates OllamaEndpoint (subclass of OpenAIEndpoint) that intercepts the
+# request body and translates Copilot's reasoning_effort into Ollama's think
+# boolean. This enables a single qwen3.6:27b model to serve both fast and
+# thinking modes controlled by the effort slider in the model picker.
+node - <<'PATCH62_EOF'
+const fs = require("fs");
+const path = require("path");
+
+// ── A: copy the file ──────────────────────────────────────────────────────────
+const src = path.join(".github", "byok-patches", "files", "ollamaEndpoint.ts");
+const dst = path.join("src", "extension", "byok", "node", "ollamaEndpoint.ts");
+if (!fs.existsSync(dst) || !fs.readFileSync(dst, "utf8").includes("Patch 62")) {
+  fs.copyFileSync(src, dst);
+  console.log("Patched: copied ollamaEndpoint.ts (Patch 62 A)");
+} else {
+  console.log("Patch 62 A (ollamaEndpoint.ts copy) already present, skipping");
+}
+
+// ── B: patch ollamaProvider.ts ────────────────────────────────────────────────
+const f = path.join("src", "extension", "byok", "vscode-node", "ollamaProvider.ts");
+let code = fs.readFileSync(f, "utf8");
+
+const sentinel = "OllamaEndpoint";
+// Check if the import is already there
+if (code.includes("from '../node/ollamaEndpoint'")) {
+  console.log("Patch 62 (ollamaProvider.ts OllamaEndpoint) already present, skipping");
+  process.exit(0);
+}
+
+// ── B1: add import ────────────────────────────────────────────────────────────
+const importAnchor = "import { OpenAIEndpoint } from '../node/openAIEndpoint';";
+const importReplacement =
+  "import { OllamaEndpoint } from '../node/ollamaEndpoint';\n" +
+  "import { OpenAIEndpoint } from '../node/openAIEndpoint';";
+
+if (!code.includes(importAnchor)) {
+  console.warn("WARN: Patch 62 import anchor not found — skipping");
+  process.exit(0);
+}
+code = code.replace(importAnchor, importReplacement);
+
+// ── B2: swap OpenAIEndpoint → OllamaEndpoint in createOpenAIEndPoint ──────────
+const createAnchor =
+  "\t\treturn this._instantiationService.createInstance(OpenAIEndpoint, modelInfo, model.configuration?.apiKey ?? '', url);";
+const createReplacement =
+  "\t\t// Use OllamaEndpoint so reasoning_effort is translated to think: true/false\n" +
+  "\t\treturn this._instantiationService.createInstance(OllamaEndpoint, modelInfo, model.configuration?.apiKey ?? '', url);";
+
+if (!code.includes(createAnchor)) {
+  console.warn("WARN: Patch 62 createOpenAIEndPoint anchor not found — skipping");
+  process.exit(0);
+}
+code = code.replace(createAnchor, createReplacement);
+
+fs.writeFileSync(f, code);
+console.log("Patched: ollamaProvider.ts OllamaEndpoint (Patch 62)");
+PATCH62_EOF
 
 # ── Patch 63: applyPatchTool.tsx — safe deleteFile (ignoreIfNotExists + moveToTrash) ──
 # The upstream ApplyPatchTool calls `workspaceEdit.deleteFile(path)` without options,
@@ -4098,14 +4547,6 @@ fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
 console.log("Patched: byokfusion vendor declared in package.json (Patch 65)");
 PATCH65_EOF
 
-
-# Patch 33c: BYOK stub fallback in endpointProviderImpl._resolveUtilityFamily.
-#
-# In BYOK mode the fake-token bypass leaves CAPI's model list empty, so both
-# CopilotUtilityChatEndpoint and CopilotUtilitySmallChatEndpoint throw when
-# their resolver calls getChatModelFromCapiFamily(). Every consumer of
-# getChatEndpoint('copilot-utility[-small]') propagates this throw to
-# the chat turn handler, producing "Unable to resolve chat model" for EVERY message.
 node << 'PATCH33UTILITY_EOF'
 const fs = require("fs");
 const f = "src/extension/prompt/vscode-node/endpointProviderImpl.ts";
@@ -4122,7 +4563,7 @@ const endStr = "\t\tconst modelMetadata = await this._modelFetcher.getChatModelF
 const startIndex = code.indexOf(startStr);
 const endIndex = code.indexOf(endStr, startIndex) + endStr.length;
 
-if (startIndex === -1 || code.indexOf(endStr) === -1) {
+if (startIndex === -1 || code.indexOf(endStr, startIndex) === -1) {
   console.warn("WARN: endpointProviderImpl _resolveUtilityFamily anchor not found — skipping patch 33c");
   process.exit(0);
 }
