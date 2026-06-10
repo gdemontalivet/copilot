@@ -4120,7 +4120,7 @@ const startStr = "\tprivate async _resolveUtilityFamily(family: ChatEndpointFami
 const endStr = "\t\tconst modelMetadata = await this._modelFetcher.getChatModelFromCapiFamily(family);\n\t\treturn this.getOrCreateChatEndpointInstance(modelMetadata);\n\t}";
 
 const startIndex = code.indexOf(startStr);
-const endIndex = code.indexOf(endStr) + endStr.length;
+const endIndex = code.indexOf(endStr, startIndex) + endStr.length;
 
 if (startIndex === -1 || code.indexOf(endStr) === -1) {
   console.warn("WARN: endpointProviderImpl _resolveUtilityFamily anchor not found — skipping patch 33c");

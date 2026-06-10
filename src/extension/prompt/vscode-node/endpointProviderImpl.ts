@@ -166,14 +166,26 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 		if (override) {
 			return override;
 		}
-		if (family === 'copilot-utility-small') {
-			return CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
-		} else if (family === 'copilot-utility') {
-			return CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
+	// ─── BYOK CUSTOM PATCH: utility family BYOK fallback ────────────────────────
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// _resolveUtilityOverride (just above) handles BYOK via chat.utilityModel →
+	// byokauto/byok-auto (Patch 64). This try/catch is a last-resort safety net
+	// for the brief startup window before BYOKAuto finishes async model
+	// registration — prevents "Unable to resolve chat model" errors on the first
+	// few turns after extension reload. Falls back to _byokFamilyFallback (Patch 48).
+		if (family !== 'copilot-utility-small' && family !== 'copilot-utility') {
+			throw new Error(`Unrecognized chat endpoint family ${family}`);
 		}
-		const modelMetadata = await this._modelFetcher.getChatModelFromCapiFamily(family);
-		return this.getOrCreateChatEndpointInstance(modelMetadata);
+		if (family === 'copilot-utility-small') {
+			try { return await CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through */ }
+		}
+		try { return await CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through to BYOK fallback */ }
+		this._logService.trace(`[BYOK] copilot-utility family: Copilot resolvers unavailable, trying BYOK fallback`);
+		const fallback = await this._byokFamilyFallback(family);
+		if (fallback) { return fallback; }
+		throw new Error(`[BYOK] No model available for utility family '${family}' — configure a BYOK provider`);
 	}
+	// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
 
 	/**
 	 * Resolves the user's `chat.utilityModel` / `chat.utilitySmallModel`
