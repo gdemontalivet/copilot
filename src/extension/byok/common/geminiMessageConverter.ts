@@ -47,13 +47,22 @@ function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageMod
 			// Note: We don't emit thinking content to Gemini as it's already been processed
 			// The signature will be attached to the next function call
 		} else if (part instanceof LanguageModelToolCallPart) {
+			// BYOK CUSTOM PATCH: extract thought signature from callId if it was embedded
+			let signature = pendingSignature;
+			let callId = part.callId;
+			if (callId && callId.includes('|')) {
+				const parts = callId.split('|');
+				signature = parts.slice(1).join('|');
+				callId = parts[0];
+			}
+
 			const functionCallPart: Part = {
 				functionCall: {
 					name: part.name,
 					args: part.input as Record<string, unknown> || {}
 				},
 				// Attach pending thought signature if available (required by Gemini 3 for function calling)
-				...(pendingSignature ? { thoughtSignature: pendingSignature } : {})
+				...(signature ? { thoughtSignature: signature } : {})
 			};
 
 			if (pendingSignature) {

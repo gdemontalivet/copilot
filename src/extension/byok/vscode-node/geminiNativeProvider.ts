@@ -598,7 +598,10 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 							} else if (part.functionCall && part.functionCall.name) {
 								// Gemini 3 includes thought signatures for function calling
 								// If we have a pending signature, emit it as a thinking part with metadata.signature
+								let callId = generateUuid();
 								if (pendingThinkingSignature) {
+									// BYOK CUSTOM PATCH: embed the signature in the callId to survive VS Code transcript truncation
+									callId = `${callId}|${pendingThinkingSignature}`;
 									const thinkingPart = new LanguageModelThinkingPart('', undefined, { signature: pendingThinkingSignature });
 									progress.report(thinkingPart);
 									pendingThinkingSignature = undefined;
@@ -608,7 +611,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 									ttfte = Date.now() - issuedTime;
 								}
 								progress.report(new LanguageModelToolCallPart(
-									generateUuid(),
+									callId,
 									part.functionCall.name,
 									part.functionCall.args || {}
 								));

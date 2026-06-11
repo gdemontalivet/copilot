@@ -4174,7 +4174,7 @@ fs.writeFileSync(f, code);
 console.log("Patched: geminiNativeProvider.ts gemini allowlist relaxation (Patch 59)");
 PATCH59_EOF
 
-# ── Patch 60: Ollama toolCalling:true + byokKnownModelsToAPIInfoWithEffort ──────
+# ── Patch 66: Ollama toolCalling:true + byokKnownModelsToAPIInfoWithEffort ──────
 # The upstream `_getOllamaModelInfo` uses `.capabilities.includes('tools')` to
 # set toolCalling, but many popular Ollama models (llama3, qwen, mistral, gemma)
 # work fine with tools yet don't advertise 'tools' in /api/show capabilities[].
@@ -4184,14 +4184,14 @@ PATCH59_EOF
 # (adds the "Thinking Effort" schema to models that support reasoning effort) and
 # fixes the import lines accordingly.  Also adds a defensive two-step architecture
 # extraction and surfaces the original error in _checkOllamaVersion failures.
-node << 'PATCH60_EOF'
+node << 'PATCH66_EOF'
 const fs = require("fs");
 const path = require("path");
 const f = path.join("src", "extension", "byok", "vscode-node", "ollamaProvider.ts");
 let code = fs.readFileSync(f, "utf8");
 
-if (code.includes("BYOK CUSTOM PATCH: force toolCalling:true for Ollama models (Patch 60)")) {
-  console.log("Patch 60 (Ollama toolCalling:true) already present, skipping");
+if (code.includes("BYOK CUSTOM PATCH: force toolCalling:true for Ollama models (Patch 66)")) {
+  console.log("Patch 66 (Ollama toolCalling:true) already present, skipping");
   process.exit(0);
 }
 
@@ -4205,11 +4205,11 @@ const importReplacement =
 
 if (code.includes(importAnchor)) {
   code = code.replace(importAnchor, importReplacement);
-  console.log("Patch 60 sub-A: swapped import");
+  console.log("Patch 66 sub-A: swapped import");
 } else {
   // Upstream already split the import (byokKnownModelsToAPIInfoWithEffort comes from byokModelInfo).
   // Sub-A is a no-op but we must continue — B and D still need to be applied.
-  console.log("Patch 60 sub-A: import already split upstream, skipping sub-A only");
+  console.log("Patch 66 sub-A: import already split upstream, skipping sub-A only");
 }
 
 // ── Sub-replacement B: _getOllamaModelInfo — fix architecture + vision + toolCalling ──
@@ -4225,7 +4225,7 @@ const modelInfoAnchor =
   "\t\t};";
 
 const modelInfoReplacement =
-  "\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: safe architecture extraction (Patch 60) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+  "\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: safe architecture extraction (Patch 66) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
   "\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n" +
   "\t\t// Upstream uses a single expression that crashes when model_info is present\n" +
   "\t\t// but 'general.architecture' is missing; this two-step form is safe.\n" +
@@ -4237,7 +4237,7 @@ const modelInfoReplacement =
   "\t\t\tname: modelInfo?.model_info?.['general.basename'] ?? modelInfo?.remote_model ?? modelId,\n" +
   "\t\t\tmaxOutputTokens: outputTokens,\n" +
   "\t\t\tmaxInputTokens: contextWindow - outputTokens,\n" +
-  "\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: force toolCalling:true for Ollama models (Patch 60) \u2500\u2500\n" +
+  "\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: force toolCalling:true for Ollama models (Patch 66) \u2500\u2500\n" +
   "\t\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n" +
   "\t\t\t// VS Code's chat picker requires capabilities.toolCalling:true to list a model.\n" +
   "\t\t\t// Ollama's /api/show only reports 'tools' in capabilities[] for models that\n" +
@@ -4250,7 +4250,7 @@ const modelInfoReplacement =
   "\t\t};";
 
 if (!code.includes(modelInfoAnchor)) {
-  console.warn("WARN: Patch 60 _getOllamaModelInfo anchor not found — skipping sub-B (upstream may have changed)");
+  console.warn("WARN: Patch 66 _getOllamaModelInfo anchor not found — skipping sub-B (upstream may have changed)");
 } else {
   code = code.replace(modelInfoAnchor, modelInfoReplacement);
 }
@@ -4260,7 +4260,7 @@ const returnAnchor = "\t\treturn byokKnownModelsToAPIInfo(this._name, this._know
 const returnReplacement = "\t\treturn byokKnownModelsToAPIInfoWithEffort(this._name, this._knownModels).map(model => ({";
 
 if (!code.includes(returnAnchor)) {
-  console.warn("WARN: Patch 60 getAllModels return anchor not found — skipping sub-step C");
+  console.warn("WARN: Patch 66 getAllModels return anchor not found — skipping sub-step C");
 } else {
   code = code.replace(returnAnchor, returnReplacement);
 }
@@ -4283,14 +4283,14 @@ const versionErrReplacement =
   "\t\t\t);";
 
 if (!code.includes(versionErrAnchor)) {
-  console.warn("WARN: Patch 60 _checkOllamaVersion error anchor not found — skipping sub-step D");
+  console.warn("WARN: Patch 66 _checkOllamaVersion error anchor not found — skipping sub-step D");
 } else {
   code = code.replace(versionErrAnchor, versionErrReplacement);
 }
 
 fs.writeFileSync(f, code);
-console.log("Patched: ollamaProvider.ts toolCalling:true + byokKnownModelsToAPIInfoWithEffort (Patch 60)");
-PATCH60_EOF
+console.log("Patched: ollamaProvider.ts toolCalling:true + byokKnownModelsToAPIInfoWithEffort (Patch 66)");
+PATCH66_EOF
 
 # ── Patch 61: QwenThinkingStripper — route <think>…</think> from content ──────
 # Qwen3 models (qwen3.6:27b via Ollama) embed reasoning tokens inside
@@ -4591,3 +4591,54 @@ code = code.replace(methodAnchor, methodReplacement);
 fs.writeFileSync(f, code);
 console.log("Patched: endpointProviderImpl utility family BYOK fallback");
 PATCH33UTILITY_EOF
+
+# -----------------------------------------------------------------------------
+# Patch 66: Survive thought_signature across VS Code transcript history truncation
+# -----------------------------------------------------------------------------
+# Gemini 3 requires passing `thoughtSignature` back if it was generated in the
+# previous turn's functionCall. VS Code extensions API emits it via an empty
+# LanguageModelThinkingPart, but the VS Code extension host drops empty parts 
+# from the transcript history. 
+# Fix: Embed `thoughtSignature` into the `LanguageModelToolCallPart`'s `callId`
+# which is an opaque string to VS Code, ensuring it survives perfectly.
+node << 'PATCH66_EOF'
+const fs = require("fs");
+
+const fileGeminiNative = "src/extension/byok/vscode-node/geminiNativeProvider.ts";
+let codeNative = fs.readFileSync(fileGeminiNative, "utf8");
+
+if (codeNative.includes("BYOK CUSTOM PATCH: embed the signature in the callId to survive")) {
+  console.log("Patch 66 (thoughtSignature survival in geminiNativeProvider) already present, skipping");
+} else {
+  const nativeAnchor = "\t\t\t\t\t\t\t\t// Gemini 3 includes thought signatures for function calling\n\t\t\t\t\t\t\t\t// If we have a pending signature, emit it as a thinking part with metadata.signature\n\t\t\t\t\t\t\t\tif (pendingThinkingSignature) {\n\t\t\t\t\t\t\t\t\tconst thinkingPart = new LanguageModelThinkingPart('', undefined, { signature: pendingThinkingSignature });\n\t\t\t\t\t\t\t\t\tprogress.report(thinkingPart);\n\t\t\t\t\t\t\t\t\tpendingThinkingSignature = undefined;\n\t\t\t\t\t\t\t\t}\n\n\t\t\t\t\t\t\t\tif (ttfte === undefined) {\n\t\t\t\t\t\t\t\t\tttfte = Date.now() - issuedTime;\n\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\tprogress.report(new LanguageModelToolCallPart(\n\t\t\t\t\t\t\t\t\tgenerateUuid(),\n\t\t\t\t\t\t\t\t\tpart.functionCall.name,\n\t\t\t\t\t\t\t\t\tpart.functionCall.args || {}\n\t\t\t\t\t\t\t\t));";
+
+  const nativeReplacement = "\t\t\t\t\t\t\t\t// Gemini 3 includes thought signatures for function calling\n\t\t\t\t\t\t\t\t// If we have a pending signature, emit it as a thinking part with metadata.signature\n\t\t\t\t\t\t\t\tlet callId = generateUuid();\n\t\t\t\t\t\t\t\tif (pendingThinkingSignature) {\n\t\t\t\t\t\t\t\t\t// BYOK CUSTOM PATCH: embed the signature in the callId to survive VS Code transcript truncation\n\t\t\t\t\t\t\t\t\tcallId = `${callId}|${pendingThinkingSignature}`;\n\t\t\t\t\t\t\t\t\tconst thinkingPart = new LanguageModelThinkingPart('', undefined, { signature: pendingThinkingSignature });\n\t\t\t\t\t\t\t\t\tprogress.report(thinkingPart);\n\t\t\t\t\t\t\t\t\tpendingThinkingSignature = undefined;\n\t\t\t\t\t\t\t\t}\n\n\t\t\t\t\t\t\t\tif (ttfte === undefined) {\n\t\t\t\t\t\t\t\t\tttfte = Date.now() - issuedTime;\n\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\tprogress.report(new LanguageModelToolCallPart(\n\t\t\t\t\t\t\t\t\tcallId,\n\t\t\t\t\t\t\t\t\tpart.functionCall.name,\n\t\t\t\t\t\t\t\t\tpart.functionCall.args || {}\n\t\t\t\t\t\t\t\t));";
+
+  if (!codeNative.includes(nativeAnchor)) {
+    console.warn("WARN: geminiNativeProvider thoughtSignature anchor not found — skipping Patch 66 (native)");
+  } else {
+    codeNative = codeNative.replace(nativeAnchor, () => nativeReplacement);
+    fs.writeFileSync(fileGeminiNative, codeNative);
+    console.log("Patched: geminiNativeProvider thoughtSignature survival (Patch 66)");
+  }
+}
+
+const fileConverter = "src/extension/byok/common/geminiMessageConverter.ts";
+let codeConverter = fs.readFileSync(fileConverter, "utf8");
+
+if (codeConverter.includes("BYOK CUSTOM PATCH: extract thought signature from callId if it was embedded")) {
+  console.log("Patch 66 (thoughtSignature survival in geminiMessageConverter) already present, skipping");
+} else {
+  const converterAnchor = "\t\t} else if (part instanceof LanguageModelToolCallPart) {\n\t\t\tconst functionCallPart: Part = {\n\t\t\t\tfunctionCall: {\n\t\t\t\t\tname: part.name,\n\t\t\t\t\targs: part.input as Record<string, unknown> || {}\n\t\t\t\t},\n\t\t\t\t// Attach pending thought signature if available (required by Gemini 3 for function calling)\n\t\t\t\t...(pendingSignature ? { thoughtSignature: pendingSignature } : {})\n\t\t\t};\n\n\t\t\tif (pendingSignature) {\n\t\t\t\tpendingSignature = undefined; // Clear after use\n\t\t\t}\n\n\t\t\tconvertedContent.push(functionCallPart);";
+
+  const converterReplacement = "\t\t} else if (part instanceof LanguageModelToolCallPart) {\n\t\t\t// BYOK CUSTOM PATCH: extract thought signature from callId if it was embedded\n\t\t\tlet signature = pendingSignature;\n\t\t\tlet callId = part.callId;\n\t\t\tif (callId && callId.includes('|')) {\n\t\t\t\tconst parts = callId.split('|');\n\t\t\t\tsignature = parts.slice(1).join('|');\n\t\t\t\tcallId = parts[0];\n\t\t\t}\n\n\t\t\tconst functionCallPart: Part = {\n\t\t\t\tfunctionCall: {\n\t\t\t\t\tname: part.name,\n\t\t\t\t\targs: part.input as Record<string, unknown> || {}\n\t\t\t\t},\n\t\t\t\t// Attach pending thought signature if available (required by Gemini 3 for function calling)\n\t\t\t\t...(signature ? { thoughtSignature: signature } : {})\n\t\t\t};\n\n\t\t\tif (pendingSignature) {\n\t\t\t\tpendingSignature = undefined; // Clear after use\n\t\t\t}\n\n\t\t\tconvertedContent.push(functionCallPart);";
+
+  if (!codeConverter.includes(converterAnchor)) {
+    console.warn("WARN: geminiMessageConverter thoughtSignature anchor not found — skipping Patch 66 (converter)");
+  } else {
+    codeConverter = codeConverter.replace(converterAnchor, () => converterReplacement);
+    fs.writeFileSync(fileConverter, codeConverter);
+    console.log("Patched: geminiMessageConverter thoughtSignature survival (Patch 66)");
+  }
+}
+PATCH66_EOF
