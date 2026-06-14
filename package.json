@@ -2,7 +2,7 @@
 	"name": "copilot-chat",
 	"displayName": "Copilot Full BYOK",
 	"description": "AI chat features powered by Copilot — Full Bring Your Own Key edition",
-	"version": "0.53.6",
+	"version": "0.53.3",
 	"build": "1",
 	"completionsCoreVersion": "1.378.1799",
 	"internalLargeStorageAriaKey": "ec712b3202c5462fb6877acae7f1f9d7-c19ad55e-3e3c-4f99-984b-827f6d95bd9e-6917",
@@ -4084,6 +4084,15 @@
 						],
 						"description": "%github.copilot.config.alternateGeminiModelFPrompt.enabled%"
 					},
+					"github.copilot.chat.gemini35FlashReducedToolUsePrompt.enabled": {
+						"type": "boolean",
+						"default": false,
+						"tags": [
+							"experimental",
+							"onExp"
+						],
+						"description": "%github.copilot.config.gemini35FlashReducedToolUsePrompt.enabled%"
+					},
 					"github.copilot.chat.anthropic.contextEditing.mode": {
 						"type": "string",
 						"default": "off",
@@ -6739,9 +6748,10 @@
 				"inputPlaceholder": "Run local tasks with Claude, type `#` for adding context",
 				"order": 3,
 				"description": "%github.copilot.session.providerDescription.claude%",
-				"when": "config.github.copilot.chat.claudeAgent.enabled",
+				"when": "config.github.copilot.chat.claudeAgent.enabled && ((isSessionsWindow && !config.chat.agents.claude.preferAgentHost) || (!isSessionsWindow && !config.chat.editor.claude.preferAgentHost))",
 				"canDelegate": true,
 				"requiresCustomModels": true,
+				"supportsAutoModel": false,
 				"capabilities": {
 					"supportsFileAttachments": true,
 					"supportsImageAttachments": true
@@ -6801,6 +6811,7 @@
 				"canDelegate": true,
 				"description": "%github.copilot.session.providerDescription.background%",
 				"when": "config.github.copilot.chat.backgroundAgent.enabled",
+				"supportsAutoModel": true,
 				"capabilities": {
 					"supportsFileAttachments": true,
 					"supportsProblemAttachments": true,
@@ -7148,7 +7159,7 @@
 		"@anthropic-ai/claude-agent-sdk": "0.2.112",
 		"@anthropic-ai/sdk": "^0.82.0",
 		"@github/blackbird-external-ingest-utils": "^0.3.0",
-		"@github/copilot": "^1.0.60",
+		"@github/copilot": "^1.0.61",
 		"@google/genai": "^1.22.0",
 		"@humanwhocodes/gitignore-to-minimatch": "1.0.2",
 		"@microsoft/tiktokenizer": "^1.0.10",

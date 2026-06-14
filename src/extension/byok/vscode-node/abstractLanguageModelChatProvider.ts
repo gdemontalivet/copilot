@@ -72,7 +72,7 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 		const cached = this._byokModelListCache.get(cacheKey);
 		if (cached && cached.expiresAt > now) {
 			if ('models' in cached) {
-				return cached.models.map(model => ({ ...model, apiKey, configuration }));
+				return cached.models.map(model => ({ ...model, isBYOK: true, apiKey, configuration }));
 			}
 			throw cached.error;
 		}
@@ -103,6 +103,7 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 
 		return models.map(model => ({
 			...model,
+			isBYOK: true,
 			apiKey,
 			configuration
 		}));

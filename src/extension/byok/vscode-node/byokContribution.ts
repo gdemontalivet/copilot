@@ -25,6 +25,7 @@ import { OpenRouterLMProvider } from './openRouterProvider';
 import { VertexAnthropicLMProvider } from './vertexAnthropicProvider';
 import { VertexGeminiLMProvider } from './vertexGeminiProvider';
 import { XAIBYOKLMProvider } from './xAIProvider';
+import { BYOKFusionLMProvider } from './byokFusionProvider';
 import { DeepSeekBYOKLMProvider } from './deepseekProvider';
 
 export class BYOKContrib extends Disposable implements IExtensionContribution {
@@ -71,6 +72,7 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		// the Gemini public-API apiKey.
 		this._providers.set(VertexGeminiLMProvider.providerName.toLowerCase(), instantiationService.createInstance(VertexGeminiLMProvider, undefined, this._byokStorageService));
 		this._providers.set(XAIBYOKLMProvider.providerId, xai);
+		this._providers.set(BYOKFusionLMProvider.vendorId, instantiationService.createInstance(BYOKFusionLMProvider));
 		// BYOK CUSTOM PATCH: DeepSeek provider registration (Patch 55)
 		this._providers.set(DeepSeekBYOKLMProvider.providerId, instantiationService.createInstance(DeepSeekBYOKLMProvider, undefined, this._byokStorageService));
 		this._providers.set(OAIBYOKLMProvider.providerId, openai);
