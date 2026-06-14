@@ -352,6 +352,7 @@ Applies the minimal set of patches that must survive every upstream sync:
 1. Fake token in `copilotTokenManager.ts`
 2. `getPrimaryType` fix in `geminiFunctionDeclarationConverter.ts`
 3. Extension rename + version bump in `package.json`
+*Warning: When modifying or reviewing patches that completely replace upstream methods (like `AbstractLanguageModelChatProvider.provideLanguageModelChatInformation`), always check upstream changes to ensure new properties (like `isBYOK: true`) are preserved.*
 
 **Deployment flow:**
 1. Push to `main` (or merge a sync-upstream PR)
