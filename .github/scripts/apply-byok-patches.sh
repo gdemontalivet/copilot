@@ -4685,3 +4685,33 @@ if (!code.includes("byokFusionProvider")) {
 }
 PATCH_FUSION_EOF
 
+
+
+# ── Patch 67: Force preferAgentHost to false for BYOK ──────────────────────
+# Ensures that the Extension Host (EH) implementation of Claude — which
+# our BYOK patches intercept — is always preferred over the Agent Host (AH)
+# implementation introduced in VS Code 1.121+.
+node << 'PATCH67_EOF'
+const fs = require("fs");
+const f = "package.json";
+const pkg = JSON.parse(fs.readFileSync(f, "utf8"));
+pkg.contributes = pkg.contributes || {};
+pkg.contributes.configurationDefaults = pkg.contributes.configurationDefaults || {};
+
+let changed = false;
+if (pkg.contributes.configurationDefaults["chat.agents.claude.preferAgentHost"] !== false) {
+  pkg.contributes.configurationDefaults["chat.agents.claude.preferAgentHost"] = false;
+  changed = true;
+}
+if (pkg.contributes.configurationDefaults["chat.editor.claude.preferAgentHost"] !== false) {
+  pkg.contributes.configurationDefaults["chat.editor.claude.preferAgentHost"] = false;
+  changed = true;
+}
+
+if (changed) {
+  fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
+  console.log("Patched: package.json configurationDefaults for preferAgentHost (Patch 67)");
+} else {
+  console.log("Patch 67 (configurationDefaults for preferAgentHost) already present, skipping");
+}
+PATCH67_EOF
