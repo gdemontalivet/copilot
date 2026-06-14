@@ -312,7 +312,15 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				}));
 
 				if (result.usage) {
-					wrappedProgress.report(new LanguageModelDataPart(new TextEncoder().encode(JSON.stringify(result.usage)), CustomDataPartMimeTypes.Usage));
+					try {
+						wrappedProgress.report(new LanguageModelDataPart(new TextEncoder().encode(JSON.stringify(result.usage)), CustomDataPartMimeTypes.Usage));
+					} catch (e) {
+						// Ignore "Response stream has been closed" errors that occur when the user
+						// closes the chat or the stream completes before usage is fully reported.
+						if (!(e instanceof Error) || !e.message.toLowerCase().includes('response stream has been closed')) {
+							throw e;
+						}
+					}
 				}
 
 				// Enrich OTel span with usage data from the Gemini response

@@ -599,7 +599,13 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 					});
 				}
 				if (result.usage) {
-					wrappedProgress.report(new LanguageModelDataPart(new TextEncoder().encode(JSON.stringify(result.usage)), CustomDataPartMimeTypes.Usage));
+					try {
+						wrappedProgress.report(new LanguageModelDataPart(new TextEncoder().encode(JSON.stringify(result.usage)), CustomDataPartMimeTypes.Usage));
+					} catch (e) {
+						if (!(e instanceof Error) || !e.message.toLowerCase().includes('response stream has been closed')) {
+							throw e;
+						}
+					}
 				}
 				pendingLoggedChatRequest.resolve({
 					type: ChatFetchResponseType.Success,
