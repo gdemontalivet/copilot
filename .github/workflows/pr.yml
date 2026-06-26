@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           lfs: true
 
@@ -28,7 +28,7 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Restore build cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         id: build-cache
         with:
           key: build_cache-${{ hashFiles('build/.cachesalt', 'package-lock.json') }}
@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:
@@ -72,7 +72,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           lfs: true
 
@@ -96,7 +96,7 @@ jobs:
         run: pip install setuptools
 
       - name: Restore build cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         id: build-cache
         with:
           key: build_cache-${{ hashFiles('build/.cachesalt', 'package-lock.json') }}
@@ -162,7 +162,7 @@ jobs:
     runs-on: windows-2022
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           lfs: true
 
@@ -186,7 +186,7 @@ jobs:
         run: pip install setuptools
 
       - name: Restore build cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         id: build-cache
         with:
           key: windows-build_cache-${{ hashFiles('build/.cachesalt', 'package-lock.json') }}

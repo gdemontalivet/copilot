@@ -14,7 +14,7 @@ jobs:
     runs-on: [ self-hosted, 1ES.Pool=1es-vscode-ubuntu-22.04-x64 ]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           lfs: true
 
@@ -24,7 +24,7 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: build-cache
         with:
           key: build_cache-${{ hashFiles('build/.cachesalt', 'package-lock.json') }}
@@ -48,7 +48,7 @@ jobs:
     runs-on: [ self-hosted, 1ES.Pool=1es-vscode-windows-2022-x64 ]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           lfs: true
 
@@ -64,7 +64,7 @@ jobs:
           architecture: 'x64'
 
       - name: Restore build cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: build-cache
         with:
           key: windows-build_cache-${{ hashFiles('build/.cachesalt', 'package-lock.json') }}
