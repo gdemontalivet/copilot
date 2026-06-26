@@ -17,7 +17,7 @@ jobs:
     runs-on: vscode-large-runners
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           lfs: true
 
@@ -41,7 +41,7 @@ jobs:
         run: pip install setuptools
 
       - name: Restore build cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         id: build-cache
         with:
           key: build_cache-${{ hashFiles('build/.cachesalt', 'package-lock.json') }}
