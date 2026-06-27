@@ -24,6 +24,7 @@ import { OAIBYOKLMProvider } from './openAIProvider';
 import { OpenRouterLMProvider } from './openRouterProvider';
 import { VertexAnthropicLMProvider } from './vertexAnthropicProvider';
 import { VertexGeminiLMProvider } from './vertexGeminiProvider';
+import { GeminiADCLMProvider } from './geminiADCProvider';
 import { XAIBYOKLMProvider } from './xAIProvider';
 import { BYOKFusionLMProvider } from './byokFusionProvider';
 import { DeepSeekBYOKLMProvider } from './deepseekProvider';
@@ -71,6 +72,12 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		// independent API key / quota state. Auth is SA-JSON or pre-minted Bearer token, not
 		// the Gemini public-API apiKey.
 		this._providers.set(VertexGeminiLMProvider.providerName.toLowerCase(), instantiationService.createInstance(VertexGeminiLMProvider, undefined, this._byokStorageService));
+		// ─── BYOK CUSTOM PATCH: Gemini API with ADC / OAuth (Patch 68) ───────────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Google deprecated raw API-key access for GCP-authenticated accounts;
+		// this provider authenticates via ADC (google-auth-library) instead.
+		this._providers.set(GeminiADCLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiADCLMProvider, undefined, this._byokStorageService));
+		// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────
 		this._providers.set(XAIBYOKLMProvider.providerId, xai);
 		this._providers.set(BYOKFusionLMProvider.vendorId, instantiationService.createInstance(BYOKFusionLMProvider));
 		// BYOK CUSTOM PATCH: DeepSeek provider registration (Patch 55)
