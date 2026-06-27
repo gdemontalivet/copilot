@@ -2,7 +2,7 @@
 	"name": "copilot-chat",
 	"displayName": "Copilot Full BYOK",
 	"description": "AI chat features powered by Copilot — Full Bring Your Own Key edition",
-	"version": "0.55.14",
+	"version": "0.55.17",
 	"build": "1",
 	"completionsCoreVersion": "1.378.1799",
 	"internalLargeStorageAriaKey": "ec712b3202c5462fb6877acae7f1f9d7-c19ad55e-3e3c-4f99-984b-827f6d95bd9e-6917",
@@ -1844,6 +1844,24 @@
 							"description": "Controls both authentication and billing.\n  • Empty — use system Application Default Credentials (gcloud auth application-default login).\n  • Paste a Service Account JSON key — same format as Vertex Gemini; quota project is auto-detected.\n  • A GCP project ID (e.g. my-project-123) — system ADC is used for auth and that project is billed."
 						}
 					}
+				}
+			},
+			{
+				"vendor": "geminiia",
+				"displayName": "Gemini (Interactions API)",
+				"description": "Google Gemini via the Interactions API — accesses future-only models (e.g. gemini-3.5-flash). Uses stateful server-side context; compaction patches do not apply.",
+				"configuration": {
+					"properties": {
+						"apiKey": {
+							"type": "string",
+							"secret": true,
+							"title": "Google AI Studio API Key",
+							"description": "Same key as the regular Gemini vendor. The Interactions API uses the same Google AI Studio credentials."
+						}
+					},
+					"required": [
+						"apiKey"
+					]
 				}
 			},
 			{
@@ -7248,7 +7266,7 @@
 		"@anthropic-ai/sdk": "^0.82.0",
 		"@github/blackbird-external-ingest-utils": "^0.3.0",
 		"@github/copilot": "^1.0.65",
-		"@google/genai": "^1.22.0",
+		"@google/genai": "^2.10.0",
 		"@humanwhocodes/gitignore-to-minimatch": "1.0.2",
 		"@microsoft/tiktokenizer": "^1.0.10",
 		"@modelcontextprotocol/sdk": "^1.25.2",

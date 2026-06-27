@@ -4680,8 +4680,8 @@ PATCH33UTILITY_EOF
 # -----------------------------------------------------------------------------
 # Gemini 3 requires passing `thoughtSignature` back if it was generated in the
 # previous turn's functionCall. VS Code extensions API emits it via an empty
-# LanguageModelThinkingPart, but the VS Code extension host drops empty parts 
-# from the transcript history. 
+# LanguageModelThinkingPart, but the VS Code extension host drops empty parts
+# from the transcript history.
 # Fix: Embed `thoughtSignature` into the `LanguageModelToolCallPart`'s `callId`
 # which is an opaque string to VS Code, ensuring it survives perfectly.
 node << 'PATCH66_EOF'

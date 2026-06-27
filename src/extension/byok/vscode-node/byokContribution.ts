@@ -25,6 +25,7 @@ import { OpenRouterLMProvider } from './openRouterProvider';
 import { VertexAnthropicLMProvider } from './vertexAnthropicProvider';
 import { VertexGeminiLMProvider } from './vertexGeminiProvider';
 import { GeminiADCLMProvider } from './geminiADCProvider';
+import { GeminiInteractionLMProvider } from './geminiInteractionProvider';
 import { XAIBYOKLMProvider } from './xAIProvider';
 import { BYOKFusionLMProvider } from './byokFusionProvider';
 import { DeepSeekBYOKLMProvider } from './deepseekProvider';
@@ -77,6 +78,12 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		// Google deprecated raw API-key access for GCP-authenticated accounts;
 		// this provider authenticates via ADC (google-auth-library) instead.
 		this._providers.set(GeminiADCLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiADCLMProvider, undefined, this._byokStorageService));
+		// ─── BYOK CUSTOM PATCH: Gemini Interactions API provider (Patch 60/69) ────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Accesses Interactions-API-only models (e.g. gemini-3.5-flash) via the
+		// stateful interactions.create() endpoint.
+		this._providers.set(GeminiInteractionLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiInteractionLMProvider, undefined, this._byokStorageService));
+		// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────
 		// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────
 		this._providers.set(XAIBYOKLMProvider.providerId, xai);
 		this._providers.set(BYOKFusionLMProvider.vendorId, instantiationService.createInstance(BYOKFusionLMProvider));
