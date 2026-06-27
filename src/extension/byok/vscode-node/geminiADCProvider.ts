@@ -274,6 +274,13 @@ export class GeminiADCLMProvider extends GeminiNativeBYOKLMProvider {
 		_configuration?: LanguageModelChatConfiguration,
 	): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
 		const rawKey = apiKey ?? '';
+
+		// Wrap the entire discovery in a try/catch so that a broken credential
+		// (wrong scope, expired SA key, no ADC configured) never crashes VS Code's
+		// model-picker refresh loop.  When silent=true VS Code is polling in the
+		// background — returning an empty list is far better than throwing, which
+		// locks the picker and prevents the user from deleting the group or
+		// switching to another model.
 		let token: string;
 		try {
 			token = await this._refreshToken(rawKey);
@@ -316,19 +323,60 @@ export class GeminiADCLMProvider extends GeminiNativeBYOKLMProvider {
 			) as ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[];
 
 		} catch (err) {
-			let error: Error;
-			if (err instanceof ApiError) {
-				let message = err.message;
-				try {
-					message = (JSON.parse(message) as { error?: { message?: string } }).error?.message ?? message;
-				} catch { /* not JSON */ }
-				error = new Error(message, { cause: err });
-			} else {
-				error = new Error(err instanceof Error ? err.message : String(err));
+			// Silent mode: never propagate — just return empty so the picker stays usable.
+			if (silent) {
+				this._logService.warn(`[GeminiADC] Suppressed model-listing error (silent mode): ${err instanceof Error ? err.message : String(err)}`);
+				return [];
 			}
+
+			// Non-silent: surface a clear, actionable error message.
+			const error = this._classifyError(err);
 			this._logService.error(error, '[GeminiADC] Error fetching available models');
 			throw error;
 		}
+	}
+
+	/**
+	 * Converts a raw API error into a human-readable Error with an actionable
+	 * fix suggestion.  Specifically detects the `ACCESS_TOKEN_SCOPE_INSUFFICIENT`
+	 * 403 that happens when personal-account ADC credentials (from `gcloud auth
+	 * application-default login` without `--scopes`) don't include the
+	 * `generative-language` scope.
+	 *
+	 * Unlike service-account SA JSON (where `google-auth-library` can request
+	 * any scope at token-mint time), user ADC scopes are fixed at login time and
+	 * the `scopes` parameter passed to `GoogleAuth(...)` has no effect on them.
+	 */
+	private _classifyError(err: unknown): Error {
+		if (err instanceof ApiError) {
+			let parsed: { error?: { message?: string; status?: string; details?: Array<{ reason?: string }> } } | undefined;
+			try { parsed = JSON.parse(err.message); } catch { /* not JSON */ }
+
+			const reason = parsed?.error?.details?.[0]?.reason ?? '';
+			const status = parsed?.error?.status ?? '';
+			const message = parsed?.error?.message ?? err.message;
+
+			if (reason === 'ACCESS_TOKEN_SCOPE_INSUFFICIENT' || status === 'PERMISSION_DENIED') {
+				return new Error(
+					`[GeminiADC] Insufficient OAuth scopes on your Application Default Credentials.\n\n` +
+					`Personal-account ADC tokens created by plain "gcloud auth application-default login"\n` +
+					`do not include the generative-language scope. Re-run with explicit scopes:\n\n` +
+					`  gcloud auth application-default login \\\n` +
+					`    --scopes=openid,\\\n` +
+					`    https://www.googleapis.com/auth/userinfo.email,\\\n` +
+					`    https://www.googleapis.com/auth/cloud-platform,\\\n` +
+					`    https://www.googleapis.com/auth/generative-language\n\n` +
+					`Alternatively, paste a Service Account JSON key into the credentials field\n` +
+					`(same format as Vertex Gemini) — SA credentials bypass this limitation\n` +
+					`because google-auth-library mints the token with the correct scopes automatically.\n\n` +
+					`Original error: ${message}`,
+					{ cause: err }
+				);
+			}
+
+			return new Error(message, { cause: err });
+		}
+		return new Error(err instanceof Error ? err.message : String(err));
 	}
 
 	// ─── provideLanguageModelChatResponse override ────────────────────────────
