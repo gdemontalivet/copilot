@@ -414,18 +414,39 @@ export class GeminiADCLMProvider extends GeminiNativeBYOKLMProvider {
 	 * Injects `'adc'` as `configuration.apiKey` when no credential was entered,
 	 * so the abstract base-class caching key and the per-model configuration
 	 * are always non-empty without prompting for a key that doesn't exist.
+	 *
+	 * When no group has been configured AND credentials aren't available on the
+	 * machine, we must return [] instead of throwing.  VS Code calls providers
+	 * non-silently (silent=false) when the user opens the in-chat model picker,
+	 * and a throw from any single provider breaks the entire dropdown for all
+	 * providers — not just GeminiADC.  Errors from a properly-configured group
+	 * (apiKey is set) are still surfaced so the user sees actionable feedback.
 	 */
 	override async provideLanguageModelChatInformation(
 		options: any,
 		token: any,
 	): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
 		const apiKey = options?.configuration?.apiKey;
-		const enrichedOptions = apiKey
-			? options
-			: {
-				...options,
-				configuration: { ...(options.configuration ?? {}), apiKey: 'adc' },
-			};
-		return super.provideLanguageModelChatInformation(enrichedOptions, token);
+		if (apiKey) {
+			// Configured group → surface errors normally so the user gets feedback.
+			return super.provideLanguageModelChatInformation(options, token);
+		}
+
+		// No configured group: inject 'adc' sentinel and soft-fail on auth errors
+		// so the dropdown keeps working for all other providers.
+		const enrichedOptions = {
+			...options,
+			configuration: { ...(options.configuration ?? {}), apiKey: 'adc' },
+		};
+		try {
+			return await super.provideLanguageModelChatInformation(enrichedOptions, token);
+		} catch (err) {
+			// Auth failure with no configured group → treat as "no models available"
+			// rather than crashing the global model picker.
+			this._logService.trace(
+				`[GeminiADC] No credentials available, suppressing picker error: ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`
+			);
+			return [];
+		}
 	}
 }

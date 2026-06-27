@@ -248,6 +248,15 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 			telemetryService,
 			otelService,
 		);
+		// The parent chain hardcodes GeminiNativeBYOKLMProvider.providerId ('gemini')
+		// and providerName ('Gemini') into the abstract-class constructor, so the
+		// instance _id/_name fields are wrong until we override them here.
+		// Without this: _byokModelListCacheKey() starts with 'gemini::' for both the
+		// native Gemini and GeminiIA providers → they share a cache entry when using
+		// the same API key → stale reads / incorrect model lists.  Same pattern as
+		// GeminiADCLMProvider.
+		(this as unknown as { _name: string })._name = GeminiInteractionLMProvider.providerName;
+		(this as unknown as { _id: string })._id = GeminiInteractionLMProvider.providerName.toLowerCase();
 	}
 
 	override async provideLanguageModelChatResponse(

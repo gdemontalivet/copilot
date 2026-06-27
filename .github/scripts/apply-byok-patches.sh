@@ -4887,3 +4887,90 @@ if (existingEntry && existingEntry.configuration?.properties?.apiKey?.secret ===
   console.log("Patched: package.json (geminiadc vendor entry)");
 }
 PATCH68_EOF
+
+# -----------------------------------------------------------------------------
+# Patch 69: GeminiIA — Gemini Interactions API provider
+# -----------------------------------------------------------------------------
+# Google's Interactions API is the forward-looking endpoint for the Gemini
+# family.  New models and capabilities (e.g. gemini-3.5-flash) will launch
+# exclusively here and not on the legacy generateContent path.
+# Canonical file: .github/byok-patches/files/geminiInteractionProvider.ts
+# Vendor: geminiia (lowercase of providerName GeminiIA).
+
+install_byok_file \
+  ".github/byok-patches/files/geminiInteractionProvider.ts" \
+  "src/extension/byok/vscode-node/geminiInteractionProvider.ts"
+
+node << 'PATCH69_EOF'
+const fs = require("fs");
+
+// ── A: byokContribution.ts — import + registration ───────────────────────────
+const fContrib = "src/extension/byok/vscode-node/byokContribution.ts";
+let codeContrib = fs.readFileSync(fContrib, "utf8");
+
+if (codeContrib.includes("geminiInteractionProvider")) {
+  console.log("Patch 69 (GeminiIA registration) already present, skipping");
+} else {
+  // Insert import next to GeminiADCLMProvider import
+  const importAnchor = "import { GeminiADCLMProvider } from './geminiADCProvider';";
+  const importReplacement = importAnchor + "\nimport { GeminiInteractionLMProvider } from './geminiInteractionProvider';";
+
+  if (!codeContrib.includes(importAnchor)) {
+    console.warn("WARN: GeminiADCLMProvider import anchor not found — skipping Patch 69 import");
+  } else {
+    codeContrib = codeContrib.replace(importAnchor, importReplacement);
+  }
+
+  // Register provider right after GeminiADC registration
+  const regAnchor = "this._providers.set(GeminiADCLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiADCLMProvider, undefined, this._byokStorageService));\n\t\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────";
+  const regReplacement = "this._providers.set(GeminiADCLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiADCLMProvider, undefined, this._byokStorageService));\n\t\t// ─── BYOK CUSTOM PATCH: Gemini Interactions API provider (Patch 60/69) ────\n\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t// Accesses Interactions-API-only models (e.g. gemini-3.5-flash) via the\n\t\t// stateful interactions.create() endpoint.\n\t\tthis._providers.set(GeminiInteractionLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiInteractionLMProvider, undefined, this._byokStorageService));\n\t\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────\n\t\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────";
+
+  if (!codeContrib.includes("this._providers.set(GeminiADCLMProvider.providerName.toLowerCase()")) {
+    console.warn("WARN: GeminiADCLMProvider registration anchor not found — skipping Patch 69 registration");
+  } else {
+    codeContrib = codeContrib.replace(
+      "this._providers.set(GeminiADCLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiADCLMProvider, undefined, this._byokStorageService));\n\t\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────",
+      regReplacement
+    );
+    fs.writeFileSync(fContrib, codeContrib);
+    console.log("Patched: byokContribution.ts (GeminiIA import + registration)");
+  }
+}
+
+// ── B: package.json — declare `geminiia` vendor ───────────────────────────────
+const fPkg = "package.json";
+const pkg = JSON.parse(fs.readFileSync(fPkg, "utf8"));
+const providers = pkg.contributes?.languageModelChatProviders ?? [];
+
+if (providers.some(p => p.vendor === "geminiia")) {
+  console.log("Patch 69 (geminiia vendor entry) already present, skipping");
+} else {
+  // Normalise any stray camelCase variant
+  const idx = providers.findIndex(p => /geminiIA/i.test(p.vendor) && p.vendor !== "geminiia");
+  if (idx !== -1) { providers.splice(idx, 1); }
+
+  // Insert right after geminiadc so all Gemini-family vendors stay grouped
+  const adcIdx = providers.findIndex(p => p.vendor === "geminiadc");
+  const insertAt = adcIdx !== -1 ? adcIdx + 1 : providers.length;
+
+  providers.splice(insertAt, 0, {
+    vendor: "geminiia",
+    displayName: "Gemini (Interactions API)",
+    description: "Google Gemini via the Interactions API — accesses future-only models (e.g. gemini-3.5-flash). Uses stateful server-side context; compaction patches do not apply.",
+    configuration: {
+      properties: {
+        apiKey: {
+          type: "string",
+          secret: true,
+          title: "Google AI Studio API Key",
+          description: "Your Google AI Studio API key (same key as the plain Gemini vendor). The Interactions API uses the same generativelanguage.googleapis.com endpoint and the same key format."
+        }
+      }
+    }
+  });
+
+  pkg.contributes.languageModelChatProviders = providers;
+  fs.writeFileSync(fPkg, JSON.stringify(pkg, null, "\t") + "\n");
+  console.log("Patched: package.json (geminiia vendor entry)");
+}
+PATCH69_EOF
