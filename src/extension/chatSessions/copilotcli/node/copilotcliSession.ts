@@ -10,7 +10,7 @@ import * as crypto from 'crypto';
 import type * as vscode from 'vscode';
 import type { ChatParticipantToolToken } from 'vscode';
 import { IAuthenticationService } from '../../../../platform/authentication/common/authentication';
-import { IChatQuotaService } from '../../../../platform/chat/common/chatQuotaService';
+import { IChatQuotaService, QuotaSnapshot, QuotaSnapshots } from '../../../../platform/chat/common/chatQuotaService';
 import { getQuotaMessageForPlan } from '../../../../platform/chat/common/commonTypes';
 import { ConfigKey, IConfigurationService } from '../../../../platform/configuration/common/configurationService';
 import { IGitService } from '../../../../platform/git/common/gitService';
@@ -912,7 +912,7 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 		private readonly _agentName: string | undefined,
 		private readonly _sdkSession: Session,
 		private readonly _additionalWorkspaces: IWorkspaceInfo[],
-		private readonly _sandboxEnabled: boolean,
+		private readonly _sandboxConfig: SessionOptions['sandboxConfig'],
 		@ILogService private readonly logService: ILogService,
 		@IWorkspaceService private readonly workspaceService: IWorkspaceService,
 		@IChatSessionMetadataStore private readonly _chatSessionMetadataStore: IChatSessionMetadataStore,
@@ -942,6 +942,33 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 
 	public setPermissionLevel(level: string | undefined): void {
 		this._permissionLevel = level;
+	}
+
+	/**
+	 * Whether the session was configured with the sandbox enabled. The sandbox
+	 * only actually applies to requests that run with default approvals — see
+	 * {@link _applyEffectiveSandboxConfig}.
+	 */
+	private get _sandboxEnabled(): boolean {
+		return !!this._sandboxConfig?.enabled;
+	}
+
+	/**
+	 * Apply the sandbox policy for the request that is about to be sent. The
+	 * sandbox enable setting only applies under default approvals; the sandbox
+	 * is explicitly disabled when the request runs with bypass approvals
+	 * (autopilot / autoApprove) or when no sandbox is configured for the
+	 * session. Pushing `{ enabled: false }` (rather than skipping the update)
+	 * ensures the SDK never retains a stale or auto-discovered sandbox.
+	 */
+	private _applyEffectiveSandboxConfig(bypassApprovals: boolean): void {
+		const base = this._sandboxConfig;
+		const sandboxConfig = (base?.enabled && !bypassApprovals) ? base : { enabled: false };
+		try {
+			this._sdkSession.updateOptions({ sandboxConfig });
+		} catch (error) {
+			this.logService.error(error, '[CopilotCLISession] Failed to update sandbox config for request');
+		}
 	}
 
 	// TODO: This should be pre-populated when we restore a session based on its original context.
@@ -1280,14 +1307,16 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 				const permissionRequest = event.data.permissionRequest;
 				const requestId = event.data.requestId;
 
+				const isSandboxBypassShell = permissionRequest.kind === 'shell' && permissionRequest.requestSandboxBypass === true;
+
 				// Auto-approve all requests when the permission level allows it.
-				if (effectivePermissionLevel === 'autoApprove' || effectivePermissionLevel === 'autopilot') {
+				if (!isSandboxBypassShell && (effectivePermissionLevel === 'autoApprove' || effectivePermissionLevel === 'autopilot')) {
 					this.logService.trace(`[CopilotCLISession] Auto Approving ${permissionRequest.kind} request (permission level: ${effectivePermissionLevel})`);
 					this._sdkSession.respondToPermission(requestId, { kind: 'approve-once' });
 					return;
 				}
 
-				if (permissionRequest.kind === 'shell' && this._sandboxEnabled) {
+				if (!isSandboxBypassShell && permissionRequest.kind === 'shell' && this._sandboxEnabled) {
 					this.logService.trace(`[CopilotCLISession] Auto Approving shell request (sandbox is enabled)`);
 					this._sdkSession.respondToPermission(requestId, { kind: 'approve-once' });
 					return;
@@ -1332,7 +1361,7 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 
 				try {
 					let response: PermissionRequestResult;
-					if (effectivePermissionLevel === 'autoApprove' || effectivePermissionLevel === 'autopilot') {
+					if (!isSandboxBypassShell && (effectivePermissionLevel === 'autoApprove' || effectivePermissionLevel === 'autopilot')) {
 						this.logService.trace(`[CopilotCLISession] Auto Approving ${permissionRequest.kind} request (permission level: ${effectivePermissionLevel})`);
 						response = { kind: 'approve-once' };
 					} else if (this._mcState) {
@@ -1439,7 +1468,7 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 					reportUsage(event.data.inputTokens, event.data.outputTokens);
 				}
 				// Accumulate per-turn credits from SDK copilotUsage data
-				const copilotUsage = (event.data as Record<string, unknown>).copilotUsage;
+				const copilotUsage = (event.data as unknown as Record<string, unknown>).copilotUsage;
 				let copilotUsageNanoAiu: number | undefined;
 				if (copilotUsage && typeof copilotUsage === 'object') {
 					const { totalNanoAiu } = copilotUsage as { totalNanoAiu?: number };
@@ -1447,6 +1476,12 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 						copilotUsageNanoAiu = totalNanoAiu;
 						this._chatQuotaService.setLastCopilotUsage(totalNanoAiu, request.id);
 					}
+				}
+				// Sync the live per-category quota state the SDK reports (internal-only field) so the
+				// quota UI stays current without a separate `copilot_internal/user` fetch. This mirrors
+				// the extension-host chat path, which processes `copilot_quota_snapshots` from CAPI.
+				if (event.data.quotaSnapshots) {
+					this._chatQuotaService.processQuotaSnapshots(toChatQuotaSnapshots(event.data.quotaSnapshots));
 				}
 				// Record this model turn so we can synthesize a `chat` span for it at request completion.
 				modelTurnUsages.push({
@@ -1479,23 +1514,44 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 					}
 					maybeEmitMessageSeparator(event.data.messageId);
 					chunkMessageIds.add(event.data.messageId);
-					assistantMessageChunks.push(event.data.deltaContent);
+					// BYOK Patch 46: drop the echoed [SYSTEM NOTIFICATION - NOT USER INPUT] prompt wrapper.
+					const sanitizedDelta = echoStripper.process(event.data.messageId, event.data.deltaContent);
+					if (sanitizedDelta.length === 0) {
+						return;
+					}
+					assistantMessageChunks.push(sanitizedDelta);
 					wroteResponseContent = true;
-					requestStream?.markdown(event.data.deltaContent);
+					requestStream?.markdown(sanitizedDelta);
 				}
 			})));
 			disposables.add(toDisposable(this._sdkSession.on('assistant.message', (event) => {
-				if (typeof event.data.content === 'string' && event.data.content.length && !chunkMessageIds.has(event.data.messageId)) {
-					// Skip sub-agent markdown — it will be captured in the subagent tool's result
-					if (event.data.parentToolCallId) {
-						return;
-					}
-					assistantMessageChunks.push(event.data.content);
-					flushPendingInvocationMessages();
-					maybeEmitMessageSeparator(event.data.messageId);
-					wroteResponseContent = true;
-					requestStream?.markdown(event.data.content);
+				if (typeof event.data.content !== 'string' || !event.data.content.length) {
+					return;
 				}
+				// BYOK Patch 46: flush any residual buffered bytes from the chunk stripper.
+				const residualFromStripper = echoStripper.flush(event.data.messageId);
+				if (chunkMessageIds.has(event.data.messageId)) {
+					if (residualFromStripper.length > 0 && !event.data.parentToolCallId) {
+						assistantMessageChunks.push(residualFromStripper);
+						wroteResponseContent = true;
+						requestStream?.markdown(residualFromStripper);
+					}
+					return;
+				}
+				// Skip sub-agent markdown — it will be captured in the subagent tool's result
+				if (event.data.parentToolCallId) {
+					return;
+				}
+				// BYOK Patch 46: strip the echoed [SYSTEM NOTIFICATION - NOT USER INPUT] prompt wrapper for non-chunked messages.
+				const sanitizedMessage = echoStripper.process(event.data.messageId, event.data.content);
+				if (sanitizedMessage.length === 0) {
+					return;
+				}
+				assistantMessageChunks.push(sanitizedMessage);
+				flushPendingInvocationMessages();
+				maybeEmitMessageSeparator(event.data.messageId);
+				wroteResponseContent = true;
+				requestStream?.markdown(sanitizedMessage);
 			})));
 			disposables.add(toDisposable(this._sdkSession.on('tool.execution_start', (event) => {
 				toolCalls.set(event.data.toolCallId, event.data as unknown as ToolCall);
@@ -1857,6 +1913,12 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 			} else {
 				this._sdkSession.currentMode = 'interactive';
 			}
+			// The sandbox only applies under default approvals — disable it for
+			// this request when running in a bypass-approvals mode.
+			const bypassApprovals = remoteMode
+				? remoteMode === 'autopilot'
+				: this._permissionLevel === 'autopilot' || this._permissionLevel === 'autoApprove';
+			this._applyEffectiveSandboxConfig(bypassApprovals);
 			const sendOptions: SendOptions = { prompt: input.prompt ?? '', attachments, agentMode: this._sdkSession.currentMode };
 			if (steering) {
 				sendOptions.mode = 'immediate';
@@ -1894,6 +1956,9 @@ export class CopilotCLISession extends DisposableStore implements ICopilotCLISes
 			} else {
 				this._sdkSession.currentMode = 'interactive';
 			}
+			// The sandbox only applies under default approvals — disable it when
+			// fleet runs in autopilot (a bypass-approvals mode).
+			this._applyEffectiveSandboxConfig(this._permissionLevel === 'autopilot');
 			const result = await this._sdkSession.fleet.start({ prompt });
 			if (!result.started) {
 				this.logService.info('[CopilotCLISession] Fleet mode not started');
@@ -3152,6 +3217,54 @@ interface IModelTurnUsage {
 	readonly copilotUsageNanoAiu?: number;
 	/** Set when the turn originates from a subagent (nested under a parent tool call). */
 	readonly parentToolCallId?: string;
+}
+
+/**
+ * Shape of a single quota snapshot on the SDK's `assistant.usage` event (`quotaSnapshots`). The
+ * field is marked internal-only by the SDK, so although the published types say `entitlementRequests`
+ * is a number and `resetDate` is a `Date`, the runtime shape can drift (e.g. a sibling SDK delivers
+ * `resetDate` as an ISO string). Mark the fields optional and validate at runtime below.
+ */
+interface ISdkQuotaSnapshot {
+	readonly isUnlimitedEntitlement?: boolean;
+	readonly entitlementRequests?: number;
+	readonly overage?: number;
+	readonly overageAllowedWithExhaustedQuota?: boolean;
+	readonly remainingPercentage?: number;
+	readonly resetDate?: Date | string;
+}
+
+/** Maps the SDK `assistant.usage` quota snapshots to the shared {@link QuotaSnapshots} shape. */
+function toChatQuotaSnapshots(snapshots: Record<string, ISdkQuotaSnapshot>): QuotaSnapshots {
+	const result: Record<string, QuotaSnapshot> = {};
+	for (const [key, snapshot] of Object.entries(snapshots)) {
+		if (!snapshot || typeof snapshot !== 'object') {
+			continue;
+		}
+		const unlimited = snapshot.isUnlimitedEntitlement === true;
+		const entitlement = unlimited
+			? '-1'
+			: typeof snapshot.entitlementRequests === 'number' ? String(snapshot.entitlementRequests) : undefined;
+		if (entitlement === undefined || typeof snapshot.remainingPercentage !== 'number') {
+			continue;
+		}
+		result[key] = {
+			entitlement,
+			percent_remaining: snapshot.remainingPercentage,
+			overage_permitted: snapshot.overageAllowedWithExhaustedQuota ?? false,
+			overage_count: typeof snapshot.overage === 'number' ? snapshot.overage : 0,
+			reset_date: toResetDateIsoString(snapshot.resetDate),
+		};
+	}
+	return result;
+}
+
+/** Coerces an SDK `resetDate` (a `Date` per the published type, but possibly an ISO string at runtime) to an ISO string. */
+function toResetDateIsoString(resetDate: Date | string | undefined): string | undefined {
+	if (resetDate instanceof Date) {
+		return resetDate.toISOString();
+	}
+	return typeof resetDate === 'string' ? resetDate : undefined;
 }
 
 function buildPromptTokenDetails(usageInfo: UsageInfoData | undefined): { category: string; label: string; percentageOfPrompt: number }[] | undefined {
