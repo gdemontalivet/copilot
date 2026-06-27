@@ -168,7 +168,10 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				// shipped) until the upstream curated list is refreshed, which
 				// can take weeks.
 				if (this._knownModels && this._knownModels[modelId]) {
-					modelList[modelId] = this._knownModels[modelId];
+					const knownCaps = this._knownModels[modelId];
+					// ─── BYOK CUSTOM PATCH: cap Gemini maxInputTokens at 200K (Patch 60) ────
+					modelList[modelId] = { ...knownCaps, maxInputTokens: Math.min(knownCaps.maxInputTokens, GeminiNativeBYOKLMProvider._GEMINI_MAX_INPUT_TOKENS) };
+					// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────────────
 					continue;
 				}
 				const inferred = this._inferGeminiCapabilities(model);
@@ -705,6 +708,19 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 	// See call site above (search for "gemini model allowlist relaxation") for
 	// rationale. Both helpers are intentionally `protected` so subclasses
 	// (e.g. VertexGeminiLMProvider) can override the heuristic.
+	
+	// ─── BYOK CUSTOM PATCH: cap Gemini maxInputTokens at 200K (Patch 60) ────────
+	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Google Gemini's native context windows are 1M–2M tokens. Without a cap,
+	// Patch 23's large-context branch fires (modelMaxPromptTokens > 300K) and
+	// uses absolute compaction thresholds (tier1=180K, tier2=200K, tier3=220K).
+	// Capping at 200K keeps every Gemini model ≤ 300K so Patch 23 falls back
+	// to the cheaper percentage-based ladder (tier1=140K at 70%, tier2=160K,
+	// tier3=180K), triggering compaction ~40K tokens sooner and materially
+	// reducing per-turn Gemini costs on long agentic sessions.
+	private static readonly _GEMINI_MAX_INPUT_TOKENS = 200_000;
+	// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────────────
+
 	protected _inferGeminiCapabilities(model: { name?: string; displayName?: string; description?: string; supportedActions?: string[]; inputTokenLimit?: number; outputTokenLimit?: number }): BYOKModelCapabilities | undefined {
 		const id = model.name;
 		if (!id) {
@@ -736,7 +752,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 			name: model.displayName ?? this._humanizeGeminiModelId(id),
 			toolCalling: supportsToolCalling,
 			vision: supportsVision,
-			maxInputTokens: model.inputTokenLimit ?? (isLite ? 1_000_000 : 2_000_000),
+			maxInputTokens: Math.min(model.inputTokenLimit ?? (isLite ? 1_000_000 : 2_000_000), GeminiNativeBYOKLMProvider._GEMINI_MAX_INPUT_TOKENS),
 			maxOutputTokens: model.outputTokenLimit ?? 65_536,
 			thinking: supportsThinking,
 			...(supportsThinking ? { supportsReasoningEffort: ['low', 'medium', 'high'] } : {}),

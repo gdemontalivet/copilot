@@ -703,6 +703,13 @@ install_byok_file \
   ".github/byok-patches/files/vertexGeminiProvider.ts" \
   "src/extension/byok/vscode-node/vertexGeminiProvider.ts"
 
+# Patch 68: GeminiADC — Generative Language API via Application Default Credentials.
+# Google deprecated raw API-key access for GCP-authenticated accounts; this provider
+# authenticates with an OAuth 2.0 Bearer token obtained from ADC (google-auth-library).
+install_byok_file \
+  ".github/byok-patches/files/geminiADCProvider.ts" \
+  "src/extension/byok/vscode-node/geminiADCProvider.ts"
+
 install_byok_file \
   ".github/byok-patches/files/deepseekProvider.ts" \
   "src/extension/byok/vscode-node/deepseekProvider.ts"
@@ -4174,6 +4181,82 @@ fs.writeFileSync(f, code);
 console.log("Patched: geminiNativeProvider.ts gemini allowlist relaxation (Patch 59)");
 PATCH59_EOF
 
+# ── Patch 60: Cap Gemini BYOK maxInputTokens at 200K ─────────────────────────
+# Gemini models (gemini-2.5-pro, gemini-3.x) advertise 1M–2M context windows.
+# With those large maxInputTokens, Patch 23's adaptive compaction fires at
+# 180K/200K/220K absolute (the large-context branch: modelMaxPromptTokens > 300K).
+# Capping at 200K keeps every Gemini model at or below the 300K threshold so
+# Patch 23 stays in the cheaper percentage-based mode instead: tier1 at 70%
+# (140K), tier2 at 80% (160K), tier3 at 90% (180K). That triggers compaction
+# ~40K tokens sooner, materially reducing per-turn cost in long agentic sessions.
+# Two sub-replacements: (A) add the constant + cap inside _inferGeminiCapabilities;
+# (B) cap the _knownModels branch in getAllModels (covers the curated-models path).
+node << 'PATCH60_EOF'
+const fs = require("fs");
+const path = require("path");
+const f = path.join("src", "extension", "byok", "vscode-node", "geminiNativeProvider.ts");
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("BYOK CUSTOM PATCH: cap Gemini maxInputTokens at 200K (Patch 60)")) {
+  console.log("Patch 60 (Gemini 200K context cap) already present, skipping");
+  process.exit(0);
+}
+
+// ── Sub-replacement A: add constant + cap in _inferGeminiCapabilities ─────────
+const anchorA = "protected _inferGeminiCapabilities(model: { name?: string; displayName?: string; description?: string; supportedActions?: string[]; inputTokenLimit?: number; outputTokenLimit?: number }): BYOKModelCapabilities | undefined {";
+if (!code.includes(anchorA)) {
+  console.warn("WARN: geminiNativeProvider _inferGeminiCapabilities anchor not found — skipping Patch 60 (A)");
+} else {
+  const constantBlock =
+    "\n\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: cap Gemini maxInputTokens at 200K (Patch 60) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+    "\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n" +
+    "\t// Google Gemini's native context windows are 1M\u20132M tokens. Without a cap,\n" +
+    "\t// Patch 23's large-context branch fires (modelMaxPromptTokens > 300K) and\n" +
+    "\t// uses absolute compaction thresholds (tier1=180K, tier2=200K, tier3=220K).\n" +
+    "\t// Capping at 200K keeps every Gemini model \u2264 300K so Patch 23 falls back\n" +
+    "\t// to the cheaper percentage-based ladder (tier1=140K at 70%, tier2=160K,\n" +
+    "\t// tier3=180K), triggering compaction ~40K tokens sooner and materially\n" +
+    "\t// reducing per-turn Gemini costs on long agentic sessions.\n" +
+    "\tprivate static readonly _GEMINI_MAX_INPUT_TOKENS = 200_000;\n" +
+    "\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n\t" +
+    anchorA;
+  code = code.replace(anchorA, constantBlock);
+}
+
+// ── Sub-replacement B: cap maxInputTokens in _inferGeminiCapabilities return ──
+const anchorB = "maxInputTokens: model.inputTokenLimit ?? (isLite ? 1_000_000 : 2_000_000),";
+if (!code.includes(anchorB)) {
+  console.warn("WARN: geminiNativeProvider maxInputTokens return anchor not found — skipping Patch 60 (B)");
+} else {
+  code = code.replace(
+    anchorB,
+    "maxInputTokens: Math.min(model.inputTokenLimit ?? (isLite ? 1_000_000 : 2_000_000), GeminiNativeBYOKLMProvider._GEMINI_MAX_INPUT_TOKENS),"
+  );
+}
+
+// ── Sub-replacement C: cap _knownModels branch in getAllModels ─────────────────
+const anchorC =
+  "if (this._knownModels && this._knownModels[modelId]) {\n\t\t\t\t\tmodelList[modelId] = this._knownModels[modelId];\n\t\t\t\t\tcontinue;\n\t\t\t\t}";
+const replacementC =
+  "if (this._knownModels && this._knownModels[modelId]) {\n" +
+  "\t\t\t\t\tconst knownCaps = this._knownModels[modelId];\n" +
+  "\t\t\t\t\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: cap Gemini maxInputTokens at 200K (Patch 60) \u2500\u2500\u2500\u2500\n" +
+  "\t\t\t\t\tmodelList[modelId] = { ...knownCaps, maxInputTokens: Math.min(knownCaps.maxInputTokens, GeminiNativeBYOKLMProvider._GEMINI_MAX_INPUT_TOKENS) };\n" +
+  "\t\t\t\t\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
+  "\t\t\t\t\tcontinue;\n" +
+  "\t\t\t\t}";
+if (!code.includes(anchorC)) {
+  // Patch 60 (A+B) may have already inserted the constant and the _knownModels
+  // branch may already be patched from a prior run — that's fine, just skip.
+  console.warn("WARN: geminiNativeProvider _knownModels branch anchor not found — skipping Patch 60 (C) (may already be patched)");
+} else {
+  code = code.replace(anchorC, replacementC);
+}
+
+fs.writeFileSync(f, code, "utf8");
+console.log("Patched: geminiNativeProvider.ts Gemini 200K context cap (Patch 60)");
+PATCH60_EOF
+
 # ── Patch 66: Ollama toolCalling:true + byokKnownModelsToAPIInfoWithEffort ──────
 # The upstream `_getOllamaModelInfo` uses `.capabilities.includes('tools')` to
 # set toolCalling, but many popular Ollama models (llama3, qwen, mistral, gemma)
@@ -4715,3 +4798,92 @@ if (changed) {
   console.log("Patch 67 (configurationDefaults for preferAgentHost) already present, skipping");
 }
 PATCH67_EOF
+
+# -----------------------------------------------------------------------------
+# Patch 68: GeminiADC — Generative Language API via Application Default Credentials
+# -----------------------------------------------------------------------------
+# Google deprecated simple API-key access to the Generative Language API for
+# GCP-authenticated accounts (HTTP 403 "API keys are not supported by this API").
+# This patch registers the `geminiadc` vendor which authenticates via ADC/OAuth
+# instead of a raw apiKey.  Auth is handled entirely by google-auth-library
+# (already a dependency from Patch 13) so users only need:
+#   gcloud auth application-default login
+# The optional "apiKey" field in the BYOK group config stores the GCP quota
+# project ID for billing attribution.
+node << 'PATCH68_EOF'
+const fs = require("fs");
+
+// ── A: byokContribution.ts — import + registration ───────────────────────────
+const fContrib = "src/extension/byok/vscode-node/byokContribution.ts";
+let codeContrib = fs.readFileSync(fContrib, "utf8");
+
+if (codeContrib.includes("geminiADCProvider")) {
+  console.log("Patch 68 (GeminiADC registration) already present, skipping");
+} else {
+  // Insert import next to VertexGeminiLMProvider import
+  const importAnchor = "import { VertexGeminiLMProvider } from './vertexGeminiProvider';";
+  const importReplacement = importAnchor + "\nimport { GeminiADCLMProvider } from './geminiADCProvider';";
+
+  if (!codeContrib.includes(importAnchor)) {
+    console.warn("WARN: VertexGeminiLMProvider import anchor not found — skipping Patch 68 import");
+  } else {
+    codeContrib = codeContrib.replace(importAnchor, importReplacement);
+  }
+
+  // Register provider right after VertexGeminiLMProvider registration
+  const regAnchor = "this._providers.set(VertexGeminiLMProvider.providerName.toLowerCase(), instantiationService.createInstance(VertexGeminiLMProvider, undefined, this._byokStorageService));";
+  const regReplacement = regAnchor + "\n\t\t// ─── BYOK CUSTOM PATCH: Gemini API with ADC / OAuth (Patch 68) ───────────\n\t\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t\t// Google deprecated raw API-key access for GCP-authenticated accounts;\n\t\t// this provider authenticates via ADC (google-auth-library) instead.\n\t\tthis._providers.set(GeminiADCLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiADCLMProvider, undefined, this._byokStorageService));\n\t\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────";
+
+  if (!codeContrib.includes(regAnchor)) {
+    console.warn("WARN: VertexGeminiLMProvider registration anchor not found — skipping Patch 68 registration");
+  } else {
+    codeContrib = codeContrib.replace(regAnchor, regReplacement);
+    fs.writeFileSync(fContrib, codeContrib);
+    console.log("Patched: byokContribution.ts (GeminiADC import + registration)");
+  }
+}
+
+// ── B: package.json — declare `geminiadc` vendor ─────────────────────────────
+const fPkg = "package.json";
+const pkg = JSON.parse(fs.readFileSync(fPkg, "utf8"));
+const providers = pkg.contributes?.languageModelChatProviders ?? [];
+
+const existingEntry = providers.find(p => p.vendor === "geminiadc");
+if (existingEntry && existingEntry.configuration?.properties?.apiKey?.secret === true) {
+  console.log("Patch 68 (geminiadc vendor entry) already present, skipping");
+} else {
+  // Remove any stale entry (missing secret:true on apiKey = pre-v2 shape)
+  const staleIdx = providers.findIndex(p => p.vendor === "geminiadc");
+  if (staleIdx !== -1) { providers.splice(staleIdx, 1); }
+  // Normalise any stray camelCase variant from a previous edit
+  const idx = providers.findIndex(p => /geminiADC/i.test(p.vendor) && p.vendor !== "geminiadc");
+  if (idx !== -1) {
+    providers.splice(idx, 1);
+  }
+
+  // Insert the new vendor entry right after the `vertexgemini` entry so the
+  // two Gemini-family vendors stay visually grouped.
+  const vertexGeminiIdx = providers.findIndex(p => p.vendor === "vertexgemini");
+  const insertAt = vertexGeminiIdx !== -1 ? vertexGeminiIdx + 1 : providers.length;
+
+  providers.splice(insertAt, 0, {
+    vendor: "geminiadc",
+    displayName: "Gemini (ADC / OAuth)",
+    description: "Google Gemini via the Generative Language API, authenticated with OAuth 2.0 instead of an API key.",
+    configuration: {
+      properties: {
+        apiKey: {
+          type: "string",
+          secret: true,
+          title: "Credentials / Quota Project",
+          description: "Controls both authentication and billing.\n  \u2022 Empty \u2014 use system Application Default Credentials (gcloud auth application-default login).\n  \u2022 Paste a Service Account JSON key \u2014 same format as Vertex Gemini; quota project is auto-detected.\n  \u2022 A GCP project ID (e.g. my-project-123) \u2014 system ADC is used for auth and that project is billed."
+        }
+      }
+    }
+  });
+
+  pkg.contributes.languageModelChatProviders = providers;
+  fs.writeFileSync(fPkg, JSON.stringify(pkg, null, "\t") + "\n");
+  console.log("Patched: package.json (geminiadc vendor entry)");
+}
+PATCH68_EOF
