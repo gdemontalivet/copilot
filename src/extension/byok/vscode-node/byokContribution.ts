@@ -56,7 +56,12 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		const instantiationService = this._instantiationService;
 
 		const anthropic = instantiationService.createInstance(AnthropicLMProvider, undefined, this._byokStorageService);
-		const gemini = instantiationService.createInstance(GeminiNativeBYOKLMProvider, undefined, this._byokStorageService);
+		// ─── BYOK CUSTOM PATCH: GeminiInteraction as gemini vendor (Patch 69) ───────
+		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// GeminiInteractionLMProvider replaces GeminiNativeBYOKLMProvider as the
+		// primary 'gemini' vendor. All 3 Gemini providers (gemini, vertexgemini,
+		// geminiadc) now use the Interactions API — Google manages context server-side.
+		const gemini = instantiationService.createInstance(GeminiInteractionLMProvider, undefined, this._byokStorageService);
 		const xai = instantiationService.createInstance(XAIBYOKLMProvider, {}, this._byokStorageService);
 		const openai = instantiationService.createInstance(OAIBYOKLMProvider, {}, this._byokStorageService);
 
@@ -68,7 +73,7 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		const vertexAnthropicProvider = instantiationService.createInstance(VertexAnthropicLMProvider, undefined, this._byokStorageService);
 		this._providers.set(VertexAnthropicLMProvider.providerName.toLowerCase(), vertexAnthropicProvider);
 		anthropic.setFailoverTarget(vertexAnthropicProvider);
-		this._providers.set(GeminiNativeBYOKLMProvider.providerId, gemini);
+		this._providers.set(GeminiInteractionLMProvider.providerName.toLowerCase(), gemini);
 		// BYOK CUSTOM PATCH: Vertex-hosted Gemini, registered as a separate vendor so it has
 		// independent API key / quota state. Auth is SA-JSON or pre-minted Bearer token, not
 		// the Gemini public-API apiKey.
@@ -78,12 +83,6 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		// Google deprecated raw API-key access for GCP-authenticated accounts;
 		// this provider authenticates via ADC (google-auth-library) instead.
 		this._providers.set(GeminiADCLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiADCLMProvider, undefined, this._byokStorageService));
-		// ─── BYOK CUSTOM PATCH: Gemini Interactions API provider (Patch 60/69) ────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-		// Accesses Interactions-API-only models (e.g. gemini-3.5-flash) via the
-		// stateful interactions.create() endpoint.
-		this._providers.set(GeminiInteractionLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiInteractionLMProvider, undefined, this._byokStorageService));
-		// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────
 		// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────
 		this._providers.set(XAIBYOKLMProvider.providerId, xai);
 		this._providers.set(BYOKFusionLMProvider.vendorId, instantiationService.createInstance(BYOKFusionLMProvider));
@@ -114,7 +113,7 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 
 		this._knownModelsRefreshTargets = [
 			[AnthropicLMProvider.providerName, anthropic],
-			[GeminiNativeBYOKLMProvider.providerName, gemini],
+			[GeminiInteractionLMProvider.providerName, gemini],
 			[XAIBYOKLMProvider.providerName, xai],
 			[OAIBYOKLMProvider.providerName, openai],
 		];

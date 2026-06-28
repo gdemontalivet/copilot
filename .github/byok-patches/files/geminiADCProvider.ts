@@ -46,7 +46,7 @@ import { ITelemetryService } from '../../../platform/telemetry/common/telemetry'
 import { BYOKKnownModels, BYOKModelCapabilities, byokKnownModelsToAPIInfo } from '../common/byokProvider';
 import { ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
 import { IBYOKStorageService } from './byokStorageService';
-import { GeminiNativeBYOKLMProvider } from './geminiNativeProvider';
+import { GeminiInteractionLMProvider } from './geminiInteractionProvider';
 
 // OAuth scopes accepted by the Generative Language API.
 // cloud-platform is required when VPC Service Controls or org policies are active.
@@ -60,7 +60,7 @@ const ADC_SCOPES = [
 const TOKEN_CACHE_TTL_MS = 50 * 60 * 1_000;
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1_000;
 
-// Mirrors GeminiNativeBYOKLMProvider._GEMINI_MAX_INPUT_TOKENS (private static = 200_000)
+// Mirrors the 200K cap used by GeminiNativeBYOKLMProvider / GeminiInteractionLMProvider
 // so Patch 23's compaction thresholds behave identically to the API-key provider.
 const GEMINIADC_MAX_INPUT_TOKENS = 200_000;
 
@@ -87,7 +87,7 @@ interface CredentialSlot {
  * Extends {@link GeminiNativeBYOKLMProvider} — only credential resolution and
  * client construction are overridden.
  */
-export class GeminiADCLMProvider extends GeminiNativeBYOKLMProvider {
+export class GeminiADCLMProvider extends GeminiInteractionLMProvider {
 
 	public static override readonly providerName: string = 'GeminiADC';
 
@@ -111,6 +111,8 @@ export class GeminiADCLMProvider extends GeminiNativeBYOKLMProvider {
 		@IOTelService otelService: IOTelService,
 	) {
 		super(knownModels, byokStorageService, logService, requestLogger, telemetryService, otelService);
+		// GeminiInteractionLMProvider sets _name='Gemini'/_id='gemini'; rebind so VS Code
+		// groups and BYOK storage use the correct vendor (geminiadc) for this subclass.
 		(this as unknown as { _name: string })._name = GeminiADCLMProvider.providerName;
 		(this as unknown as { _id: string })._id = GeminiADCLMProvider.providerName.toLowerCase();
 	}
