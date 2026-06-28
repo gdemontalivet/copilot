@@ -199,9 +199,13 @@ function _buildInput(messages: Array<LanguageModelChatMessage | LanguageModelCha
 			} else {
 				resultText = '';
 			}
+			// Strip any thinking signature appended to the callId (e.g. 'stepId|signature').
+			// The Interactions API requires call_id to exactly match the function_call step's
+			// id; the '|signature' suffix is only for Anthropic round-trip and must be dropped.
+			const cleanCallId = tr.callId ? tr.callId.split('|')[0] : tr.callId;
 			return {
 				type: 'function_result',
-				call_id: tr.callId,
+				call_id: cleanCallId,
 				result: resultText,
 			};
 		});
