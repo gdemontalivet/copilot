@@ -118,6 +118,9 @@ function _classifyRetryableError(err: unknown): 'rate-limit' | 'unavailable' | '
 		if (err.status === 503 || err.status === 502 || err.status === 504) { return 'unavailable'; }
 		return null;
 	}
+	const status = (err as any)?.status as number | undefined;
+	if (status === 429) { return 'rate-limit'; }
+	if (status === 503 || status === 502 || status === 504) { return 'unavailable'; }
 	const msg = String((err as any)?.message ?? '').toLowerCase();
 	const code = String((err as any)?.code ?? '');
 	if (['ECONNRESET', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNREFUSED', 'ERR_NETWORK'].includes(code) ||
@@ -125,6 +128,27 @@ function _classifyRetryableError(err: unknown): 'rate-limit' | 'unavailable' | '
 		return 'network';
 	}
 	return null;
+}
+
+/**
+ * Detects a 404 "not found" error regardless of the SDK wrapper class.
+ *
+ * The @google/genai SDK wraps errors in internal classes before throwing from
+ * client.interactions.create(). At runtime in the minified bundle the error
+ * may not be an `instanceof ApiError` even when it represents an HTTP 404,
+ * because the bundler may produce a different class instance than the one our
+ * import resolves to. We therefore check the numeric .status property first
+ * and fall back to a message-content regex so the 404-eviction path is
+ * reached regardless of the wrapper class.
+ */
+function _is404Error(err: unknown): boolean {
+	if (err instanceof ApiError) { return err.status === 404; }
+	const status = (err as any)?.status;
+	if (status === 404) { return true; }
+	if (err instanceof Error) {
+		return /\b404\b/.test(err.message) && /not\s*found/i.test(err.message);
+	}
+	return false;
 }
 
 // ─── Conversation fingerprint ─────────────────────────────────────────────────
@@ -301,7 +325,22 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 
 			// Conversation identity
 			const fingerprint = _fingerprint(messages);
-			const previousInteractionId = this._interactions.get(fingerprint);
+			// Only use the stored interaction ID if this conversation has prior
+			// assistant exchanges. A brand-new chat whose first message happens to
+			// share the same fingerprint as an old chat (same opening text) must
+			// NOT inherit that old session — the Interactions API would 404 because
+			// the stored ID belongs to an unrelated conversation thread.
+			const hasAssistantHistory = messages.some(m =>
+				(m as LanguageModelChatMessage).role === LanguageModelChatMessageRole.Assistant
+			);
+			const previousInteractionId = hasAssistantHistory
+				? this._interactions.get(fingerprint)
+				: undefined;
+			if (!hasAssistantHistory && this._interactions.has(fingerprint)) {
+				this._logService.info(
+					`[${this._providerLabel}] session cache bypass — no assistant history in messages, treating as fresh conversation (fingerprint: ${fingerprint})`
+				);
+			}
 
 			// Build the latest-turn input
 			const input = _buildInput(messages);
@@ -702,24 +741,31 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 			// Google's server-side interactions expire. When we sent a
 			// previous_interaction_id and get back 404, the stale ID is evicted
 			// and we IMMEDIATELY retry as a fresh session (no previous_interaction_id)
-			// so the user never sees an error. This is safe because the recursive
-			// call will have no previous_interaction_id, so it can't loop here.
-			// If the fresh retry also 404s, the second branch below fires and
-			// throws (meaning the model itself isn't supported on the Interactions API).
-			if (error instanceof ApiError && error.status === 404 && params['previous_interaction_id']) {
+			// so the user never sees an error.
+			//
+			// IMPORTANT: we use _is404Error() rather than `instanceof ApiError`
+			// because the @google/genai SDK wraps errors in internal classes before
+			// throwing from interactions.create(). In the minified bundle the
+			// wrapper class does NOT satisfy `instanceof ApiError`, so the old check
+			// was silently skipped — the warn log never fired and the error bubbled
+			// to the user. The helper checks .status === 404 and a message regex as
+			// fallbacks (observed log pattern: "m4t: 404 Requested entity was not found").
+			if (_is404Error(error) && params['previous_interaction_id']) {
 				const staleId = params['previous_interaction_id'] as string;
 				this._logService.warn(
 					`[${this._providerLabel}] session expired (404) — stale id: ${staleId.slice(0, 20)}… | fingerprint: ${conversationFingerprint} | evicting and retrying as fresh session`
 				);
 				this._interactions.delete(conversationFingerprint);
-				// Strip the stale ID and retry immediately as a fresh session.
+				// Auto-retry as a fresh session without the stale ID.
+				// Strip the stale ID so we don't loop; if this retry also 404s,
+				// the second branch below fires and throws (model not supported).
 				const freshParams = { ...params };
 				delete freshParams['previous_interaction_id'];
 				return this._makeInteractionRequest(client, progress, freshParams, token, signal, issuedTime, conversationFingerprint, retryCount);
 			}
 			// 404 without a previous_interaction_id = model not supported on
 			// Interactions API — log and surface a specific error message.
-			if (error instanceof ApiError && error.status === 404) {
+			if (_is404Error(error)) {
 				this._logService.error(
 					`[${this._providerLabel}] 404 without previous_interaction_id — model ${String(params['model'])} may not support the Interactions API. Consider routing through the generateContent-based provider.`
 				);
