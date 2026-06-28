@@ -723,15 +723,31 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 						}
 
 					} else if (eventType === 'step.stop') {
-						// Emit any buffered function call for this step now that args are complete.
-						const stoppedStepId: string | undefined = e['step']?.['id'];
-						if (stoppedStepId && pendingFnCalls.has(stoppedStepId)) {
-							const pending = pendingFnCalls.get(stoppedStepId)!;
-							pendingFnCalls.delete(stoppedStepId);
-							let parsedArgs: Record<string, unknown> = {};
-							try { parsedArgs = JSON.parse(pending.argsStr || '{}'); } catch { parsedArgs = {}; }
-							if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
-							progress.report(new LanguageModelToolCallPart(pending.callId, pending.name, parsedArgs));
+						// Emit the buffered function call for this step now that args are complete.
+						// Primary path: match by step id (precise, supports parallel calls).
+						// Fallback: if step.stop carries no step id (some API versions omit it),
+						// emit the oldest buffered call (FIFO — correct for sequential execution).
+						if (pendingFnCalls.size > 0) {
+							const stoppedStepId: string | undefined = e['step']?.['id'];
+							let emitEntry: { callId: string; name: string; argsStr: string } | undefined;
+							let emitKey: string | undefined;
+
+							if (stoppedStepId && pendingFnCalls.has(stoppedStepId)) {
+								emitKey = stoppedStepId;
+								emitEntry = pendingFnCalls.get(stoppedStepId)!;
+							} else if (!stoppedStepId) {
+								// No step id in event — emit oldest pending call (FIFO).
+								const first = pendingFnCalls.entries().next().value as [string, { callId: string; name: string; argsStr: string }] | undefined;
+								if (first) { [emitKey, emitEntry] = first; }
+							}
+
+							if (emitKey && emitEntry) {
+								pendingFnCalls.delete(emitKey);
+								let parsedArgs: Record<string, unknown> = {};
+								try { parsedArgs = JSON.parse(emitEntry.argsStr || '{}'); } catch { parsedArgs = {}; }
+								if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
+								progress.report(new LanguageModelToolCallPart(emitEntry.callId, emitEntry.name, parsedArgs));
+							}
 						}
 
 						// Accumulate usage from the most recent step.stop that has it
