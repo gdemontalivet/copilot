@@ -2916,6 +2916,63 @@ fs.writeFileSync(f, code);
 console.log("Patched: BYOK getAllModels 24h cache + in-flight dedup (42)");
 PATCH42_EOF
 
+# Patch 42b: Add [BYOK Picker] timing logs to AbstractLanguageModelChatProvider.
+#
+# Patch 42 installs the cache logic but has no logging, making it impossible to
+# diagnose slow or hanging providers from the VS Code log file.  This follow-up
+# adds info-level "[BYOK Picker]" lines that show:
+#   - provider id, cache HIT or fresh getAllModels call, silent flag
+#   - elapsed ms for each getAllModels invocation (success or error)
+#   - "awaiting existing inflight" when a concurrent caller coalesces
+#
+# Sentinel: "[BYOK Picker]"
+# Ordering: must run after Patch 42 (anchors on Patch 42 output).
+node << 'PATCH42B_EOF'
+const fs = require("fs");
+const f = "src/extension/byok/vscode-node/abstractLanguageModelChatProvider.ts";
+let code = fs.readFileSync(f, "utf8");
+
+if (code.includes("[BYOK Picker]")) {
+  console.log("Patch 42b (picker timing logs) already present, skipping");
+  process.exit(0);
+}
+
+if (!code.includes("_BYOK_MODEL_LIST_TTL_MS")) {
+  console.warn("WARN: Patch 42 cache sentinel not found — skipping Patch 42b (run Patch 42 first)");
+  process.exit(0);
+}
+
+// 1) Add _pickerT0 timestamp at the very start of the method.
+const startAnchor = "\tasync provideLanguageModelChatInformation({ silent, configuration }: PrepareLanguageModelChatModelOptions, token: CancellationToken): Promise<T[]> {\n\t\tlet apiKey";
+const startReplacement = "\tasync provideLanguageModelChatInformation({ silent, configuration }: PrepareLanguageModelChatModelOptions, token: CancellationToken): Promise<T[]> {\n\t\tconst _pickerT0 = Date.now();\n\t\tlet apiKey";
+if (!code.includes(startAnchor)) {
+  console.warn("WARN: Patch 42b anchor 1 (method start) not found — skipping");
+  process.exit(0);
+}
+code = code.replace(startAnchor, () => startReplacement);
+
+// 2) Add logging to the cache HIT (models) branch.
+const cacheHitAnchor = "\t\t\tif ('models' in cached) {\n\t\t\t\treturn cached.models.map(model => ({ ...model, isBYOK: true, apiKey, configuration }));\n\t\t\t}\n\t\t\tthrow cached.error;";
+const cacheHitReplacement = "\t\t\tif ('models' in cached) {\n\t\t\t\tthis._logService.info(`[BYOK Picker] ${this._id} cache HIT ${cached.models.length} models silent=${silent} elapsed=${Date.now() - _pickerT0}ms`);\n\t\t\t\treturn cached.models.map(model => ({ ...model, isBYOK: true, apiKey, configuration }));\n\t\t\t}\n\t\t\tthis._logService.info(`[BYOK Picker] ${this._id} cache HIT (error) silent=${silent} elapsed=${Date.now() - _pickerT0}ms`);\n\t\t\tthrow cached.error;";
+if (!code.includes(cacheHitAnchor)) {
+  console.warn("WARN: Patch 42b anchor 2 (cache HIT branch) not found — skipping");
+  process.exit(0);
+}
+code = code.replace(cacheHitAnchor, () => cacheHitReplacement);
+
+// 3) Add _t1 timestamp + start log, and wrap inflight creation with timing.
+const inflightAnchor = "\t\tlet inflight = this._byokModelListInFlight.get(cacheKey);\n\t\tif (!inflight) {\n\t\t\tinflight = (async () => {\n\t\t\t\ttry {\n\t\t\t\t\tconst result = await this.getAllModels(silent, apiKey, configuration as C);\n\t\t\t\t\tthis._byokModelListCache.set(cacheKey, {\n\t\t\t\t\t\tmodels: result,\n\t\t\t\t\t\texpiresAt: Date.now() + AbstractLanguageModelChatProvider._BYOK_MODEL_LIST_TTL_MS,\n\t\t\t\t\t});\n\t\t\t\t\treturn result;\n\t\t\t\t} catch (err) {\n\t\t\t\t\tthis._byokModelListCache.set(cacheKey, {\n\t\t\t\t\t\terror: err,\n\t\t\t\t\t\texpiresAt: Date.now() + AbstractLanguageModelChatProvider._BYOK_MODEL_LIST_NEGATIVE_TTL_MS,\n\t\t\t\t\t});\n\t\t\t\t\tthrow err;\n\t\t\t\t} finally {\n\t\t\t\t\tthis._byokModelListInFlight.delete(cacheKey);\n\t\t\t\t}\n\t\t\t})();\n\t\t\tthis._byokModelListInFlight.set(cacheKey, inflight);\n\t\t}\n\t\tconst models = await inflight;";
+const inflightReplacement = "\t\tlet inflight = this._byokModelListInFlight.get(cacheKey);\n\t\tif (!inflight) {\n\t\t\tconst _t1 = Date.now();\n\t\t\tthis._logService.info(`[BYOK Picker] ${this._id} starting getAllModels silent=${silent} hasKey=${!!apiKey}`);\n\t\t\tinflight = (async () => {\n\t\t\t\ttry {\n\t\t\t\t\tconst result = await this.getAllModels(silent, apiKey, configuration as C);\n\t\t\t\t\tthis._logService.info(`[BYOK Picker] ${this._id} getAllModels OK ${result.length} models silent=${silent} elapsed=${Date.now() - _t1}ms`);\n\t\t\t\t\tthis._byokModelListCache.set(cacheKey, {\n\t\t\t\t\t\tmodels: result,\n\t\t\t\t\t\texpiresAt: Date.now() + AbstractLanguageModelChatProvider._BYOK_MODEL_LIST_TTL_MS,\n\t\t\t\t\t});\n\t\t\t\t\treturn result;\n\t\t\t\t} catch (err) {\n\t\t\t\t\tthis._logService.info(`[BYOK Picker] ${this._id} getAllModels ERR silent=${silent} elapsed=${Date.now() - _t1}ms reason=${err instanceof Error ? err.message.split('\\n')[0] : String(err)}`);\n\t\t\t\t\tthis._byokModelListCache.set(cacheKey, {\n\t\t\t\t\t\terror: err,\n\t\t\t\t\t\texpiresAt: Date.now() + AbstractLanguageModelChatProvider._BYOK_MODEL_LIST_NEGATIVE_TTL_MS,\n\t\t\t\t\t});\n\t\t\t\t\tthrow err;\n\t\t\t\t} finally {\n\t\t\t\t\tthis._byokModelListInFlight.delete(cacheKey);\n\t\t\t\t}\n\t\t\t})();\n\t\t\tthis._byokModelListInFlight.set(cacheKey, inflight);\n\t\t} else {\n\t\t\tthis._logService.info(`[BYOK Picker] ${this._id} awaiting existing inflight silent=${silent}`);\n\t\t}\n\t\tconst models = await inflight;";
+if (!code.includes(inflightAnchor)) {
+  console.warn("WARN: Patch 42b anchor 3 (inflight block) not found — skipping");
+  process.exit(0);
+}
+code = code.replace(inflightAnchor, () => inflightReplacement);
+
+fs.writeFileSync(f, code);
+console.log("Patched: [BYOK Picker] timing logs in AbstractLanguageModelChatProvider (42b)");
+PATCH42B_EOF
+
 # Patch 43: Resolve cross-provider tool names when converting transcripts to Gemini.
 #
 # Context. When a chat session is started with Anthropic (Sonnet) and then

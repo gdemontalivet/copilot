@@ -434,16 +434,34 @@ export class GeminiADCLMProvider extends GeminiNativeBYOKLMProvider {
 
 		// No configured group: inject 'adc' sentinel and soft-fail on auth errors
 		// so the dropdown keeps working for all other providers.
+		//
+		// IMPORTANT: We also race with a 2-second timeout.  Without it the OAuth
+		// token fetch + models.list() can take ~6 seconds to fail with 403 (wrong
+		// ADC scopes), blocking the entire in-chat model picker because VS Code
+		// waits for every provider to respond before showing the dropdown.
+		// The timeout resolves with [] so the picker shows immediately; the
+		// inflight getAllModels continues in the background and populates the
+		// negative cache (30s) so subsequent calls return instantly.
 		const enrichedOptions = {
 			...options,
 			configuration: { ...(options.configuration ?? {}), apiKey: 'adc' },
 		};
+		const PICKER_TIMEOUT_MS = 2_000;
+		const timeoutPromise = new Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]>(
+			resolve => setTimeout(() => {
+				this._logService.info('[GeminiADC] picker timeout (2s) — returning [] so dropdown is not blocked');
+				resolve([]);
+			}, PICKER_TIMEOUT_MS)
+		);
 		try {
-			return await super.provideLanguageModelChatInformation(enrichedOptions, token);
+			return await Promise.race([
+				super.provideLanguageModelChatInformation(enrichedOptions, token),
+				timeoutPromise,
+			]);
 		} catch (err) {
 			// Auth failure with no configured group → treat as "no models available"
 			// rather than crashing the global model picker.
-			this._logService.trace(
+			this._logService.info(
 				`[GeminiADC] No credentials available, suppressing picker error: ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`
 			);
 			return [];

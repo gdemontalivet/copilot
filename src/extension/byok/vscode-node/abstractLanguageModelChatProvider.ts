@@ -59,6 +59,7 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 	}
 
 	async provideLanguageModelChatInformation({ silent, configuration }: PrepareLanguageModelChatModelOptions, token: CancellationToken): Promise<T[]> {
+		const _pickerT0 = Date.now();
 		let apiKey: string | undefined = (configuration as C)?.apiKey;
 		if (!apiKey) {
 			apiKey = await this.configureDefaultGroupWithApiKeyOnly();
@@ -72,21 +73,27 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 		const cached = this._byokModelListCache.get(cacheKey);
 		if (cached && cached.expiresAt > now) {
 			if ('models' in cached) {
+				this._logService.info(`[BYOK Picker] ${this._id} cache HIT ${cached.models.length} models silent=${silent} elapsed=${Date.now() - _pickerT0}ms`);
 				return cached.models.map(model => ({ ...model, isBYOK: true, apiKey, configuration }));
 			}
+			this._logService.info(`[BYOK Picker] ${this._id} cache HIT (error) silent=${silent} elapsed=${Date.now() - _pickerT0}ms`);
 			throw cached.error;
 		}
 		let inflight = this._byokModelListInFlight.get(cacheKey);
 		if (!inflight) {
+			const _t1 = Date.now();
+			this._logService.info(`[BYOK Picker] ${this._id} starting getAllModels silent=${silent} hasKey=${!!apiKey}`);
 			inflight = (async () => {
 				try {
 					const result = await this.getAllModels(silent, apiKey, configuration as C);
+					this._logService.info(`[BYOK Picker] ${this._id} getAllModels OK ${result.length} models silent=${silent} elapsed=${Date.now() - _t1}ms`);
 					this._byokModelListCache.set(cacheKey, {
 						models: result,
 						expiresAt: Date.now() + AbstractLanguageModelChatProvider._BYOK_MODEL_LIST_TTL_MS,
 					});
 					return result;
 				} catch (err) {
+					this._logService.info(`[BYOK Picker] ${this._id} getAllModels ERR silent=${silent} elapsed=${Date.now() - _t1}ms reason=${err instanceof Error ? err.message.split('\n')[0] : String(err)}`);
 					this._byokModelListCache.set(cacheKey, {
 						error: err,
 						expiresAt: Date.now() + AbstractLanguageModelChatProvider._BYOK_MODEL_LIST_NEGATIVE_TTL_MS,
@@ -97,6 +104,8 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 				}
 			})();
 			this._byokModelListInFlight.set(cacheKey, inflight);
+		} else {
+			this._logService.info(`[BYOK Picker] ${this._id} awaiting existing inflight silent=${silent}`);
 		}
 		const models = await inflight;
 		// ─── END BYOK CUSTOM PATCH ────────────────────────
