@@ -346,8 +346,18 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 				);
 			}
 
-			// Build the latest-turn input
-			const input = _buildInput(messages);
+		// Build the latest-turn input
+		const input = _buildInput(messages);
+		if (Array.isArray(input) && input.length > 0) {
+			// Turn 2+: we're sending tool results — log the call_ids so we can verify
+			// they match the step.id values emitted by the previous interaction turn.
+			this._logService.info(
+				`[${this._providerLabel}] tool-result input | ${input.length} result(s): ` +
+				(input as Array<Record<string, unknown>>).map(r =>
+					`call_id=${r['call_id']} result="${String(r['result']).slice(0, 80)}"`
+				).join(' | ')
+			);
+		}
 
 			// Convert VS Code tools → Interactions API FunctionT[]
 			const tools = (options.tools ?? []).map(tool => ({
@@ -602,9 +612,10 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 		let pendingThinkingSignature: string | undefined;
 
 		// Buffer for function calls whose arguments arrive via step.delta/arguments_delta.
-		// Keyed by step id so parallel tool calls don't interfere.
-		// Value: { callId, name, argsStr (accumulated JSON string) }
-		const pendingFnCalls = new Map<string, { callId: string; name: string; argsStr: string }>();
+		// Keyed by step INDEX (e['index'] from StepStart/StepDelta/StepStop events) because
+		// StepStop carries index but NOT the step id — matching by index is the only reliable link.
+		// Value: { callId (= step.id from FunctionCallStep), name, argsStr (accumulated JSON) }
+		const pendingFnCalls = new Map<number, { callId: string; name: string; argsStr: string }>();
 
 		// ─── Inactivity timeout around stream iteration ───────────────────
 			// The connect timeout above only guards interactions.create() returning the
@@ -665,11 +676,12 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 						const stepType: string = step['type'] ?? '';
 
 					if (stepType === 'function_call') {
-						// Some models (e.g. gemini-3.1-pro-preview) stream function-call
-						// arguments via step.delta/arguments_delta rather than delivering them
-						// all at step.start. Buffer every function call here; emit at step.stop
-						// or at stream end (whichever comes first).
-						const stepId: string = step['id'] ?? generateUuid();
+						// Buffer function calls; emit only when step.stop fires for this index
+						// (or at stream end). StepStop has 'index' but NOT 'step.id', so we key
+						// by the numeric step index that all three event types share.
+						const stepIndex: number = e['index'] as number ?? -1;
+						// step.id is the call_id the Interactions API requires in function_result
+						const stepId: string = (step['id'] as string | undefined) ?? generateUuid();
 						let callId = stepId;
 						if (pendingThinkingSignature) {
 							callId = `${callId}|${pendingThinkingSignature}`;
@@ -680,8 +692,8 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 						const seedStr = (seedArgs && typeof seedArgs === 'object' && Object.keys(seedArgs).length > 0)
 							? JSON.stringify(seedArgs)
 							: '';
-						pendingFnCalls.set(stepId, { callId, name: step['name'] ?? '', argsStr: seedStr });
-						this._logService.info(`[${this._providerLabel}] fn-call buffered | step=${stepId} | name=${step['name'] ?? '?'} | seedArgs=${seedStr || '(streaming)'}`);
+						pendingFnCalls.set(stepIndex, { callId, name: step['name'] ?? '', argsStr: seedStr });
+						this._logService.info(`[${this._providerLabel}] fn-call buffered | idx=${stepIndex} | step.id=${stepId} | name=${step['name'] ?? '?'} | seedArgs=${seedStr || '(streaming)'}`);
 
 						} else if (stepType === 'thought') {
 							if (step['signature']) { pendingThinkingSignature = step['signature'] as string; }
@@ -710,44 +722,25 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 						} else if (deltaType === 'thought_signature' && delta['signature']) {
 							pendingThinkingSignature = delta['signature'] as string;
 
-						} else if (deltaType === 'arguments_delta' && delta['arguments']) {
-							// Accumulate streaming args for the most recently started function call.
-							// The Interactions API streams one step at a time so the last entry
-							// in pendingFnCalls is the active one.
-							const lastEntry = pendingFnCalls.size > 0
-								? [...pendingFnCalls.values()][pendingFnCalls.size - 1]
-								: undefined;
-							if (lastEntry) { lastEntry.argsStr += delta['arguments'] as string; }
-						}
+					} else if (deltaType === 'arguments_delta' && delta['arguments']) {
+						// Accumulate streaming args for this step (keyed by index).
+						const deltaIndex: number = e['index'] as number ?? -1;
+						const deltaEntry = pendingFnCalls.get(deltaIndex);
+						if (deltaEntry) { deltaEntry.argsStr += delta['arguments'] as string; }
+					}
 
 					} else if (eventType === 'step.stop') {
-						// Emit the buffered function call for this step now that args are complete.
-						// Primary path: match by step id (precise, supports parallel calls).
-						// Fallback: if step.stop carries no step id (some API versions omit it),
-						// emit the oldest buffered call (FIFO — correct for sequential execution).
-						const stoppedStepId: string | undefined = e['step']?.['id'];
-						this._logService.info(`[${this._providerLabel}] step.stop | steppedId=${stoppedStepId ?? '(none)'} | pendingCalls=${pendingFnCalls.size}`);
-						if (pendingFnCalls.size > 0) {
-							let emitEntry: { callId: string; name: string; argsStr: string } | undefined;
-							let emitKey: string | undefined;
-
-							if (stoppedStepId && pendingFnCalls.has(stoppedStepId)) {
-								emitKey = stoppedStepId;
-								emitEntry = pendingFnCalls.get(stoppedStepId)!;
-							} else if (!stoppedStepId) {
-								// No step id in event — emit oldest pending call (FIFO).
-								const first = pendingFnCalls.entries().next().value as [string, { callId: string; name: string; argsStr: string }] | undefined;
-								if (first) { [emitKey, emitEntry] = first; }
-							}
-
-							if (emitKey && emitEntry) {
-								pendingFnCalls.delete(emitKey);
-								let parsedArgs: Record<string, unknown> = {};
-								try { parsedArgs = JSON.parse(emitEntry.argsStr || '{}'); } catch { parsedArgs = {}; }
-								if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
-								this._logService.info(`[${this._providerLabel}] fn-call emitted (step.stop) | name=${emitEntry.name} | args=${emitEntry.argsStr}`);
-								progress.report(new LanguageModelToolCallPart(emitEntry.callId, emitEntry.name, parsedArgs));
-							}
+						// Match by step INDEX (StepStop has 'index' but no 'step.id' field).
+						const stoppedIndex: number = e['index'] as number ?? -1;
+						this._logService.info(`[${this._providerLabel}] step.stop | idx=${stoppedIndex} | pendingCalls=${pendingFnCalls.size}`);
+						const stopEntry = pendingFnCalls.get(stoppedIndex);
+						if (stopEntry) {
+							pendingFnCalls.delete(stoppedIndex);
+							let parsedArgs: Record<string, unknown> = {};
+							try { parsedArgs = JSON.parse(stopEntry.argsStr || '{}'); } catch { parsedArgs = {}; }
+							if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
+							this._logService.info(`[${this._providerLabel}] fn-call emitted (step.stop) | callId=${stopEntry.callId} | name=${stopEntry.name} | args=${stopEntry.argsStr}`);
+							progress.report(new LanguageModelToolCallPart(stopEntry.callId, stopEntry.name, parsedArgs));
 						}
 
 						// Accumulate usage from the most recent step.stop that has it
