@@ -474,12 +474,12 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 		if (capturingToken) {
 			return runWithCapturingToken(capturingToken, () =>
 				parentTraceContext
-					? this._otelService.runWithContext(parentTraceContext, executeRequest)
+					? this._otelService.runWithTraceContext(parentTraceContext, executeRequest)
 					: executeRequest()
 			);
 		}
 		return parentTraceContext
-			? this._otelService.runWithContext(parentTraceContext, executeRequest)
+			? this._otelService.runWithTraceContext(parentTraceContext, executeRequest)
 			: executeRequest();
 	}
 
