@@ -9,8 +9,10 @@
 // family.  New models and capabilities (e.g. gemini-3.5-flash) will launch
 // exclusively here and not on the legacy generateContent path.
 //
-// This provider (vendor `geminiia`) extends GeminiNativeBYOKLMProvider and
+// This provider (vendor `gemini`) extends GeminiNativeBYOKLMProvider and
 // replaces the generateContentStream call with client.interactions.create().
+// VertexGeminiLMProvider and GeminiADCLMProvider extend this class to inherit
+// the interactions pipeline while injecting Vertex / ADC credentials.
 // Everything else — model listing, client construction, OTel instrumentation,
 // error extraction, Patch-59 dynamic model discovery — is inherited unchanged.
 //
@@ -37,7 +39,10 @@
 // Requires @google/genai ≥ 2.3.0 (client.interactions.create available).
 // The patch script (Patch 5b) bumps the dependency from ^1.22.0 to ^2.10.0.
 //
-// Vendor: `geminiia` (lowercase of providerName).
+// Vendor: `gemini` — this provider replaces GeminiNativeBYOKLMProvider as the
+// primary Gemini vendor. GeminiADCLMProvider (geminiadc) and
+// VertexGeminiLMProvider (vertexgemini) extend this class to inherit the
+// Interactions API pipeline while injecting their own client credentials.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { ApiError } from '@google/genai';
@@ -194,7 +199,7 @@ const KNOWN_GEMINIA_MODELS: BYOKKnownModels = {
 		vision: true,
 		thinking: true,
 	},
-	// Include 3.x mainline so users don't need to configure both gemini + geminiia
+	// Include 3.x mainline so users always get the best-available models
 	'gemini-3.1-pro-preview': {
 		maxInputTokens: 1_000_000,
 		maxOutputTokens: 64_000,
@@ -222,9 +227,18 @@ const KNOWN_GEMINIA_MODELS: BYOKKnownModels = {
 
 export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 	// ─── BYOK CUSTOM PATCH: subclassable providerName ──────────────────────────
-	public static override readonly providerName: string = 'GeminiIA';
+	// Replaces GeminiNativeBYOKLMProvider ('Gemini'/'gemini') as the primary
+	// Gemini vendor. Subclasses (VertexGeminiLMProvider, GeminiADCLMProvider)
+	// inherit the Interactions API pipeline and override _name/_id in their
+	// own constructors.
+	public static override readonly providerName: string = 'Gemini';
 	public static override readonly providerId = GeminiInteractionLMProvider.providerName.toLowerCase();
 	// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────
+
+	/** Dynamic label for logging/telemetry — picks up subclass _name correctly. */
+	protected get _providerLabel(): string {
+		return (this as unknown as { _name: string })._name ?? 'Gemini';
+	}
 
 	/** fingerprint → latest Interactions API interactionId for that conversation */
 	private readonly _interactions = new Map<string, string>();
@@ -248,15 +262,10 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 			telemetryService,
 			otelService,
 		);
-		// The parent chain hardcodes GeminiNativeBYOKLMProvider.providerId ('gemini')
-		// and providerName ('Gemini') into the abstract-class constructor, so the
-		// instance _id/_name fields are wrong until we override them here.
-		// Without this: _byokModelListCacheKey() starts with 'gemini::' for both the
-		// native Gemini and GeminiIA providers → they share a cache entry when using
-		// the same API key → stale reads / incorrect model lists.  Same pattern as
-		// GeminiADCLMProvider.
-		(this as unknown as { _name: string })._name = GeminiInteractionLMProvider.providerName;
-		(this as unknown as { _id: string })._id = GeminiInteractionLMProvider.providerName.toLowerCase();
+		// providerName is now 'Gemini' (same as GeminiNativeBYOKLMProvider), so
+		// _name/'gemini'/_id are already correct after the parent constructor runs.
+		// Subclasses (VertexGeminiLMProvider, GeminiADCLMProvider) override _name/_id
+		// in their own constructors to 'VertexGemini'/'vertexgemini' etc.
 	}
 
 	override async provideLanguageModelChatResponse(
@@ -303,7 +312,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 
 			const requestId = generateUuid();
 			const pendingLoggedChatRequest = this._requestLogger.logChatRequest(
-				'GeminiIA',
+				this._providerLabel,
 				{
 					model: model.id,
 					modelMaxPromptTokens: model.maxInputTokens,
@@ -326,28 +335,28 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 			const abortController = new AbortController();
 			const cancelSub = token.onCancellationRequested(() => {
 				abortController.abort();
-				this._logService.trace('GeminiIA request aborted');
+				this._logService.trace(`${this._providerLabel} request aborted`);
 			});
 
 			const wrappedProgress = new RecordedProgress(progress);
 
 			try {
-				const result = await this._makeInteractionRequest(
-					client, wrappedProgress, {
-						model: model.id,
-						input,
-						store: true,
-						previous_interaction_id: previousInteractionId,
-						system_instruction: systemText || undefined,
-						tools: tools.length > 0 ? tools : undefined,
-						generation_config: {
-							max_output_tokens: model.maxOutputTokens,
-							thinking_summaries: 'auto',
-						},
-						stream: true,
+			const result = await this._makeInteractionRequest(
+				client, wrappedProgress, {
+					model: model.id,
+					input,
+					store: true,
+					previous_interaction_id: previousInteractionId,
+					system_instruction: systemText || undefined,
+					tools: tools.length > 0 ? tools : undefined,
+					generation_config: {
+						max_output_tokens: model.maxOutputTokens,
+						thinking_summaries: 'auto',
 					},
-					token, issuedTime, fingerprint,
-				);
+					stream: true,
+				},
+				token, abortController.signal, issuedTime, fingerprint,
+			);
 
 				if (result.ttft) { pendingLoggedChatRequest.markTimeToFirstToken(result.ttft); }
 				pendingLoggedChatRequest.resolve(
@@ -396,7 +405,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 
 				if (result.usage) {
 					const durationSec = (Date.now() - issuedTime) / 1000;
-					const metricAttrs = { operationName: GenAiOperationName.CHAT, providerName: 'geminiia', requestModel: model.id, responseModel: model.id };
+					const metricAttrs = { operationName: GenAiOperationName.CHAT, providerName: this._providerLabel.toLowerCase(), requestModel: model.id, responseModel: model.id };
 					GenAiMetrics.recordOperationDuration(this._otelService, durationSec, metricAttrs);
 					if (result.usage.prompt_tokens) { GenAiMetrics.recordTokenUsage(this._otelService, result.usage.prompt_tokens, 'input', metricAttrs); }
 					if (result.usage.completion_tokens) { GenAiMetrics.recordTokenUsage(this._otelService, result.usage.completion_tokens, 'output', metricAttrs); }
@@ -410,7 +419,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 				);
 
 				this._telemetryService.sendTelemetryEvent('response.success', { github: true, microsoft: true }, {
-					source: 'byok.geminiia', model: model.id, requestId,
+					source: `byok.${this._providerLabel.toLowerCase()}`, model: model.id, requestId,
 				}, {
 					totalTokenMax: model.maxInputTokens ?? -1,
 					...(telemetryTurn !== undefined ? { turn: telemetryTurn } : {}),
@@ -425,7 +434,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 					isBYOK: 1,
 				});
 			} catch (err) {
-				this._logService.error(`BYOK GeminiIA error: ${toErrorMessage(err, true)}`);
+				this._logService.error(`BYOK ${this._providerLabel} error: ${toErrorMessage(err, true)}`);
 				const readableReason = token.isCancellationRequested ? 'cancelled' : _extractReadableGeminiMessage(err);
 				pendingLoggedChatRequest.resolve({
 					type: token.isCancellationRequested ? ChatFetchResponseType.Canceled : ChatFetchResponseType.Unknown,
@@ -450,7 +459,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 					[GenAiAttr.OPERATION_NAME]: GenAiOperationName.CHAT,
 					[GenAiAttr.PROVIDER_NAME]: GenAiProviderName.GEMINI,
 					[GenAiAttr.REQUEST_MODEL]: model.id,
-					[GenAiAttr.AGENT_NAME]: 'GeminiIABYOK',
+					[GenAiAttr.AGENT_NAME]: `${this._providerLabel}BYOK`,
 					[CopilotChatAttr.MAX_PROMPT_TOKENS]: model.maxInputTokens,
 					[StdAttr.SERVER_ADDRESS]: 'generativelanguage.googleapis.com',
 				},
@@ -496,12 +505,18 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 		progress: Progress<LMResponsePart>,
 		params: Record<string, unknown>,
 		token: CancellationToken,
+		signal: AbortSignal,
 		issuedTime: number,
 		conversationFingerprint: string,
 		retryCount = 0,
 	): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined }> {
 		const MAX_RETRIES = 6;
 		const CONNECT_TIMEOUT_MS = 120_000;
+		// 90s inactivity timeout: if no SSE events arrive within this window the
+		// stream has silently stalled (network-level hang, model wedged, upstream
+		// bug). Reset on every received event so long-running thinking turns are
+		// not interrupted — only genuine silence triggers the abort.
+		const INACTIVITY_TIMEOUT_MS = 90_000;
 		const start = Date.now();
 		let ttft: number | undefined;
 		let ttfte: number | undefined;
@@ -520,95 +535,130 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 					CONNECT_TIMEOUT_MS,
 				)
 			);
+			// Pass AbortSignal as SDK options so user cancellation propagates into the HTTP layer.
+			// The second-arg options shape matches @google/genai v2 (httpOptions.signal).
 			stream = await Promise.race([
-				interactions.create(params) as Promise<AsyncIterable<unknown>>,
+				interactions.create(params, { signal }) as Promise<AsyncIterable<unknown>>,
 				connectTimeout,
 			]);
 
 			let pendingThinkingSignature: string | undefined;
 
-			for await (const rawEvent of stream) {
-				if (token.isCancellationRequested) { break; }
+			// ─── Inactivity timeout around stream iteration ───────────────────
+			// The connect timeout above only guards interactions.create() returning the
+			// AsyncIterable. Once we have the stream, for-await blocks indefinitely if
+			// events stop arriving (model hung, network half-open, upstream bug).
+			// We race each iterator.next() against a 90s inactivity promise that resets
+			// on every received event — long thinking turns are fine, only true silence
+			// triggers the abort.
+			let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+			let inactivityReject: ((err: Error) => void) | undefined;
+			const inactivityPromise = new Promise<never>((_, reject) => { inactivityReject = reject; });
+			const resetInactivityTimer = () => {
+				if (inactivityTimer) { clearTimeout(inactivityTimer); }
+				inactivityTimer = setTimeout(() => {
+					inactivityReject!(new TypeError(`GeminiIA stream inactivity timeout — no events for ${INACTIVITY_TIMEOUT_MS / 1000}s`));
+				}, INACTIVITY_TIMEOUT_MS);
+			};
+			resetInactivityTimer();
 
-				const e = rawEvent as Record<string, any>;
-				const eventType: string = e['event_type'] ?? '';
+			const streamIterator = (stream as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+			try {
+				while (true) {
+					// Race the next event against the inactivity timeout.
+					const iterResult = await Promise.race([
+						streamIterator.next() as Promise<IteratorResult<unknown>>,
+						inactivityPromise,
+					]);
+					if (iterResult.done) { break; }
 
-				if (ttft === undefined && eventType !== '') {
-					ttft = Date.now() - start;
-				}
+					// Event received — reset the inactivity clock.
+					resetInactivityTimer();
 
-				if (eventType === 'interaction.created') {
-					// Capture interaction ID for stateful chaining on the next turn
-					const id: string | undefined = e['interaction']?.['id'];
-					if (id) { this._interactions.set(conversationFingerprint, id); }
+					if (token.isCancellationRequested) { break; }
 
-				} else if (eventType === 'step.start') {
-					const step: Record<string, any> = e['step'] ?? {};
-					const stepType: string = step['type'] ?? '';
+					const e = iterResult.value as Record<string, any>;
+					const eventType: string = e['event_type'] ?? '';
 
-					if (stepType === 'function_call') {
-						// Emit immediately — full args are present at step.start
-						if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
-						let callId: string = step['id'] ?? generateUuid();
-						if (pendingThinkingSignature) {
-							callId = `${callId}|${pendingThinkingSignature}`;
-							progress.report(new LanguageModelThinkingPart('', undefined, { signature: pendingThinkingSignature }));
-							pendingThinkingSignature = undefined;
+					if (ttft === undefined && eventType !== '') {
+						ttft = Date.now() - start;
+					}
+
+					if (eventType === 'interaction.created') {
+						// Capture interaction ID for stateful chaining on the next turn
+						const id: string | undefined = e['interaction']?.['id'];
+						if (id) { this._interactions.set(conversationFingerprint, id); }
+
+					} else if (eventType === 'step.start') {
+						const step: Record<string, any> = e['step'] ?? {};
+						const stepType: string = step['type'] ?? '';
+
+						if (stepType === 'function_call') {
+							// Emit immediately — full args are present at step.start
+							if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
+							let callId: string = step['id'] ?? generateUuid();
+							if (pendingThinkingSignature) {
+								callId = `${callId}|${pendingThinkingSignature}`;
+								progress.report(new LanguageModelThinkingPart('', undefined, { signature: pendingThinkingSignature }));
+								pendingThinkingSignature = undefined;
+							}
+							progress.report(new LanguageModelToolCallPart(callId, step['name'] ?? '', step['arguments'] ?? {}));
+
+						} else if (stepType === 'thought') {
+							if (step['signature']) { pendingThinkingSignature = step['signature'] as string; }
 						}
-						progress.report(new LanguageModelToolCallPart(callId, step['name'] ?? '', step['arguments'] ?? {}));
 
-					} else if (stepType === 'thought') {
-						if (step['signature']) { pendingThinkingSignature = step['signature'] as string; }
-					}
+					} else if (eventType === 'step.delta') {
+						const delta: Record<string, any> = e['delta'] ?? {};
+						const deltaType: string = delta['type'] ?? '';
 
-				} else if (eventType === 'step.delta') {
-					const delta: Record<string, any> = e['delta'] ?? {};
-					const deltaType: string = delta['type'] ?? '';
+						if (deltaType === 'text' && delta['text']) {
+							if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
+							progress.report(new LanguageModelTextPart(delta['text'] as string));
 
-					if (deltaType === 'text' && delta['text']) {
-						if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
-						progress.report(new LanguageModelTextPart(delta['text'] as string));
+						} else if (deltaType === 'thought_summary') {
+							if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
+							// content is Array<TextContent | ImageContent> — extract text
+							const contentArr: Array<Record<string, any>> = Array.isArray(delta['content'])
+								? delta['content']
+								: delta['content'] ? [delta['content']] : [];
+							const thinkingText = contentArr
+								.filter(c => c['type'] === 'text' && c['text'])
+								.map(c => c['text'] as string)
+								.join('');
+							if (thinkingText) { progress.report(new LanguageModelThinkingPart(thinkingText)); }
 
-					} else if (deltaType === 'thought_summary') {
-						if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
-						// content is Array<TextContent | ImageContent> — extract text
-						const contentArr: Array<Record<string, any>> = Array.isArray(delta['content'])
-							? delta['content']
-							: delta['content'] ? [delta['content']] : [];
-						const thinkingText = contentArr
-							.filter(c => c['type'] === 'text' && c['text'])
-							.map(c => c['text'] as string)
-							.join('');
-						if (thinkingText) { progress.report(new LanguageModelThinkingPart(thinkingText)); }
+						} else if (deltaType === 'thought_signature' && delta['signature']) {
+							pendingThinkingSignature = delta['signature'] as string;
+						}
+						// 'arguments_delta': we already emitted the tool call at step.start
 
-					} else if (deltaType === 'thought_signature' && delta['signature']) {
-						pendingThinkingSignature = delta['signature'] as string;
-					}
-					// 'arguments_delta': we already emitted the tool call at step.start
+					} else if (eventType === 'step.stop') {
+						// Accumulate usage from the most recent step.stop that has it
+						const u: Record<string, any> | undefined = e['usage'] ?? e['metadata']?.['total_usage'];
+						if (u) {
+							const inputTok = (u['total_input_tokens'] as number | undefined) ?? -1;
+							const outputTok = (u['total_output_tokens'] as number | undefined) ?? -1;
+							usage = {
+								prompt_tokens: inputTok,
+								completion_tokens: outputTok,
+								total_tokens: inputTok >= 0 && outputTok >= 0 ? inputTok + outputTok : -1,
+								prompt_tokens_details: {
+									cached_tokens: (u['total_cached_tokens'] as number | undefined) ?? 0,
+								},
+							};
+						}
 
-				} else if (eventType === 'step.stop') {
-					// Accumulate usage from the most recent step.stop that has it
-					const u: Record<string, any> | undefined = e['usage'] ?? e['metadata']?.['total_usage'];
-					if (u) {
-						const inputTok = (u['total_input_tokens'] as number | undefined) ?? -1;
-						const outputTok = (u['total_output_tokens'] as number | undefined) ?? -1;
-						usage = {
-							prompt_tokens: inputTok,
-							completion_tokens: outputTok,
-							total_tokens: inputTok >= 0 && outputTok >= 0 ? inputTok + outputTok : -1,
-							prompt_tokens_details: {
-								cached_tokens: (u['total_cached_tokens'] as number | undefined) ?? 0,
-							},
-						};
-					}
-
-				} else if (eventType === 'interaction.completed') {
-					// Also available here if the interaction.created event didn't fire yet
-					const id: string | undefined = e['interaction']?.['id'];
-					if (id && !this._interactions.has(conversationFingerprint)) {
-						this._interactions.set(conversationFingerprint, id);
+					} else if (eventType === 'interaction.completed') {
+						// Also available here if the interaction.created event didn't fire yet
+						const id: string | undefined = e['interaction']?.['id'];
+						if (id && !this._interactions.has(conversationFingerprint)) {
+							this._interactions.set(conversationFingerprint, id);
+						}
 					}
 				}
+			} finally {
+				if (inactivityTimer) { clearTimeout(inactivityTimer); }
 			}
 
 			return { ttft, ttfte, usage };
@@ -618,6 +668,24 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 				return { ttft, ttfte, usage };
 			}
 
+			// ─── 404 on expired / invalid previous_interaction_id ─────────────
+			// Google's server-side interactions expire (typically after ~1h of
+			// inactivity). When we sent a previous_interaction_id and get back 404
+			// "Requested entity was not found", the stale ID must be evicted so the
+			// next turn can start a fresh session without another 404.
+			// Do NOT retry a 404 — it is deterministic.
+			if (error instanceof ApiError && error.status === 404 && params['previous_interaction_id']) {
+				this._logService.warn(
+					`${this._providerLabel} interaction session expired (404) — clearing stored ID for fingerprint ${conversationFingerprint}. Next turn will start a fresh session automatically.`
+				);
+				this._interactions.delete(conversationFingerprint);
+				throw new Error(
+					'The Gemini conversation session expired on Google\'s servers. Please try again — the next attempt will start a fresh session automatically.',
+					{ cause: error }
+				);
+			}
+			// ─── END 404 handling ─────────────────────────────────────────────
+
 			// ─── BYOK CUSTOM PATCH: retry on transient errors ─────────────
 			const retryKind = _classifyRetryableError(error);
 			if (retryKind && retryCount < MAX_RETRIES) {
@@ -625,15 +693,15 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 				const label = retryKind === 'rate-limit' ? '[Rate limit] 429'
 					: retryKind === 'unavailable' ? '[Service unavailable]'
 					: '[Network error]';
-				this._logService.warn(`GeminiIA ${retryKind}, retry ${retryCount + 1}/${MAX_RETRIES} in ${delay}ms: ${_extractReadableGeminiMessage(error)}`);
+				this._logService.warn(`${this._providerLabel} ${retryKind}, retry ${retryCount + 1}/${MAX_RETRIES} in ${delay}ms: ${_extractReadableGeminiMessage(error)}`);
 				progress.report(new LanguageModelThinkingPart(`${label} retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(delay / 1000)}s…\n`));
 				await new Promise(resolve => setTimeout(resolve, delay));
 				if (token.isCancellationRequested) { return { ttft, ttfte, usage }; }
-				return this._makeInteractionRequest(client, progress, params, token, issuedTime, conversationFingerprint, retryCount + 1);
+				return this._makeInteractionRequest(client, progress, params, token, signal, issuedTime, conversationFingerprint, retryCount + 1);
 			}
 			// ─── END BYOK CUSTOM PATCH ────────────────────────────────────
 
-			this._logService.error(`GeminiIA streaming error: ${toErrorMessage(error, true)}`);
+			this._logService.error(`${this._providerLabel} streaming error: ${toErrorMessage(error, true)}`);
 			throw error;
 		}
 	}
