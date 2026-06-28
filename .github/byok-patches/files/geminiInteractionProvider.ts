@@ -512,11 +512,15 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 	): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined }> {
 		const MAX_RETRIES = 6;
 		const CONNECT_TIMEOUT_MS = 120_000;
-		// 90s inactivity timeout: if no SSE events arrive within this window the
+		// 180s inactivity timeout: if no SSE events arrive within this window the
 		// stream has silently stalled (network-level hang, model wedged, upstream
 		// bug). Reset on every received event so long-running thinking turns are
 		// not interrupted — only genuine silence triggers the abort.
-		const INACTIVITY_TIMEOUT_MS = 90_000;
+		// 180s is chosen to be safely above observed legitimate deep-thinking turns
+		// (gemini-3.5-flash has been seen to take ~102s on complex tasks while
+		// still streaming thought_summary events throughout). Genuine hangs are
+		// indefinite, not 100-110s, so 180s catches them without false positives.
+		const INACTIVITY_TIMEOUT_MS = 180_000;
 		const start = Date.now();
 		let ttft: number | undefined;
 		let ttfte: number | undefined;
@@ -557,7 +561,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 			const resetInactivityTimer = () => {
 				if (inactivityTimer) { clearTimeout(inactivityTimer); }
 				inactivityTimer = setTimeout(() => {
-					inactivityReject!(new TypeError(`GeminiIA stream inactivity timeout — no events for ${INACTIVITY_TIMEOUT_MS / 1000}s`));
+					inactivityReject!(new TypeError(`GeminiIA stream inactivity timeout — no events for ${INACTIVITY_TIMEOUT_MS / 1000}s; the stream appears to have silently stalled`));
 				}, INACTIVITY_TIMEOUT_MS);
 			};
 			resetInactivityTimer();
