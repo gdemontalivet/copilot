@@ -179,8 +179,14 @@ function _fingerprint(messages: Array<LanguageModelChatMessage | LanguageModelCh
  *
  * - If the last message has LanguageModelToolResultPart items → FunctionResultStep[].
  * - Otherwise → text string from the last user message.
+ *
+ * @param callIdToName Optional map from callId → tool name, used to populate the
+ *   required `name` field in FunctionResultStep (must match the FunctionCallStep name).
  */
-function _buildInput(messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>): string | unknown[] {
+function _buildInput(
+	messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>,
+	callIdToName: ReadonlyMap<string, string> = new Map(),
+): string | unknown[] {
 	const last = messages[messages.length - 1];
 	const content = Array.isArray((last as any).content) ? (last as any).content as unknown[] : [];
 
@@ -199,15 +205,20 @@ function _buildInput(messages: Array<LanguageModelChatMessage | LanguageModelCha
 			} else {
 				resultText = '';
 			}
-			// Strip any thinking signature appended to the callId (e.g. 'stepId|signature').
-			// The Interactions API requires call_id to exactly match the function_call step's
-			// id; the '|signature' suffix is only for Anthropic round-trip and must be dropped.
-			const cleanCallId = tr.callId ? tr.callId.split('|')[0] : tr.callId;
-			return {
-				type: 'function_result',
-				call_id: cleanCallId,
-				result: resultText,
-			};
+		// Strip any thinking signature appended to the callId (e.g. 'stepId|signature').
+		// The Interactions API requires call_id to exactly match the function_call step's
+		// id; the '|signature' suffix is only for Anthropic round-trip and must be dropped.
+		const cleanCallId = tr.callId ? tr.callId.split('|')[0] : tr.callId;
+		// Look up the tool name — the Interactions API requires 'name' in FunctionResultStep
+		// to exactly match the 'name' from the corresponding FunctionCallStep.
+		const toolName = callIdToName.get(cleanCallId);
+		// The Interactions API rejects plain strings for 'result' — use Array<TextContent>.
+		return {
+			type: 'function_result',
+			call_id: cleanCallId,
+			...(toolName ? { name: toolName } : {}),
+			result: [{ type: 'text', text: resultText }],
+		};
 		});
 	}
 
@@ -274,6 +285,13 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 
 	/** fingerprint → latest Interactions API interactionId for that conversation */
 	private readonly _interactions = new Map<string, string>();
+
+	/**
+	 * callId → tool name, populated when a FunctionCallStep is emitted and
+	 * consumed when the matching FunctionResultStep is sent back to the API.
+	 * The API requires `name` in FunctionResultStep to match the FunctionCallStep.
+	 */
+	private readonly _callIdToName = new Map<string, string>();
 
 	constructor(
 		knownModels: BYOKKnownModels | undefined,
@@ -347,16 +365,16 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 			}
 
 		// Build the latest-turn input
-		const input = _buildInput(messages);
+		const input = _buildInput(messages, this._callIdToName);
 		if (Array.isArray(input) && input.length > 0) {
-			// Turn 2+: we're sending tool results — log the call_ids so we can verify
-			// they match the step.id values emitted by the previous interaction turn.
 			this._logService.info(
 				`[${this._providerLabel}] tool-result input | ${input.length} result(s): ` +
 				(input as Array<Record<string, unknown>>).map(r =>
-					`call_id=${r['call_id']} result="${String(r['result']).slice(0, 80)}"`
+					`call_id=${r['call_id']} name=${r['name'] ?? '(none)'} result="${String((r['result'] as any)?.[0]?.text ?? r['result']).slice(0, 80)}"`
 				).join(' | ')
 			);
+		} else {
+			this._logService.info(`[${this._providerLabel}] text input | "${String(input).slice(0, 80)}"`);
 		}
 
 			// Convert VS Code tools → Interactions API FunctionT[]
@@ -650,14 +668,17 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 
 					if (token.isCancellationRequested) { break; }
 
-					const e = iterResult.value as Record<string, any>;
-					const eventType: string = e['event_type'] ?? '';
+				const e = iterResult.value as Record<string, any>;
+				const eventType: string = e['event_type'] ?? '';
 
-					if (ttft === undefined && eventType !== '') {
-						ttft = Date.now() - start;
-					}
+				if (ttft === undefined && eventType !== '') {
+					ttft = Date.now() - start;
+				}
 
-					if (eventType === 'interaction.created') {
+				// Trace every event so we can diagnose tool-result turn silence
+				this._logService.info(`[${this._providerLabel}] event | ${eventType || '(no event_type)'} | idx=${e['index'] ?? '-'} | keys=${Object.keys(e).join(',')}`);
+
+				if (eventType === 'interaction.created') {
 						// Capture interaction ID for stateful chaining on the next turn
 						const id: string | undefined = e['interaction']?.['id'];
 						if (id) {
@@ -740,6 +761,8 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 							try { parsedArgs = JSON.parse(stopEntry.argsStr || '{}'); } catch { parsedArgs = {}; }
 							if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
 							this._logService.info(`[${this._providerLabel}] fn-call emitted (step.stop) | callId=${stopEntry.callId} | name=${stopEntry.name} | args=${stopEntry.argsStr}`);
+							// Store callId → name so _buildInput can include 'name' in the FunctionResultStep.
+							this._callIdToName.set(stopEntry.callId, stopEntry.name);
 							progress.report(new LanguageModelToolCallPart(stopEntry.callId, stopEntry.name, parsedArgs));
 						}
 
@@ -757,6 +780,17 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 								},
 							};
 						}
+
+					} else if (eventType === 'error') {
+						// The Interactions API streams an error event when it rejects the input
+						// (e.g. invalid function_result call_id, malformed tool schema, etc.).
+						// Log the full error payload and throw so the outer catch surfaces it
+						// as a readable error rather than silently returning an empty success.
+						const apiError: Record<string, any> = e['error'] ?? {};
+						const msg: string = apiError['message'] ?? JSON.stringify(apiError);
+						const code: string | number = apiError['code'] ?? apiError['status'] ?? '';
+						this._logService.error(`[${this._providerLabel}] API error event | code=${code} | message=${msg} | raw=${JSON.stringify(apiError)}`);
+						throw new Error(`Gemini Interactions API error${code ? ` (${code})` : ''}: ${msg}`);
 
 					} else if (eventType === 'interaction.completed') {
 						// Also available here if the interaction.created event didn't fire yet
@@ -785,6 +819,8 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 					try { parsedArgs = JSON.parse(pending.argsStr || '{}'); } catch { parsedArgs = {}; }
 					if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
 					this._logService.info(`[${this._providerLabel}] fn-call emitted (drain) | name=${pending.name} | args=${pending.argsStr}`);
+					// Store callId → name so _buildInput can include 'name' in the FunctionResultStep.
+					this._callIdToName.set(pending.callId, pending.name);
 					progress.report(new LanguageModelToolCallPart(pending.callId, pending.name, parsedArgs));
 				}
 				pendingFnCalls.clear();
