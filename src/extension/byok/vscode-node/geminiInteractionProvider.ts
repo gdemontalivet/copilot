@@ -599,9 +599,14 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 				connectTimeout,
 			]);
 
-			let pendingThinkingSignature: string | undefined;
+		let pendingThinkingSignature: string | undefined;
 
-			// ─── Inactivity timeout around stream iteration ───────────────────
+		// Buffer for function calls whose arguments arrive via step.delta/arguments_delta.
+		// Keyed by step id so parallel tool calls don't interfere.
+		// Value: { callId, name, argsStr (accumulated JSON string) }
+		const pendingFnCalls = new Map<string, { callId: string; name: string; argsStr: string }>();
+
+		// ─── Inactivity timeout around stream iteration ───────────────────
 			// The connect timeout above only guards interactions.create() returning the
 			// AsyncIterable. Once we have the stream, for-await blocks indefinitely if
 			// events stop arriving (model hung, network half-open, upstream bug).
@@ -659,16 +664,26 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 						const step: Record<string, any> = e['step'] ?? {};
 						const stepType: string = step['type'] ?? '';
 
-						if (stepType === 'function_call') {
-							// Emit immediately — full args are present at step.start
-							if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
-							let callId: string = step['id'] ?? generateUuid();
-							if (pendingThinkingSignature) {
-								callId = `${callId}|${pendingThinkingSignature}`;
-								progress.report(new LanguageModelThinkingPart('', undefined, { signature: pendingThinkingSignature }));
-								pendingThinkingSignature = undefined;
-							}
-							progress.report(new LanguageModelToolCallPart(callId, step['name'] ?? '', step['arguments'] ?? {}));
+					if (stepType === 'function_call') {
+						// Some models (e.g. gemini-3.1-pro-preview) stream function-call
+						// arguments via step.delta/arguments_delta rather than delivering them
+						// all at step.start. Buffer every function call here and emit the
+						// LanguageModelToolCallPart only once args are complete (at step.stop).
+						// Models that send full args in step.start produce no arguments_delta
+						// events, so step.stop fires immediately with whatever step.start had.
+						const stepId: string = step['id'] ?? generateUuid();
+						let callId = stepId;
+						if (pendingThinkingSignature) {
+							callId = `${callId}|${pendingThinkingSignature}`;
+							progress.report(new LanguageModelThinkingPart('', undefined, { signature: pendingThinkingSignature }));
+							pendingThinkingSignature = undefined;
+						}
+						// Seed argsStr with whatever step.start already provided (may be '{}' or a full object).
+						const seedArgs = step['arguments'];
+						const seedStr = (seedArgs && typeof seedArgs === 'object' && Object.keys(seedArgs).length > 0)
+							? JSON.stringify(seedArgs)
+							: '';
+						pendingFnCalls.set(stepId, { callId, name: step['name'] ?? '', argsStr: seedStr });
 
 						} else if (stepType === 'thought') {
 							if (step['signature']) { pendingThinkingSignature = step['signature'] as string; }
@@ -696,10 +711,29 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 
 						} else if (deltaType === 'thought_signature' && delta['signature']) {
 							pendingThinkingSignature = delta['signature'] as string;
+
+						} else if (deltaType === 'arguments_delta' && delta['arguments']) {
+							// Accumulate streaming args for the most recently started function call.
+							// The Interactions API streams one step at a time so the last entry
+							// in pendingFnCalls is the active one.
+							const lastEntry = pendingFnCalls.size > 0
+								? [...pendingFnCalls.values()][pendingFnCalls.size - 1]
+								: undefined;
+							if (lastEntry) { lastEntry.argsStr += delta['arguments'] as string; }
 						}
-						// 'arguments_delta': we already emitted the tool call at step.start
 
 					} else if (eventType === 'step.stop') {
+						// Emit any buffered function call for this step now that args are complete.
+						const stoppedStepId: string | undefined = e['step']?.['id'];
+						if (stoppedStepId && pendingFnCalls.has(stoppedStepId)) {
+							const pending = pendingFnCalls.get(stoppedStepId)!;
+							pendingFnCalls.delete(stoppedStepId);
+							let parsedArgs: Record<string, unknown> = {};
+							try { parsedArgs = JSON.parse(pending.argsStr || '{}'); } catch { parsedArgs = {}; }
+							if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
+							progress.report(new LanguageModelToolCallPart(pending.callId, pending.name, parsedArgs));
+						}
+
 						// Accumulate usage from the most recent step.stop that has it
 						const u: Record<string, any> | undefined = e['usage'] ?? e['metadata']?.['total_usage'];
 						if (u) {
