@@ -370,10 +370,16 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 				);
 
 				if (result.usage) {
-					wrappedProgress.report(new LanguageModelDataPart(
-						new TextEncoder().encode(JSON.stringify(result.usage)),
-						CustomDataPartMimeTypes.Usage,
-					));
+					try {
+						wrappedProgress.report(new LanguageModelDataPart(
+							new TextEncoder().encode(JSON.stringify(result.usage)),
+							CustomDataPartMimeTypes.Usage,
+						));
+					} catch {
+						// VS Code closes the response stream after long requests (e.g. after
+						// full retry exhaustion). The usage DataPart is non-fatal — only the
+						// context-window ring indicator misses the update. Swallow silently.
+					}
 				}
 
 				if (otelSpan && result.usage) {
