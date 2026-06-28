@@ -164,6 +164,17 @@ function _classifyRetryableError(err: unknown): 'rate-limit' | 'unavailable' | '
 		msg.includes('fetch failed') || msg.includes('network error') || msg.includes('socket hang up')) {
 		return 'network';
 	}
+	// The Interactions API streams error events that we rethrow as plain Error objects with
+	// the API status code embedded in the message:
+	//   "Gemini Interactions API error (too_many_requests): ..."
+	//   "Gemini Interactions API error (quota_exceeded): ..."
+	//   "Gemini Interactions API error (resource_exhausted): ..."
+	// These never have a numeric .status, so the checks above all miss them.
+	if (/too_many_requests|quota_exceeded|resource_exhausted/i.test(msg)) { return 'rate-limit'; }
+	if (/service_unavailable|server_unavailable|unavailable|internal_error|server_error/i.test(msg) &&
+		!/invalid|bad_request|not_found|permission/i.test(msg)) {
+		return 'unavailable';
+	}
 	return null;
 }
 
