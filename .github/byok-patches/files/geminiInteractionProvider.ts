@@ -418,16 +418,36 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 			const hasAssistantHistory = messages.some(m =>
 				(m as LanguageModelChatMessage).role === LanguageModelChatMessageRole.Assistant
 			);
-			const previousInteractionId = hasAssistantHistory
-				? this._interactions.get(fingerprint)
-				: undefined;
-			if (!hasAssistantHistory && this._interactions.has(fingerprint)) {
-				this._logService.info(
-					`[${this._providerLabel}] session cache bypass — no assistant history in messages, treating as fresh conversation (fingerprint: ${fingerprint})`
-				);
-			}
+		const previousInteractionId = hasAssistantHistory
+			? this._interactions.get(fingerprint)
+			: undefined;
+		if (!hasAssistantHistory && this._interactions.has(fingerprint)) {
+			this._logService.info(
+				`[${this._providerLabel}] session cache bypass — no assistant history in messages, treating as fresh conversation (fingerprint: ${fingerprint})`
+			);
+		}
 
-		// Proactively guard against tool-order constraint violations.
+		// ── History-recovery fallback ────────────────────────────────────────────
+		// _interactions is in-memory only.  After a VS Code restart, extension
+		// reload, or when the user reopens an old conversation, hasAssistantHistory
+		// is true (VS Code passes the full message array) but previousInteractionId
+		// is undefined (the session map is empty).  Sending only the last message
+		// to a brand-new Interactions API session would give the model zero context.
+		//
+		// Recovery: delegate to the parent generateContentStream path which builds
+		// the full history from the messages array via apiMessageToGeminiMessage.
+		// The conversation stays on the generateContent path for its remaining turns
+		// (since we never establish a session ID this way), which is the correct
+		// behaviour — the user gets accurate responses instead of a context-less reply.
+		if (hasAssistantHistory && !previousInteractionId) {
+			this._logService.info(
+				`[${this._providerLabel}] no session ID for existing conversation (restart/reload?) — falling back to generateContent with full history | fingerprint: ${fingerprint} | messages: ${messages.length}`
+			);
+			return super.provideLanguageModelChatResponse(model, messages, options, progress, token);
+		}
+		// ── END history-recovery fallback ────────────────────────────────────────
+
+	// Proactively guard against tool-order constraint violations.
 		// The Interactions API requires FunctionResultStep[] input ONLY when the
 		// server's previous turn ended with function calls.  We track this via
 		// _lastTurnHadCalls (committed at each interaction.completed).
