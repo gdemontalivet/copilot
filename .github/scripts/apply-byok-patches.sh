@@ -4947,6 +4947,7 @@ PATCH68_EOF
 
 # -----------------------------------------------------------------------------
 # Patch 69: Wire GeminiInteractionLMProvider as the primary 'gemini' vendor.
+# Patch 70: Tool-order guard + reactive fallback in GeminiInteractionLMProvider.
 # -----------------------------------------------------------------------------
 # All 3 Gemini providers (gemini, vertexgemini, geminiadc) now use the
 # Interactions API. GeminiInteractionLMProvider replaces GeminiNativeBYOKLMProvider
@@ -4954,6 +4955,22 @@ PATCH68_EOF
 # vendor is removed — users should use 'gemini' directly.
 # Canonical file: .github/byok-patches/files/geminiInteractionProvider.ts
 # Vendor: gemini (providerName = 'Gemini', same key as the upstream native provider).
+#
+# Patch 70 additions (in the canonical file):
+#   • _isToolOrderError() — detects "function response turn must come immediately
+#     after a function call turn" API errors (invalid_request).
+#   • _buildTextFallback() — extracts the last user text from the messages array
+#     for use when function results cannot be sent.
+#   • _lastTurnHadCalls map — per-fingerprint boolean committed at each
+#     interaction.completed event; tracks whether the server's last turn ended
+#     with function calls so the next turn can choose input type proactively.
+#   • Proactive guard in provideLanguageModelChatResponse — if input would be
+#     FunctionResultStep[] but the server doesn't expect them (no session, or
+#     last turn was text), evicts the session and uses text fallback before the
+#     request is even made.
+#   • Reactive fallback in _makeInteractionRequest catch — if the ordering error
+#     still fires (e.g. _lastTurnHadCalls had no entry yet after extension reload),
+#     evicts the session and immediately retries with the text fallback.
 
 install_byok_file \
   ".github/byok-patches/files/geminiInteractionProvider.ts" \

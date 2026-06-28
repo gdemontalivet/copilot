@@ -100,6 +100,43 @@ import { toGeminiFunction, ToolJsonSchema } from '../common/geminiFunctionDeclar
 
 // ─── Error helpers (mirrors Patch 7/8 in geminiNativeProvider.ts) ────────────
 
+/**
+ * Returns true when the API error signals a tool-call ordering constraint
+ * violation: "function response turn must come immediately after a function
+ * call turn."  This happens when the server's last stored turn was text (not
+ * function calls) but we sent FunctionResultStep[] as input — typically after
+ * a stale session eviction, a VS Code state/server state divergence, or an
+ * unexpected replay of history.
+ */
+function _isToolOrderError(err: unknown): boolean {
+	const msg = String((err as any)?.message ?? '');
+	return /function response turn.*immediately after.*function call turn/i.test(msg) ||
+		/function call turn.*function response turn/i.test(msg);
+}
+
+/**
+ * Walk the messages array backwards and return the text of the last user
+ * message that has actual text content.  Used as a fallback input when we
+ * cannot send function results (session mismatch or fresh session).
+ */
+function _buildTextFallback(
+	messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>,
+): string {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if ((msg as LanguageModelChatMessage).role !== LanguageModelChatMessageRole.User) { continue; }
+		const content = Array.isArray((msg as any).content) ? (msg as any).content as unknown[] : [];
+		const textParts = content
+			.filter((p): p is LanguageModelTextPart => p instanceof LanguageModelTextPart)
+			.map(p => p.value);
+		if (textParts.length > 0) { return textParts.join('\n'); }
+		if (typeof (msg as any).content === 'string' && (msg as any).content) {
+			return (msg as any).content as string;
+		}
+	}
+	return 'Please continue based on the previous context.';
+}
+
 function _extractReadableGeminiMessage(err: unknown): string {
 	if (err instanceof ApiError) {
 		try {
@@ -293,6 +330,21 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 	 */
 	private readonly _callIdToName = new Map<string, string>();
 
+	/**
+	 * fingerprint → whether the most recently completed interaction turn ended
+	 * with at least one function call step.
+	 *
+	 * The Interactions API's ordering constraint requires function_result input
+	 * to immediately follow a function_call turn on the server side.  Tracking
+	 * this lets us detect mismatches proactively (server thinks last turn was
+	 * text, VS Code thinks last message is tool results) and fall back to a
+	 * plain-text input instead of triggering an "invalid_request" error.
+	 *
+	 * Updated at each `interaction.completed` event so it always reflects the
+	 * server's view of the PREVIOUS turn when we build the NEXT turn's input.
+	 */
+	private readonly _lastTurnHadCalls = new Map<string, boolean>();
+
 	constructor(
 		knownModels: BYOKKnownModels | undefined,
 		byokStorageService: IBYOKStorageService,
@@ -364,8 +416,37 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 				);
 			}
 
-		// Build the latest-turn input
-		const input = _buildInput(messages, this._callIdToName);
+		// Proactively guard against tool-order constraint violations.
+		// The Interactions API requires FunctionResultStep[] input ONLY when the
+		// server's previous turn ended with function calls.  We track this via
+		// _lastTurnHadCalls (committed at each interaction.completed).
+		//   • No previousInteractionId → fresh session, server has no prior turn → text only.
+		//   • previousInteractionId but _lastTurnHadCalls says last turn was text → text only.
+		//   • previousInteractionId AND _lastTurnHadCalls says last turn had calls → allow tool results.
+		//   • previousInteractionId but no _lastTurnHadCalls entry (first-ever tool-result turn for
+		//     this fingerprint, e.g. after an extension reload) → we don't know → allow tool results
+		//     and rely on the reactive fallback in _makeInteractionRequest's catch block.
+		const lastTurnHadCallsEntry = this._lastTurnHadCalls.get(fingerprint);
+		const serverExpectsToolResults = !!previousInteractionId &&
+			(lastTurnHadCallsEntry === undefined || lastTurnHadCallsEntry === true);
+		const rawInput = _buildInput(messages, this._callIdToName);
+		const inputWouldBeToolResults = Array.isArray(rawInput) && rawInput.length > 0;
+		let input: string | unknown[];
+		let effectivePreviousInteractionId = previousInteractionId;
+		if (inputWouldBeToolResults && !serverExpectsToolResults) {
+			const reason = !previousInteractionId
+				? 'no session (fresh start)'
+				: `last turn was text (hadCalls=${lastTurnHadCallsEntry})`;
+			this._logService.warn(
+				`[${this._providerLabel}] tool-result guard: input has ${(rawInput as unknown[]).length} tool result(s) but server does not expect them (${reason}) — using text fallback to avoid ordering error`
+			);
+			this._interactions.delete(fingerprint);
+			this._lastTurnHadCalls.delete(fingerprint);
+			effectivePreviousInteractionId = undefined;
+			input = _buildTextFallback(messages);
+		} else {
+			input = rawInput;
+		}
 		if (Array.isArray(input) && input.length > 0) {
 			this._logService.info(
 				`[${this._providerLabel}] tool-result input | ${input.length} result(s): ` +
@@ -416,12 +497,12 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 			const wrappedProgress = new RecordedProgress(progress);
 
 			try {
-			const result = await this._makeInteractionRequest(
-				client, wrappedProgress, {
-					model: model.id,
-					input,
-					store: true,
-					previous_interaction_id: previousInteractionId,
+		const result = await this._makeInteractionRequest(
+			client, wrappedProgress, {
+				model: model.id,
+				input,
+				store: true,
+				previous_interaction_id: effectivePreviousInteractionId,
 					system_instruction: systemText || undefined,
 					tools: tools.length > 0 ? tools : undefined,
 					generation_config: {
@@ -430,8 +511,9 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 					},
 					stream: true,
 				},
-				token, abortController.signal, issuedTime, fingerprint,
-			);
+			token, abortController.signal, issuedTime, fingerprint,
+			_buildTextFallback(messages),
+		);
 
 				if (result.ttft) { pendingLoggedChatRequest.markTimeToFirstToken(result.ttft); }
 				pendingLoggedChatRequest.resolve(
@@ -583,6 +665,8 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 		signal: AbortSignal,
 		issuedTime: number,
 		conversationFingerprint: string,
+		/** Text-only fallback input; used when the API rejects tool results due to ordering. */
+		textFallback?: string,
 		retryCount = 0,
 	): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined }> {
 		const MAX_RETRIES = 6;
@@ -627,13 +711,18 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 				connectTimeout,
 			]);
 
-		let pendingThinkingSignature: string | undefined;
+	let pendingThinkingSignature: string | undefined;
 
-		// Buffer for function calls whose arguments arrive via step.delta/arguments_delta.
-		// Keyed by step INDEX (e['index'] from StepStart/StepDelta/StepStop events) because
-		// StepStop carries index but NOT the step id — matching by index is the only reliable link.
-		// Value: { callId (= step.id from FunctionCallStep), name, argsStr (accumulated JSON) }
-		const pendingFnCalls = new Map<number, { callId: string; name: string; argsStr: string }>();
+	// Buffer for function calls whose arguments arrive via step.delta/arguments_delta.
+	// Keyed by step INDEX (e['index'] from StepStart/StepDelta/StepStop events) because
+	// StepStop carries index but NOT the step id — matching by index is the only reliable link.
+	// Value: { callId (= step.id from FunctionCallStep), name, argsStr (accumulated JSON) }
+	const pendingFnCalls = new Map<number, { callId: string; name: string; argsStr: string }>();
+
+	// Track whether this turn emits at least one function call step.
+	// Updated at step.stop (function_call) and committed to _lastTurnHadCalls
+	// at interaction.completed so the NEXT turn can make the right input choice.
+	let currentTurnHadCalls = false;
 
 		// ─── Inactivity timeout around stream iteration ───────────────────
 			// The connect timeout above only guards interactions.create() returning the
@@ -760,10 +849,11 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 							let parsedArgs: Record<string, unknown> = {};
 							try { parsedArgs = JSON.parse(stopEntry.argsStr || '{}'); } catch { parsedArgs = {}; }
 							if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
-							this._logService.info(`[${this._providerLabel}] fn-call emitted (step.stop) | callId=${stopEntry.callId} | name=${stopEntry.name} | args=${stopEntry.argsStr}`);
-							// Store callId → name so _buildInput can include 'name' in the FunctionResultStep.
-							this._callIdToName.set(stopEntry.callId, stopEntry.name);
-							progress.report(new LanguageModelToolCallPart(stopEntry.callId, stopEntry.name, parsedArgs));
+						this._logService.info(`[${this._providerLabel}] fn-call emitted (step.stop) | callId=${stopEntry.callId} | name=${stopEntry.name} | args=${stopEntry.argsStr}`);
+						// Store callId → name so _buildInput can include 'name' in the FunctionResultStep.
+						this._callIdToName.set(stopEntry.callId, stopEntry.name);
+						currentTurnHadCalls = true;
+						progress.report(new LanguageModelToolCallPart(stopEntry.callId, stopEntry.name, parsedArgs));
 						}
 
 						// Accumulate usage from the most recent step.stop that has it
@@ -792,20 +882,27 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 						this._logService.error(`[${this._providerLabel}] API error event | code=${code} | message=${msg} | raw=${JSON.stringify(apiError)}`);
 						throw new Error(`Gemini Interactions API error${code ? ` (${code})` : ''}: ${msg}`);
 
-					} else if (eventType === 'interaction.completed') {
-						// Also available here if the interaction.created event didn't fire yet
-						const id: string | undefined = e['interaction']?.['id'];
-						if (id && !this._interactions.has(conversationFingerprint)) {
-							this._interactions.set(conversationFingerprint, id);
-							this._logService.info(
-								`[${this._providerLabel}] session captured at interaction.completed | id: ${id.slice(0, 20)}… | fingerprint: ${conversationFingerprint}`
-							);
-						} else if (id) {
-							this._logService.info(
-								`[${this._providerLabel}] session completed | id: ${id.slice(0, 20)}… | fingerprint: ${conversationFingerprint} | ready for next turn`
-							);
-						}
+				} else if (eventType === 'interaction.completed') {
+					// Also available here if the interaction.created event didn't fire yet
+					const id: string | undefined = e['interaction']?.['id'];
+					if (id && !this._interactions.has(conversationFingerprint)) {
+						this._interactions.set(conversationFingerprint, id);
+						this._logService.info(
+							`[${this._providerLabel}] session captured at interaction.completed | id: ${id.slice(0, 20)}… | fingerprint: ${conversationFingerprint}`
+						);
+					} else if (id) {
+						this._logService.info(
+							`[${this._providerLabel}] session completed | id: ${id.slice(0, 20)}… | fingerprint: ${conversationFingerprint} | ready for next turn`
+						);
 					}
+					// Commit whether this turn ended with function calls so the NEXT
+					// turn's input builder can decide proactively whether to send
+					// FunctionResultStep[] or fall back to plain text.
+					this._lastTurnHadCalls.set(conversationFingerprint, currentTurnHadCalls);
+					this._logService.info(
+						`[${this._providerLabel}] turn committed | fingerprint: ${conversationFingerprint} | hadCalls: ${currentTurnHadCalls}`
+					);
+				}
 				}
 			// ── Stream-end drain ──────────────────────────────────────────────
 			// Some Interactions API versions close the stream after interaction.completed
@@ -818,10 +915,11 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 					let parsedArgs: Record<string, unknown> = {};
 					try { parsedArgs = JSON.parse(pending.argsStr || '{}'); } catch { parsedArgs = {}; }
 					if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
-					this._logService.info(`[${this._providerLabel}] fn-call emitted (drain) | name=${pending.name} | args=${pending.argsStr}`);
-					// Store callId → name so _buildInput can include 'name' in the FunctionResultStep.
-					this._callIdToName.set(pending.callId, pending.name);
-					progress.report(new LanguageModelToolCallPart(pending.callId, pending.name, parsedArgs));
+				this._logService.info(`[${this._providerLabel}] fn-call emitted (drain) | name=${pending.name} | args=${pending.argsStr}`);
+				// Store callId → name so _buildInput can include 'name' in the FunctionResultStep.
+				this._callIdToName.set(pending.callId, pending.name);
+				currentTurnHadCalls = true;
+				progress.report(new LanguageModelToolCallPart(pending.callId, pending.name, parsedArgs));
 				}
 				pendingFnCalls.clear();
 			}
@@ -859,9 +957,9 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 				// Auto-retry as a fresh session without the stale ID.
 				// Strip the stale ID so we don't loop; if this retry also 404s,
 				// the second branch below fires and throws (model not supported).
-				const freshParams = { ...params };
-				delete freshParams['previous_interaction_id'];
-				return this._makeInteractionRequest(client, progress, freshParams, token, signal, issuedTime, conversationFingerprint, retryCount);
+			const freshParams = { ...params };
+			delete freshParams['previous_interaction_id'];
+			return this._makeInteractionRequest(client, progress, freshParams, token, signal, issuedTime, conversationFingerprint, textFallback, retryCount);
 			}
 			// 404 without a previous_interaction_id = model not supported on
 			// Interactions API — log and surface a specific error message.
@@ -874,22 +972,43 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 					{ cause: error }
 				);
 			}
-			// ─── END 404 handling ─────────────────────────────────────────────
+		// ─── END 404 handling ─────────────────────────────────────────────
 
-			// ─── BYOK CUSTOM PATCH: retry on transient errors ─────────────
-			const retryKind = _classifyRetryableError(error);
-			if (retryKind && retryCount < MAX_RETRIES) {
-				const delay = Math.min(5000 * Math.pow(2, retryCount), 60_000);
-				const label = retryKind === 'rate-limit' ? '[Rate limit] 429'
-					: retryKind === 'unavailable' ? '[Service unavailable]'
-					: '[Network error]';
-				this._logService.warn(`${this._providerLabel} ${retryKind}, retry ${retryCount + 1}/${MAX_RETRIES} in ${delay}ms: ${_extractReadableGeminiMessage(error)}`);
-				progress.report(new LanguageModelThinkingPart(`${label} retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(delay / 1000)}s…\n`));
-				await new Promise(resolve => setTimeout(resolve, delay));
-				if (token.isCancellationRequested) { return { ttft, ttfte, usage }; }
-				return this._makeInteractionRequest(client, progress, params, token, signal, issuedTime, conversationFingerprint, retryCount + 1);
-			}
-			// ─── END BYOK CUSTOM PATCH ────────────────────────────────────
+		// ─── Reactive tool-order fallback ─────────────────────────────────
+		// If the API rejects with a function-response ordering error it means the
+		// server's last stored turn was NOT a function call turn — our proactive
+		// guard in provideLanguageModelChatResponse missed it (e.g. _lastTurnHadCalls
+		// had no entry yet after an extension reload).  Evict the session, clear our
+		// state, and immediately retry as a fresh text-input turn so the user never
+		// sees the raw error.
+		if (_isToolOrderError(error) && textFallback !== undefined) {
+			this._logService.warn(
+				`[${this._providerLabel}] tool-order error caught reactively — evicting session and retrying with text fallback | fingerprint: ${conversationFingerprint}`
+			);
+			this._interactions.delete(conversationFingerprint);
+			this._lastTurnHadCalls.delete(conversationFingerprint);
+			const freshParams = { ...params, input: textFallback };
+			delete freshParams['previous_interaction_id'];
+			// Pass undefined textFallback for the retry so a second ordering error
+			// (shouldn't happen) surfaces normally rather than looping.
+			return this._makeInteractionRequest(client, progress, freshParams, token, signal, issuedTime, conversationFingerprint, undefined, retryCount);
+		}
+		// ─── END reactive tool-order fallback ─────────────────────────────
+
+		// ─── BYOK CUSTOM PATCH: retry on transient errors ─────────────
+		const retryKind = _classifyRetryableError(error);
+		if (retryKind && retryCount < MAX_RETRIES) {
+			const delay = Math.min(5000 * Math.pow(2, retryCount), 60_000);
+			const label = retryKind === 'rate-limit' ? '[Rate limit] 429'
+				: retryKind === 'unavailable' ? '[Service unavailable]'
+				: '[Network error]';
+			this._logService.warn(`${this._providerLabel} ${retryKind}, retry ${retryCount + 1}/${MAX_RETRIES} in ${delay}ms: ${_extractReadableGeminiMessage(error)}`);
+			progress.report(new LanguageModelThinkingPart(`${label} retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(delay / 1000)}s…\n`));
+			await new Promise(resolve => setTimeout(resolve, delay));
+			if (token.isCancellationRequested) { return { ttft, ttfte, usage }; }
+			return this._makeInteractionRequest(client, progress, params, token, signal, issuedTime, conversationFingerprint, textFallback, retryCount + 1);
+		}
+		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────
 
 			this._logService.error(`${this._providerLabel} streaming error: ${toErrorMessage(error, true)}`);
 			throw error;
