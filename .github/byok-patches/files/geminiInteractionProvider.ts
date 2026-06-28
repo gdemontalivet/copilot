@@ -115,6 +115,38 @@ function _isToolOrderError(err: unknown): boolean {
 }
 
 /**
+ * Build the full input text for the very first turn of a fresh Interactions
+ * API session (no previous_interaction_id).
+ *
+ * VS Code injects workspace context (cursor/workspace rules, skills, file
+ * references, etc.) into earlier user messages in the messages array.  For
+ * a stateful ongoing session the server already holds this context from prior
+ * turns.  For a fresh session we must include it all in the initial input so
+ * the model starts with full project awareness.
+ *
+ * Joins ALL user-role messages' text parts in order, separated by blank lines.
+ * System messages are excluded — those are already handled via systemInstruction.
+ */
+function _buildFreshInput(
+	messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>,
+): string {
+	const parts: string[] = [];
+	for (const msg of messages) {
+		if ((msg as LanguageModelChatMessage).role !== LanguageModelChatMessageRole.User) { continue; }
+		const content = Array.isArray((msg as any).content) ? (msg as any).content as unknown[] : [];
+		const text = content
+			.filter((p): p is LanguageModelTextPart => p instanceof LanguageModelTextPart)
+			.map(p => p.value)
+			.join('');
+		if (text) { parts.push(text); continue; }
+		if (typeof (msg as any).content === 'string' && (msg as any).content) {
+			parts.push((msg as any).content as string);
+		}
+	}
+	return parts.join('\n\n');
+}
+
+/**
  * Walk the messages array backwards and return the text of the last user
  * message that has actual text content.  Used as a fallback input when we
  * cannot send function results (session mismatch or fresh session).
@@ -447,16 +479,24 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 		}
 		// ── END history-recovery fallback ────────────────────────────────────────
 
-	// Proactively guard against tool-order constraint violations.
-		// The Interactions API requires FunctionResultStep[] input ONLY when the
-		// server's previous turn ended with function calls.  We track this via
-		// _lastTurnHadCalls (committed at each interaction.completed).
-		//   • No previousInteractionId → fresh session, server has no prior turn → text only.
-		//   • previousInteractionId but _lastTurnHadCalls says last turn was text → text only.
-		//   • previousInteractionId AND _lastTurnHadCalls says last turn had calls → allow tool results.
-		//   • previousInteractionId but no _lastTurnHadCalls entry (first-ever tool-result turn for
-		//     this fingerprint, e.g. after an extension reload) → we don't know → allow tool results
-		//     and rely on the reactive fallback in _makeInteractionRequest's catch block.
+		// ── Input building ──────────────────────────────────────────────────────
+		//
+		// Three cases:
+		//
+		// A) Fresh session (no previousInteractionId, not tool results):
+		//    Use _buildFreshInput — concatenates ALL user messages so the model
+		//    receives workspace rules, cursor rules, skills, file context, etc.
+		//    that VS Code injects into earlier messages in the array.
+		//    _buildInput only reads the LAST message, silently dropping everything
+		//    before it; for an ongoing session that's correct (server has context),
+		//    but for turn 1 of a new conversation it discards the project context.
+		//
+		// B) Tool-order guard (tool results but server doesn't expect them):
+		//    Evict session, use _buildTextFallback to avoid invalid_request error.
+		//
+		// C) Ongoing session with tool results or plain text:
+		//    Use _buildInput — sends only the latest turn (server has context).
+		//
 		const lastTurnHadCallsEntry = this._lastTurnHadCalls.get(fingerprint);
 		const serverExpectsToolResults = !!previousInteractionId &&
 			(lastTurnHadCallsEntry === undefined || lastTurnHadCallsEntry === true);
@@ -464,7 +504,9 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 		const inputWouldBeToolResults = Array.isArray(rawInput) && rawInput.length > 0;
 		let input: string | unknown[];
 		let effectivePreviousInteractionId = previousInteractionId;
+
 		if (inputWouldBeToolResults && !serverExpectsToolResults) {
+			// Case B: tool-order guard
 			const reason = !previousInteractionId
 				? 'no session (fresh start)'
 				: `last turn was text (hadCalls=${lastTurnHadCallsEntry})`;
@@ -475,7 +517,16 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 			this._lastTurnHadCalls.delete(fingerprint);
 			effectivePreviousInteractionId = undefined;
 			input = _buildTextFallback(messages);
+		} else if (!previousInteractionId && !inputWouldBeToolResults) {
+			// Case A: fresh session — include ALL user messages so the model gets
+			// workspace rules, cursor rules, skills, and file context that VS Code
+			// may have injected into earlier messages in the array.
+			input = _buildFreshInput(messages);
+			this._logService.info(
+				`[${this._providerLabel}] fresh session — full context input | ${messages.filter(m => (m as LanguageModelChatMessage).role === LanguageModelChatMessageRole.User).length} user message(s) joined | len=${String(input).length}`
+			);
 		} else {
+			// Case C: ongoing session — server has prior context, send latest turn only
 			input = rawInput;
 		}
 		if (Array.isArray(input) && input.length > 0) {
