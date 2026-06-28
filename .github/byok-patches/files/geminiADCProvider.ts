@@ -426,41 +426,59 @@ export class GeminiADCLMProvider extends GeminiNativeBYOKLMProvider {
 		options: any,
 		token: any,
 	): Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]> {
+		// VS Code calls provideLanguageModelChatInformation at 10-15×/second during
+		// picker refresh.  There are two distinct call shapes:
+		//
+		//   A) options.configuration === undefined  — no group configured at all
+		//      (VS Code discovering whether the vendor has any default models).
+		//      Return [] immediately — ADC without a configured group is meaningless,
+		//      and every attempt creates unnecessary token fetches.
+		//
+		//   B) options.configuration defined, apiKey falsy — user created a group
+		//      but left the credentials field blank (intending system ADC).
+		//      Try ADC with a 2-second timeout so a broken scope config doesn't
+		//      block the global picker (takes 5-6s to fail with 403).
+		//
+		//   C) options.configuration defined, apiKey truthy — explicit credentials
+		//      (project ID or SA JSON).  Surface errors normally so the user gets
+		//      actionable feedback.
+
+		if (options?.configuration === undefined) {
+			// Case A: no group → return [] immediately, no ADC attempt, no timeout.
+			return [];
+		}
+
 		const apiKey = options?.configuration?.apiKey;
 		if (apiKey) {
-			// Configured group → surface errors normally so the user gets feedback.
+			// Case C: configured group → surface errors normally so the user gets feedback.
 			return super.provideLanguageModelChatInformation(options, token);
 		}
 
-		// No configured group: inject 'adc' sentinel and soft-fail on auth errors
-		// so the dropdown keeps working for all other providers.
-		//
-		// IMPORTANT: We also race with a 2-second timeout.  Without it the OAuth
-		// token fetch + models.list() can take ~6 seconds to fail with 403 (wrong
-		// ADC scopes), blocking the entire in-chat model picker because VS Code
-		// waits for every provider to respond before showing the dropdown.
-		// The timeout resolves with [] so the picker shows immediately; the
-		// inflight getAllModels continues in the background and populates the
-		// negative cache (30s) so subsequent calls return instantly.
+		// Case B: group exists but no key → try ADC, race with a 2-second timeout.
+		// Without the timeout, an OAuth token fetch + models.list() can take 5-6 seconds
+		// to fail when ADC credentials lack the generative-language scope, blocking the
+		// entire in-chat model picker because VS Code waits for every provider.
 		const enrichedOptions = {
 			...options,
 			configuration: { ...(options.configuration ?? {}), apiKey: 'adc' },
 		};
 		const PICKER_TIMEOUT_MS = 2_000;
-		const timeoutPromise = new Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]>(
-			resolve => setTimeout(() => {
-				this._logService.info('[GeminiADC] picker timeout (2s) — returning [] so dropdown is not blocked');
-				resolve([]);
-			}, PICKER_TIMEOUT_MS)
-		);
+		// Use a single race keyed by the super call; the abstract class's inflight-dedup
+		// (Patch 42) ensures only one getAllModels is in flight per cache key, so the
+		// timeout only needs to guard this method's return — not every concurrent caller.
+		// The inflight continues after the timeout and populates the 30s negative cache
+		// so the next batch of picker refreshes returns instantly from cache.
 		try {
-			return await Promise.race([
-				super.provideLanguageModelChatInformation(enrichedOptions, token),
-				timeoutPromise,
-			]);
+			const superPromise = super.provideLanguageModelChatInformation(enrichedOptions, token);
+			const timeoutPromise = new Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]>(
+				resolve => setTimeout(() => {
+					this._logService.info('[GeminiADC] picker timeout (2s) — returning [] so dropdown is not blocked');
+					resolve([]);
+				}, PICKER_TIMEOUT_MS)
+			);
+			return await Promise.race([superPromise, timeoutPromise]);
 		} catch (err) {
-			// Auth failure with no configured group → treat as "no models available"
-			// rather than crashing the global model picker.
+			// Auth failure → treat as "no models available" so the global picker survives.
 			this._logService.info(
 				`[GeminiADC] No credentials available, suppressing picker error: ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`
 			);
