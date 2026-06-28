@@ -5027,6 +5027,14 @@ if (codeContrib.includes(newSentinel)) {
     changed = true;
   }
 
+  // A6: Strip the stale GeminiNativeBYOKLMProvider import (now unused after A3-A5)
+  const staleImport = "import { GeminiNativeBYOKLMProvider } from './geminiNativeProvider';\n";
+  if (codeContrib.includes(staleImport)) {
+    codeContrib = codeContrib.replace(staleImport, "");
+    changed = true;
+    console.log("Stripped stale GeminiNativeBYOKLMProvider import from byokContribution.ts");
+  }
+
   if (changed) {
     fs.writeFileSync(fContrib, codeContrib);
     console.log("Patched: byokContribution.ts (GeminiInteraction as gemini vendor)");

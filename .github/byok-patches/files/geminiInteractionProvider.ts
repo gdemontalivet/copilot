@@ -667,10 +667,8 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 					if (stepType === 'function_call') {
 						// Some models (e.g. gemini-3.1-pro-preview) stream function-call
 						// arguments via step.delta/arguments_delta rather than delivering them
-						// all at step.start. Buffer every function call here and emit the
-						// LanguageModelToolCallPart only once args are complete (at step.stop).
-						// Models that send full args in step.start produce no arguments_delta
-						// events, so step.stop fires immediately with whatever step.start had.
+						// all at step.start. Buffer every function call here; emit at step.stop
+						// or at stream end (whichever comes first).
 						const stepId: string = step['id'] ?? generateUuid();
 						let callId = stepId;
 						if (pendingThinkingSignature) {
@@ -678,12 +676,12 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 							progress.report(new LanguageModelThinkingPart('', undefined, { signature: pendingThinkingSignature }));
 							pendingThinkingSignature = undefined;
 						}
-						// Seed argsStr with whatever step.start already provided (may be '{}' or a full object).
 						const seedArgs = step['arguments'];
 						const seedStr = (seedArgs && typeof seedArgs === 'object' && Object.keys(seedArgs).length > 0)
 							? JSON.stringify(seedArgs)
 							: '';
 						pendingFnCalls.set(stepId, { callId, name: step['name'] ?? '', argsStr: seedStr });
+						this._logService.info(`[${this._providerLabel}] fn-call buffered | step=${stepId} | name=${step['name'] ?? '?'} | seedArgs=${seedStr || '(streaming)'}`);
 
 						} else if (stepType === 'thought') {
 							if (step['signature']) { pendingThinkingSignature = step['signature'] as string; }
@@ -727,8 +725,9 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 						// Primary path: match by step id (precise, supports parallel calls).
 						// Fallback: if step.stop carries no step id (some API versions omit it),
 						// emit the oldest buffered call (FIFO — correct for sequential execution).
+						const stoppedStepId: string | undefined = e['step']?.['id'];
+						this._logService.info(`[${this._providerLabel}] step.stop | steppedId=${stoppedStepId ?? '(none)'} | pendingCalls=${pendingFnCalls.size}`);
 						if (pendingFnCalls.size > 0) {
-							const stoppedStepId: string | undefined = e['step']?.['id'];
 							let emitEntry: { callId: string; name: string; argsStr: string } | undefined;
 							let emitKey: string | undefined;
 
@@ -746,6 +745,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 								let parsedArgs: Record<string, unknown> = {};
 								try { parsedArgs = JSON.parse(emitEntry.argsStr || '{}'); } catch { parsedArgs = {}; }
 								if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
+								this._logService.info(`[${this._providerLabel}] fn-call emitted (step.stop) | name=${emitEntry.name} | args=${emitEntry.argsStr}`);
 								progress.report(new LanguageModelToolCallPart(emitEntry.callId, emitEntry.name, parsedArgs));
 							}
 						}
@@ -780,6 +780,23 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 						}
 					}
 				}
+			// ── Stream-end drain ──────────────────────────────────────────────
+			// Some Interactions API versions close the stream after interaction.completed
+			// without emitting step.stop for each function call (particularly
+			// gemini-3.1-pro-preview in tool-calling mode). Drain any buffered calls
+			// here so they are never silently dropped.
+			if (pendingFnCalls.size > 0) {
+				this._logService.info(`[${this._providerLabel}] stream-end drain | ${pendingFnCalls.size} buffered call(s) — emitting now`);
+				for (const [, pending] of pendingFnCalls) {
+					let parsedArgs: Record<string, unknown> = {};
+					try { parsedArgs = JSON.parse(pending.argsStr || '{}'); } catch { parsedArgs = {}; }
+					if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
+					this._logService.info(`[${this._providerLabel}] fn-call emitted (drain) | name=${pending.name} | args=${pending.argsStr}`);
+					progress.report(new LanguageModelToolCallPart(pending.callId, pending.name, parsedArgs));
+				}
+				pendingFnCalls.clear();
+			}
+
 			} finally {
 				if (inactivityTimer) { clearTimeout(inactivityTimer); }
 			}
