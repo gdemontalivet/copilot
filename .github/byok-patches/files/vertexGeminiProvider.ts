@@ -106,6 +106,11 @@ function resolveVertexGeminiLimits(modelId: string, cfg: { maxInputTokens?: numb
  * client-construction hook + the model-discovery pathway, everything else
  * (streaming, OTel telemetry, retry-on-429/503, readable errors) is inherited
  * unchanged.
+ *
+ * NOTE: Vertex AI does not yet support the Gemini Interactions API
+ * (stateful multi-turn sessions via client.interactions.create). This provider
+ * therefore extends GeminiNativeBYOKLMProvider (generateContent path) rather
+ * than GeminiInteractionLMProvider. Update once Vertex ships Interactions API GA.
  */
 export class VertexGeminiLMProvider extends GeminiNativeBYOKLMProvider {
 
@@ -121,8 +126,8 @@ export class VertexGeminiLMProvider extends GeminiNativeBYOKLMProvider {
 		@IConfigurationService private readonly _configurationService: IConfigurationService,
 	) {
 		super(knownModels, byokStorageService, logService, requestLogger, telemetryService, otelService);
-		// The base class captures the Gemini providerName in its constructor; rebind so VS Code groups and
-		// BYOK storage use the correct vendor for this subclass.
+		// GeminiNativeBYOKLMProvider sets _name='Gemini'/_id='gemini'; rebind so VS Code
+		// groups and BYOK storage use the correct vendor (vertexgemini) for this subclass.
 		(this as unknown as { _name: string })._name = VertexGeminiLMProvider.providerName;
 		(this as unknown as { _id: string })._id = VertexGeminiLMProvider.providerName.toLowerCase();
 	}

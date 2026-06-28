@@ -11,8 +11,12 @@
 //
 // This provider (vendor `gemini`) extends GeminiNativeBYOKLMProvider and
 // replaces the generateContentStream call with client.interactions.create().
-// VertexGeminiLMProvider and GeminiADCLMProvider extend this class to inherit
-// the interactions pipeline while injecting Vertex / ADC credentials.
+// GeminiADCLMProvider extends this class to inherit the interactions pipeline
+// while injecting ADC credentials.
+//
+// NOTE: VertexGeminiLMProvider was reverted to extend GeminiNativeBYOKLMProvider
+// directly (generateContent path) because Vertex AI does not yet support the
+// Interactions API. Update vertexGeminiProvider.ts once Vertex ships GA support.
 // Everything else — model listing, client construction, OTel instrumentation,
 // error extraction, Patch-59 dynamic model discovery — is inherited unchanged.
 //
@@ -526,6 +530,12 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 		let ttfte: number | undefined;
 		let usage: APIUsage | undefined;
 
+		const hasPrevId = !!params['previous_interaction_id'];
+		this._logService.info(
+			`[${this._providerLabel}] session turn start | fingerprint: ${conversationFingerprint} | hasSession: ${hasPrevId} | model: ${params['model']}` +
+			(hasPrevId ? ` | prevId: ${(params['previous_interaction_id'] as string).slice(0, 16)}…` : ' | prevId: none (fresh)')
+		);
+
 		try {
 			// client.interactions is available in @google/genai ≥ 2.3.0
 			// We use `any` because the local SDK (1.x) doesn't have this property;
@@ -591,7 +601,16 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 					if (eventType === 'interaction.created') {
 						// Capture interaction ID for stateful chaining on the next turn
 						const id: string | undefined = e['interaction']?.['id'];
-						if (id) { this._interactions.set(conversationFingerprint, id); }
+						if (id) {
+							this._interactions.set(conversationFingerprint, id);
+							this._logService.info(
+								`[${this._providerLabel}] session created | id: ${id.slice(0, 20)}… | fingerprint: ${conversationFingerprint} | will use on next turn`
+							);
+						} else {
+							this._logService.warn(
+								`[${this._providerLabel}] interaction.created event has no id — stateful chaining unavailable for fingerprint: ${conversationFingerprint}`
+							);
+						}
 
 					} else if (eventType === 'step.start') {
 						const step: Record<string, any> = e['step'] ?? {};
@@ -658,6 +677,13 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 						const id: string | undefined = e['interaction']?.['id'];
 						if (id && !this._interactions.has(conversationFingerprint)) {
 							this._interactions.set(conversationFingerprint, id);
+							this._logService.info(
+								`[${this._providerLabel}] session captured at interaction.completed | id: ${id.slice(0, 20)}… | fingerprint: ${conversationFingerprint}`
+							);
+						} else if (id) {
+							this._logService.info(
+								`[${this._providerLabel}] session completed | id: ${id.slice(0, 20)}… | fingerprint: ${conversationFingerprint} | ready for next turn`
+							);
 						}
 					}
 				}
@@ -673,18 +699,32 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 			}
 
 			// ─── 404 on expired / invalid previous_interaction_id ─────────────
-			// Google's server-side interactions expire (typically after ~1h of
-			// inactivity). When we sent a previous_interaction_id and get back 404
-			// "Requested entity was not found", the stale ID must be evicted so the
-			// next turn can start a fresh session without another 404.
-			// Do NOT retry a 404 — it is deterministic.
+			// Google's server-side interactions expire. When we sent a
+			// previous_interaction_id and get back 404, the stale ID is evicted
+			// and we IMMEDIATELY retry as a fresh session (no previous_interaction_id)
+			// so the user never sees an error. This is safe because the recursive
+			// call will have no previous_interaction_id, so it can't loop here.
+			// If the fresh retry also 404s, the second branch below fires and
+			// throws (meaning the model itself isn't supported on the Interactions API).
 			if (error instanceof ApiError && error.status === 404 && params['previous_interaction_id']) {
+				const staleId = params['previous_interaction_id'] as string;
 				this._logService.warn(
-					`${this._providerLabel} interaction session expired (404) — clearing stored ID for fingerprint ${conversationFingerprint}. Next turn will start a fresh session automatically.`
+					`[${this._providerLabel}] session expired (404) — stale id: ${staleId.slice(0, 20)}… | fingerprint: ${conversationFingerprint} | evicting and retrying as fresh session`
 				);
 				this._interactions.delete(conversationFingerprint);
+				// Strip the stale ID and retry immediately as a fresh session.
+				const freshParams = { ...params };
+				delete freshParams['previous_interaction_id'];
+				return this._makeInteractionRequest(client, progress, freshParams, token, signal, issuedTime, conversationFingerprint, retryCount);
+			}
+			// 404 without a previous_interaction_id = model not supported on
+			// Interactions API — log and surface a specific error message.
+			if (error instanceof ApiError && error.status === 404) {
+				this._logService.error(
+					`[${this._providerLabel}] 404 without previous_interaction_id — model ${String(params['model'])} may not support the Interactions API. Consider routing through the generateContent-based provider.`
+				);
 				throw new Error(
-					'The Gemini conversation session expired on Google\'s servers. Please try again — the next attempt will start a fresh session automatically.',
+					`The model ${String(params['model'])} returned 404 on the Gemini Interactions API. This model may not yet support stateful interactions — please try a different model or switch providers.`,
 					{ cause: error }
 				);
 			}
