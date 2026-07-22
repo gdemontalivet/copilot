@@ -2366,81 +2366,6 @@ PATCH33TOOLTIP_EOF
 # succeed (no throw) but when callers invoke makeChatRequest the stub throws a
 # fast, predictable error that VS Code's ChatParticipantDetectionProvider catches
 # and swallows — the main turn then proceeds with the user's selected BYOK model.
-node << 'PATCH33UTILITY_EOF'
-const fs = require("fs");
-const f = "src/extension/prompt/vscode-node/endpointProviderImpl.ts";
-let code = fs.readFileSync(f, "utf8");
-
-if (code.includes("BYOK CUSTOM PATCH: utility family BYOK fallback")) {
-  console.log("endpointProviderImpl utility family BYOK fallback already present, skipping");
-  process.exit(0);
-}
-
-// Upstream 0.51+ changed _resolveUtilityFamily to be async and added
-// _resolveUtilityOverride at the top. Match the new form.
-// The blank line inside the JSDoc block is part of the upstream formatting.
-const methodAnchor = `\t * Resolves an internal utility family (\`copilot-utility-small\` /
-\t * \`copilot-utility\`) to a concrete \`CopilotChatEndpoint\`. The model
-\t * selection for each family lives in the corresponding resolver
-\t * class so callers don't need to know which CAPI family backs each
-\t * purpose.
-
-\t */
-\tprivate async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
-\t\tconst override = await this._resolveUtilityOverride(family);
-\t\tif (override) {
-\t\t\treturn override;
-\t\t}
-\t\tif (family === 'copilot-utility-small') {
-\t\t\treturn CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
-\t\t} else if (family === 'copilot-utility') {
-\t\t\treturn CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
-\t\t} else {
-\t\t\tthrow new Error(\`Unrecognized chat endpoint family \${family}\`);
-\t\t}
-\t}`;
-
-const methodReplacement = `\t * Resolves an internal utility family (\`copilot-utility-small\` /
-\t * \`copilot-utility\`) to a concrete \`CopilotChatEndpoint\`. The model
-\t * selection for each family lives in the corresponding resolver
-\t * class so callers don't need to know which CAPI family backs each
-\t * purpose.
-
-\t */
-\t// \u2500\u2500\u2500 BYOK CUSTOM PATCH: utility family BYOK fallback \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-\t// _resolveUtilityOverride (just above) handles BYOK via chat.utilityModel →
-\t// byokauto/byok-auto (Patch 64). This try/catch is a last-resort safety net
-\t// for the brief startup window before BYOKAuto finishes async model
-\t// registration — prevents "Unable to resolve chat model" errors on the first
-\t// few turns after extension reload. Falls back to _byokFamilyFallback (Patch 48).
-\tprivate async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
-\t\tconst override = await this._resolveUtilityOverride(family);
-\t\tif (override) {
-\t\t\treturn override;
-\t\t}
-\t\tif (family !== 'copilot-utility-small' && family !== 'copilot-utility') {
-\t\t\tthrow new Error(\`Unrecognized chat endpoint family \${family}\`);
-\t\t}
-\t\tif (family === 'copilot-utility-small') {
-\t\t\ttry { return await CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through */ }
-\t\t}
-\t\ttry { return await CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through to BYOK fallback */ }
-\t\tthis._logService.trace(\`[BYOK] copilot-utility family: Copilot resolvers unavailable, trying BYOK fallback\`);
-\t\tconst fallback = await this._byokFamilyFallback(family);
-\t\tif (fallback) { return fallback; }
-\t\tthrow new Error(\`[BYOK] No model available for utility family '\${family}' — configure a BYOK provider\`);
-\t}
-\t// \u2500\u2500\u2500 END BYOK CUSTOM PATCH \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`;
-
-if (!code.includes(methodAnchor)) {
-  console.warn("WARN: endpointProviderImpl _resolveUtilityFamily anchor not found — skipping patch 33c");
-  process.exit(0);
-}
-code = code.replace(methodAnchor, methodReplacement);
-fs.writeFileSync(f, code);
-console.log("Patched: endpointProviderImpl utility family BYOK fallback");
-PATCH33UTILITY_EOF
 
 
 
@@ -4687,50 +4612,6 @@ fs.writeFileSync(f, JSON.stringify(pkg, null, "\t") + "\n");
 console.log("Patched: byokfusion vendor declared in package.json (Patch 65)");
 PATCH65_EOF
 
-node << 'PATCH33UTILITY_EOF'
-const fs = require("fs");
-const f = "src/extension/prompt/vscode-node/endpointProviderImpl.ts";
-let code = fs.readFileSync(f, "utf8");
-
-if (code.includes("BYOK CUSTOM PATCH: utility family BYOK fallback")) {
-  console.log("endpointProviderImpl utility family BYOK fallback already present, skipping");
-  process.exit(0);
-}
-
-const startStr = "\tprivate async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {";
-const endStr = "\t\tconst modelMetadata = await this._modelFetcher.getChatModelFromCapiFamily(family);\n\t\treturn this.getOrCreateChatEndpointInstance(modelMetadata);\n\t}";
-
-const startIndex = code.indexOf(startStr);
-const endIndex = code.indexOf(endStr, startIndex) + endStr.length;
-
-if (startIndex === -1 || code.indexOf(endStr, startIndex) === -1) {
-  console.warn("WARN: endpointProviderImpl _resolveUtilityFamily anchor not found — skipping patch 33c");
-  process.exit(0);
-}
-
-const methodAnchor = code.substring(startIndex, endIndex);
-
-const methodReplacement = methodAnchor.replace(
-  "\t\tif (family === 'copilot-utility-small') {",
-  "\t// ─── BYOK CUSTOM PATCH: utility family BYOK fallback ────────────────────────\n\t// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.\n\t// _resolveUtilityOverride (just above) handles BYOK via chat.utilityModel →\n\t// byokauto/byok-auto (Patch 64). This try/catch is a last-resort safety net\n\t// for the brief startup window before BYOKAuto finishes async model\n\t// registration — prevents \"Unable to resolve chat model\" errors on the first\n\t// few turns after extension reload. Falls back to _byokFamilyFallback (Patch 48).\n\t\tif (family !== 'copilot-utility-small' && family !== 'copilot-utility') {\n\t\t\tthrow new Error(`Unrecognized chat endpoint family ${family}`);\n\t\t}\n\t\tif (family === 'copilot-utility-small') {"
-)
-.replace(
-  "\t\t\treturn CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService);",
-  "\t\t\ttry { return await CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through */ }"
-)
-.replace(
-  "\t\t} else if (family === 'copilot-utility') {\n\t\t\treturn CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService);\n\t\t}",
-  "\t\t}\n\t\ttry { return await CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService); } catch { /* fall through to BYOK fallback */ }\n\t\tthis._logService.trace(`[BYOK] copilot-utility family: Copilot resolvers unavailable, trying BYOK fallback`);\n\t\tconst fallback = await this._byokFamilyFallback(family);\n\t\tif (fallback) { return fallback; }\n\t\tthrow new Error(`[BYOK] No model available for utility family '${family}' — configure a BYOK provider`);\n\t}\n\t// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────"
-)
-.replace(
-  "\n\t\tconst modelMetadata = await this._modelFetcher.getChatModelFromCapiFamily(family);\n\t\treturn this.getOrCreateChatEndpointInstance(modelMetadata);\n\t}",
-  ""
-);
-
-code = code.replace(methodAnchor, methodReplacement);
-fs.writeFileSync(f, code);
-console.log("Patched: endpointProviderImpl utility family BYOK fallback");
-PATCH33UTILITY_EOF
 
 # -----------------------------------------------------------------------------
 # Patch 66: Survive thought_signature across VS Code transcript history truncation
