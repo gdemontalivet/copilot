@@ -105,6 +105,10 @@ const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
 pkg.displayName = "Copilot Full BYOK";
 pkg.description = "AI chat features powered by Copilot — Full Bring Your Own Key edition";
 const parts = pkg.version.split(".").map(Number);
+// Ensure we are always higher than the VS Code Insiders built-in version
+if (parts[1] < 58) {
+  parts[1] = 58;
+}
 pkg.version = parts[0] + "." + parts[1] + "." + (parts[2] + 1);
 if (pkg.engines && pkg.engines.vscode && pkg.engines.vscode !== "^1.116.0") {
   const previous = pkg.engines.vscode;
