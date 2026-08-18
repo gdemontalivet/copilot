@@ -1,9 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  BYOK CUSTOM FILE (Patch 51). Canonical copy under
- *  `.github/byok-patches/files/contextWindowStatusItem.ts` and installed
- *  into `src/extension/byok/vscode-node/` by
- *  `.github/scripts/apply-byok-patches.sh` on every upstream sync.
- *  Do not edit the installed copy directly.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import * as l10n from '@vscode/l10n';
@@ -41,8 +38,8 @@ import { onDidUpdateContextBreakdown } from '../common/contextBreakdownChannel';
  * we cannot fix without an upstream VS Code API change.
  *
  * Data flow:
- *   `toolCallingLoop._onDidBuildPrompt.fire(...)` site (instrumented by
- *   Patch 51) → `computeContextBreakdown(...)` (pure, in `byok/common/`)
+ *   `toolCallingLoop._onDidBuildPrompt.fire(...)` →
+ *   `computeContextBreakdown(...)` (pure, in `byok/common/`)
  *   → `reportContextBreakdown(...)` (singleton emitter) →
  *   `onDidUpdateContextBreakdown` listener here → `_render(...)`.
  *

@@ -14,7 +14,7 @@ import './findTestsFilesTool';
 import './findTextInFilesTool';
 import './getErrorsTool';
 import './getNotebookCellOutputTool';
-import './githubRepoSemanticSearchTool.tsx';
+import './githubRepoSemanticSearchTool';
 import './githubTextSearchTool';
 import './insertEditTool';
 import './installExtensionTool';
@@ -39,4 +39,3 @@ import './toolSearchTool';
 import './viewImageTool';
 import './vscodeAPITool';
 import './vscodeCmdTool';
-

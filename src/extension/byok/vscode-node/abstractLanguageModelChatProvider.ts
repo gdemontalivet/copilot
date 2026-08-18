@@ -66,7 +66,7 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 		}
 
 		// ─── BYOK CUSTOM PATCH: cache getAllModels to survive picker refresh storms ──
-		// Preserved by .github/scripts/apply-byok-patches.sh (Patch 42). Do not remove.
+		// Maintained directly in the BYOK fork source.
 		// See class-level state block below for rationale.
 		const cacheKey = this._byokModelListCacheKey(apiKey, !!silent, configuration);
 		const now = Date.now();
@@ -119,7 +119,7 @@ export abstract class AbstractLanguageModelChatProvider<C extends LanguageModelC
 	}
 
 	// ─── BYOK CUSTOM PATCH: model-list cache state (Patch 42) ────────
-	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Maintained directly in the BYOK fork source.
 	// Upstream calls `getAllModels` on every `provideLanguageModelChatInformation`
 	// with zero caching; VS Code fires `provideLanguageModelChatInformation`
 	// 10-15×/second on picker refresh; every Gemini/Anthropic `models.list`

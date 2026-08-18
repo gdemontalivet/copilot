@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 // ─── BYOK CUSTOM PATCH: Ollama think parameter mapping (Patch 62) ────────────
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Maintained directly in the BYOK fork source.
 //
 // Ollama uses a top-level `think` boolean to control Qwen3 (and future)
 // reasoning models instead of OpenAI's `reasoning_effort` string. This
@@ -23,17 +23,14 @@
 // think: true is in effect.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import type { CancellationToken } from 'vscode';
 import { IChatMLFetcher } from '../../../platform/chat/common/chatMLFetcher';
-import { ChatFetchResponseType, ChatResponse } from '../../../platform/chat/common/commonTypes';
-import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
+import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { IDomainService } from '../../../platform/endpoint/common/domainService';
 import { IChatModelInformation } from '../../../platform/endpoint/common/endpointProvider';
 import { ILogService } from '../../../platform/log/common/logService';
-import { ICreateEndpointBodyOptions, IEndpointBody, IMakeChatRequestOptions } from '../../../platform/networking/common/networking';
+import { IEndpointBody } from '../../../platform/networking/common/networking';
 import { IChatWebSocketManager } from '../../../platform/networking/node/chatWebSocketManager';
 import { IExperimentationService } from '../../../platform/telemetry/common/nullExperimentationService';
-import { IChatMLFetcher as _IChatMLFetcher } from '../../../platform/chat/common/chatMLFetcher';
 import { ITokenizerProvider } from '../../../platform/tokenizer/node/tokenizer';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { OpenAIEndpoint } from './openAIEndpoint';
@@ -78,12 +75,8 @@ export class OllamaEndpoint extends OpenAIEndpoint {
 		// reasoning_effort is populated by _applyReasoningEffort() in the parent,
 		// or absent when the user has not set an effort level.
 		const effort = body.reasoning_effort as string | undefined;
-		if (!effort || effort === 'none') {
-			(body as any)['think'] = false;
-		} else {
-			// low / medium / high → enable thinking
-			(body as any)['think'] = true;
-		}
+		const ollamaBody = body as IEndpointBody & { think?: boolean };
+		ollamaBody.think = !!effort && effort !== 'none';
 		// Always scrub reasoning_effort — Ollama doesn't understand it and some
 		// versions return a 400 when unknown fields are present.
 		delete body.reasoning_effort;

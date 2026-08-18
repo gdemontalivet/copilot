@@ -503,7 +503,7 @@ export class ChatToolReferences extends PromptElement<ChatToolCallProps, void> {
 		};
 		const toolTokens = await endpoint.acquireTokenizer().countToolTokens([tool]);
 		// ─── BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49) ───
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Maintained directly in the BYOK fork source.
 		// `{ ...endpoint, modelMaxPromptTokens: ... }` only copies OWN ENUMERABLE
 		// properties. `ExtensionContributedChatEndpoint` (used for every non-Copilot
 		// vendor in BYOK mode) defines `tokenizer` / `model` / `family` / etc. as

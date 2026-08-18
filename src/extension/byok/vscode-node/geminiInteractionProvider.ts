@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 // ─── BYOK CUSTOM PATCH: Gemini Interactions API provider (Patch 60) ──────────
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Maintained directly in the BYOK fork source.
 //
 // Google's Interactions API is the forward-looking endpoint for the Gemini
 // family.  New models and capabilities (e.g. gemini-3.5-flash) will launch
@@ -81,6 +81,7 @@ import {
 	SpanStatusCode,
 	StdAttr,
 	stringifyToolDefinitionsForOTel,
+	toSystemInstructions,
 	truncateForOTel,
 } from '../../../platform/otel/common/index';
 import { IOTelService } from '../../../platform/otel/common/otelService';
@@ -96,7 +97,6 @@ import { apiMessageToGeminiMessage, geminiMessagesToRawMessagesForLogging } from
 import { ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
 import { IBYOKStorageService } from './byokStorageService';
 import { GeminiNativeBYOKLMProvider } from './geminiNativeProvider';
-import { toGeminiFunction, ToolJsonSchema } from '../common/geminiFunctionDeclarationConverter';
 
 // ─── Error helpers (mirrors Patch 7/8 in geminiNativeProvider.ts) ────────────
 
@@ -193,7 +193,8 @@ function _classifyRetryableError(err: unknown): 'rate-limit' | 'unavailable' | '
 	const msg = String((err as any)?.message ?? '').toLowerCase();
 	const code = String((err as any)?.code ?? '');
 	if (['ECONNRESET', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNREFUSED', 'ERR_NETWORK'].includes(code) ||
-		msg.includes('fetch failed') || msg.includes('network error') || msg.includes('socket hang up')) {
+		msg.includes('fetch failed') || msg.includes('network error') || msg.includes('socket hang up') ||
+		msg.includes('geminiia connect timeout') || msg.includes('geminiia stream inactivity timeout')) {
 		return 'network';
 	}
 	// The Interactions API streams error events that we rethrow as plain Error objects with
@@ -208,6 +209,12 @@ function _classifyRetryableError(err: unknown): 'rate-limit' | 'unavailable' | '
 		return 'unavailable';
 	}
 	return null;
+}
+
+export function classifyGeminiInteractionRetryableErrorForTest(
+	err: unknown,
+): 'rate-limit' | 'unavailable' | 'network' | null {
+	return _classifyRetryableError(err);
 }
 
 /**
@@ -263,7 +270,7 @@ function _fingerprint(messages: Array<LanguageModelChatMessage | LanguageModelCh
  * @param callIdToName Optional map from callId → tool name, used to populate the
  *   required `name` field in FunctionResultStep (must match the FunctionCallStep name).
  */
-function _buildInput(
+export function buildGeminiInteractionInputForTest(
 	messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>,
 	callIdToName: ReadonlyMap<string, string> = new Map(),
 ): string | unknown[] {
@@ -288,7 +295,7 @@ function _buildInput(
 		// Strip any thinking signature appended to the callId (e.g. 'stepId|signature').
 		// The Interactions API requires call_id to exactly match the function_call step's
 		// id; the '|signature' suffix is only for Anthropic round-trip and must be dropped.
-		const cleanCallId = tr.callId ? tr.callId.split('|')[0] : tr.callId;
+		const cleanCallId = _cleanInteractionCallId(tr.callId);
 		// Look up the tool name — the Interactions API requires 'name' in FunctionResultStep
 		// to exactly match the 'name' from the corresponding FunctionCallStep.
 		const toolName = callIdToName.get(cleanCallId);
@@ -311,11 +318,24 @@ function _buildInput(
 	return '';
 }
 
+function _cleanInteractionCallId(callId: string): string {
+	return callId.split('|')[0];
+}
+
+export function recordGeminiInteractionCallNameForTest(
+	callIdToName: Map<string, string>,
+	callId: string,
+	toolName: string,
+): void {
+	callIdToName.set(_cleanInteractionCallId(callId), toolName);
+}
+
 // ─── Known Interactions-only models ──────────────────────────────────────────
 
 const KNOWN_GEMINIA_MODELS: BYOKKnownModels = {
 	// Interactions-API-first models (not available on generateContent)
 	'gemini-3.5-flash': {
+		name: 'Gemini 3.5 Flash',
 		maxInputTokens: 1_000_000,
 		maxOutputTokens: 65_536,
 		toolCalling: true,
@@ -324,6 +344,7 @@ const KNOWN_GEMINIA_MODELS: BYOKKnownModels = {
 	},
 	// Include 3.x mainline so users always get the best-available models
 	'gemini-3.1-pro-preview': {
+		name: 'Gemini 3.1 Pro Preview',
 		maxInputTokens: 1_000_000,
 		maxOutputTokens: 64_000,
 		toolCalling: true,
@@ -331,6 +352,7 @@ const KNOWN_GEMINIA_MODELS: BYOKKnownModels = {
 		thinking: true,
 	},
 	'gemini-3.1-flash': {
+		name: 'Gemini 3.1 Flash',
 		maxInputTokens: 1_000_000,
 		maxOutputTokens: 64_000,
 		toolCalling: true,
@@ -338,6 +360,7 @@ const KNOWN_GEMINIA_MODELS: BYOKKnownModels = {
 		thinking: true,
 	},
 	'gemini-3.1-flash-lite-preview': {
+		name: 'Gemini 3.1 Flash Lite Preview',
 		maxInputTokens: 1_000_000,
 		maxOutputTokens: 64_000,
 		toolCalling: true,
@@ -500,7 +523,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 		const lastTurnHadCallsEntry = this._lastTurnHadCalls.get(fingerprint);
 		const serverExpectsToolResults = !!previousInteractionId &&
 			(lastTurnHadCallsEntry === undefined || lastTurnHadCallsEntry === true);
-		const rawInput = _buildInput(messages, this._callIdToName);
+		const rawInput = buildGeminiInteractionInputForTest(messages, this._callIdToName);
 		const inputWouldBeToolResults = Array.isArray(rawInput) && rawInput.length > 0;
 		let input: string | unknown[];
 		let effectivePreviousInteractionId = previousInteractionId;
@@ -710,15 +733,19 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 				}
 				try {
 					const { systemTexts, inputMsgs } = buildOTelInputFromChatMessages(messages);
-					otelSpan.setAttributes({ ...systemTexts, ...inputMsgs });
+					const systemInstructions = toSystemInstructions(systemTexts);
+					if (systemInstructions) {
+						otelSpan.setAttribute(GenAiAttr.SYSTEM_INSTRUCTIONS, truncateForOTel(JSON.stringify(systemInstructions), this._otelService.config.maxAttributeSizeChars));
+					}
+					otelSpan.setAttribute(GenAiAttr.INPUT_MESSAGES, truncateForOTel(JSON.stringify(inputMsgs), this._otelService.config.maxAttributeSizeChars));
 				} catch { /* non-fatal */ }
 			}
 			try {
 				await doRequest();
-				otelSpan.setStatus({ code: SpanStatusCode.OK });
+				otelSpan.setStatus(SpanStatusCode.OK);
 			} catch (err) {
 				otelSpan.recordException(err as Error);
-				otelSpan.setStatus({ code: SpanStatusCode.ERROR });
+				otelSpan.setStatus(SpanStatusCode.ERROR, err instanceof Error ? err.message : String(err));
 				throw err;
 			} finally {
 				otelSpan.end();
@@ -810,7 +837,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 			// The connect timeout above only guards interactions.create() returning the
 			// AsyncIterable. Once we have the stream, for-await blocks indefinitely if
 			// events stop arriving (model hung, network half-open, upstream bug).
-			// We race each iterator.next() against a 90s inactivity promise that resets
+			// We race each iterator.next() against a 180s inactivity promise that resets
 			// on every received event — long thinking turns are fine, only true silence
 			// triggers the abort.
 			let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
@@ -933,7 +960,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 							if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
 						this._logService.info(`[${this._providerLabel}] fn-call emitted (step.stop) | callId=${stopEntry.callId} | name=${stopEntry.name} | args=${stopEntry.argsStr}`);
 						// Store callId → name so _buildInput can include 'name' in the FunctionResultStep.
-						this._callIdToName.set(stopEntry.callId, stopEntry.name);
+						recordGeminiInteractionCallNameForTest(this._callIdToName, stopEntry.callId, stopEntry.name);
 						currentTurnHadCalls = true;
 						progress.report(new LanguageModelToolCallPart(stopEntry.callId, stopEntry.name, parsedArgs));
 						}
@@ -999,7 +1026,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 					if (ttfte === undefined) { ttfte = Date.now() - issuedTime; }
 				this._logService.info(`[${this._providerLabel}] fn-call emitted (drain) | name=${pending.name} | args=${pending.argsStr}`);
 				// Store callId → name so _buildInput can include 'name' in the FunctionResultStep.
-				this._callIdToName.set(pending.callId, pending.name);
+				recordGeminiInteractionCallNameForTest(this._callIdToName, pending.callId, pending.name);
 				currentTurnHadCalls = true;
 				progress.report(new LanguageModelToolCallPart(pending.callId, pending.name, parsedArgs));
 				}
@@ -1069,7 +1096,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 			);
 			this._interactions.delete(conversationFingerprint);
 			this._lastTurnHadCalls.delete(conversationFingerprint);
-			const freshParams = { ...params, input: textFallback };
+			const freshParams: Record<string, unknown> = { ...params, input: textFallback };
 			delete freshParams['previous_interaction_id'];
 			// Pass undefined textFallback for the retry so a second ordering error
 			// (shouldn't happen) surfaces normally rather than looping.

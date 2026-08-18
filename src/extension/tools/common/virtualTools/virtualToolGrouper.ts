@@ -326,6 +326,11 @@ export class VirtualToolGrouper implements IToolCategorization {
 			return tools;
 		}
 
+		if (!await this._toolEmbeddingsComputer.isEmbeddingModelAvailable()) {
+			this._logService.trace('[virtual-tools] Falling back to deterministic grouping because no embedding model is available');
+			return this._createFallbackTools(tools, allocatedSlots);
+		}
+
 		// If only one slot allocated, return all tools in a single group with LLM-generated summary
 		if (allocatedSlots === 1) {
 			const groupDescriptions = await this._generateBulkGroupDescriptions([tools], token);
@@ -392,6 +397,12 @@ export class VirtualToolGrouper implements IToolCategorization {
 			throw e;
 		}
 
+		const groupedToolNames = new Set(embeddingGroups.flatMap(group => group.map(tool => tool.name)));
+		if (tools.some(tool => !groupedToolNames.has(tool.name))) {
+			this._logService.trace('[virtual-tools] Falling back to deterministic grouping because embeddings did not cover every tool');
+			return this._createFallbackTools(tools, limit);
+		}
+
 		const singles = embeddingGroups.filter(g => g.length === 1).map(g => g[0]);
 		const grouped = embeddingGroups.filter(g => g.length > 1);
 
@@ -403,6 +414,47 @@ export class VirtualToolGrouper implements IToolCategorization {
 		return groupDescriptions.groups
 			.map((v): VirtualTool | LanguageModelToolInformation => new VirtualTool(VIRTUAL_TOOL_NAME_PREFIX + v.name, SUMMARY_PREFIX + v.summary + SUMMARY_SUFFIX, 0, {}, v.tools))
 			.concat(singles);
+	}
+
+	private _createFallbackTools(tools: LanguageModelToolInformation[], allocatedSlots: number): (VirtualTool | LanguageModelToolInformation)[] {
+		const directTools = tools.slice(0, allocatedSlots - 1);
+		const groupedTools = tools.slice(directTools.length);
+		const group = this._createFallbackTree(groupedTools);
+		return [...directTools, group];
+	}
+
+	private _createFallbackTree(tools: LanguageModelToolInformation[]): VirtualTool {
+		let depth = 0;
+		while (tools.length > (Constant.FALLBACK_TREE_FRONTIER_LIMIT - depth) * 2 ** depth) {
+			depth++;
+		}
+
+		const namespace = tools[0].name;
+		const createNode = (nodeTools: LanguageModelToolInformation[], remainingDepth: number, index: number): VirtualTool => {
+			if (remainingDepth === 0) {
+				return new VirtualTool(
+					`${VIRTUAL_TOOL_NAME_PREFIX}fallback_${namespace}_${index}`,
+					`${SUMMARY_PREFIX}Contains the tools: ${nodeTools.map(tool => tool.name).join(', ')}${SUMMARY_SUFFIX}`,
+					0,
+					{},
+					nodeTools,
+				);
+			}
+
+			const split = Math.ceil(nodeTools.length / 2);
+			return new VirtualTool(
+				`${VIRTUAL_TOOL_NAME_PREFIX}fallback_${namespace}_${index}`,
+				`${SUMMARY_PREFIX}Contains additional tools from this toolset.${SUMMARY_SUFFIX}`,
+				0,
+				{},
+				[
+					createNode(nodeTools.slice(0, split), remainingDepth - 1, index * 2),
+					createNode(nodeTools.slice(split), remainingDepth - 1, index * 2 + 1),
+				],
+			);
+		};
+
+		return createNode(tools, depth, 1);
 	}
 
 	/**
@@ -421,10 +473,10 @@ export class VirtualToolGrouper implements IToolCategorization {
 		}
 
 		// ─── BYOK CUSTOM PATCH: tolerate copilot-fast unavailability ──────────────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-		// In BYOK-only mode the fake-token bypass in modelMetadataFetcher leaves
-		// `_familyMap` empty, so `getChatEndpoint('copilot-fast' → 'gpt-4o-mini')`
-		// throws. Without this guard, any chat turn that triggers virtual-tool
+		// Maintained directly in the BYOK fork source.
+		// In signed-out BYOK mode no Copilot utility model may be configured, so
+		// resolving the categorization endpoint can fail. Without this guard, any
+		// chat turn that triggers virtual-tool
 		// grouping (≳128 tools, i.e. any MCP-heavy workspace like Looker +
 		// Tableau + Pylance) crashes entirely. We also short-circuit when nothing
 		// needs describing, and iterate over `missing` (not `described.length`)

@@ -13,7 +13,7 @@ import { BaseOctoKitService } from '../../github/common/githubService';
 import { ILogService } from '../../log/common/logService';
 import { IFetcherService } from '../../networking/common/fetcherService';
 import { ITelemetryService } from '../../telemetry/common/telemetry';
-import { CopilotToken, createTestExtendedTokenInfo, ExtendedTokenInfo, TokenErrorNotificationId, TokenInfoOrError } from '../common/copilotToken';
+import { CopilotToken, ExtendedTokenInfo, TokenErrorNotificationId, TokenInfoOrError } from '../common/copilotToken';
 import { ErrorNoTelemetry } from '../../../util/vs/base/common/errors';
 import { nowSeconds } from '../common/copilotTokenManager';
 import { BaseCopilotTokenManager } from '../node/copilotTokenManager';
@@ -46,19 +46,23 @@ export class VSCodeCopilotTokenManager extends BaseCopilotTokenManager {
 	}
 
 	async getCopilotToken(force?: boolean): Promise<CopilotToken> {
-		const fakeTokenInfo = createTestExtendedTokenInfo({
-			token: "fake-token",
-			expires_at: 9999999999,
-			refresh_in: 9999999999,
-			sku: "individual",
-			individual: true,
-			username: "offline-user",
-			copilot_plan: "individual",
-		});
-		if (!this.copilotToken) {
-			this.copilotToken = fakeTokenInfo;
+		const failWith = this.configurationService.getConfig(ConfigKey.Advanced.DebugGitHubAuthFailWith);
+		if (failWith) {
+			this.copilotToken = undefined;
 		}
-		return new CopilotToken(fakeTokenInfo);
+
+		if (!this.copilotToken || this.copilotToken.expires_at - (60 * 5 /* 5min */) < nowSeconds() || force) {
+			try {
+				this._logService.debug(`Getting CopilotToken (force: ${force})...`);
+				this.copilotToken = await this._authShowWarnings();
+				this._logService.debug(`Got CopilotToken (force: ${force}).`);
+			} catch (e) {
+				this._logService.debug(`Getting CopilotToken (force: ${force}) threw error: ${e}`);
+				this.copilotToken = undefined;
+				throw e;
+			}
+		}
+		return new CopilotToken(this.copilotToken);
 	}
 
 	private async _auth(): Promise<TokenInfoOrError> {

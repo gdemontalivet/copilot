@@ -219,8 +219,7 @@ export class BackgroundSummarizer {
 }
 
 // ─── BYOK CUSTOM PATCH: Tiered auto-compaction ──────────────────────────────
-// The following exports are preserved across upstream syncs by
-// .github/scripts/apply-byok-patches.sh. Do not remove.
+// Maintained directly in the BYOK fork source.
 
 /**
  * Compaction urgency tier:
@@ -236,14 +235,23 @@ export type CompactionTier = 0 | 1 | 2 | 3;
  * `BackgroundSummarizationThresholds.base` gate, these fire at lower estimate
  * ratios so compaction starts well before we hit Gemini's 1M input-token cap.
  */
-export const TieredCompactionThresholds = {
+interface CompactionThresholds {
+	readonly tier1Estimate: number;
+	readonly tier2Estimate: number;
+	readonly tier3Estimate: number;
+	readonly tier1Confirmed: number;
+	readonly tier2Confirmed: number;
+	readonly tier3Confirmed: number;
+}
+
+export const TieredCompactionThresholds: CompactionThresholds = {
 	tier1Estimate: 0.70,
 	tier2Estimate: 0.80,
 	tier3Estimate: 0.90,
 	tier1Confirmed: 0.65,
 	tier2Confirmed: 0.75,
 	tier3Confirmed: 0.85,
-} as const;
+};
 
 /**
  * Adaptive compaction thresholds for large-context models.
@@ -265,7 +273,7 @@ const LARGE_CONTEXT_THRESHOLD_TOKENS = 300_000;
 const LARGE_CONTEXT_TIER1_ABSOLUTE = 180_000;
 const LARGE_CONTEXT_TIER2_ABSOLUTE = 200_000;
 const LARGE_CONTEXT_TIER3_ABSOLUTE = 220_000;
-export function resolveCompactionThresholds(modelMaxPromptTokens?: number): typeof TieredCompactionThresholds {
+export function resolveCompactionThresholds(modelMaxPromptTokens?: number): CompactionThresholds {
 	if (!modelMaxPromptTokens || modelMaxPromptTokens <= LARGE_CONTEXT_THRESHOLD_TOKENS) {
 		return TieredCompactionThresholds;
 	}
@@ -277,7 +285,7 @@ export function resolveCompactionThresholds(modelMaxPromptTokens?: number): type
 		tier1Confirmed: (LARGE_CONTEXT_TIER1_ABSOLUTE * 0.93) / max,
 		tier2Confirmed: (LARGE_CONTEXT_TIER2_ABSOLUTE * 0.93) / max,
 		tier3Confirmed: (LARGE_CONTEXT_TIER3_ABSOLUTE * 0.93) / max,
-	} as const;
+	};
 }
 
 /**

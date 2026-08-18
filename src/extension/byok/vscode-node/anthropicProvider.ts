@@ -39,7 +39,7 @@ export interface IAnthropicFailoverTarget {
 }
 
 // ─── BYOK CUSTOM PATCH: readable Anthropic errors ─────────────────────
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Maintained directly in the BYOK fork source.
 // Anthropic (and Vertex-routed Anthropic) errors arrive with `.message` set
 // to the raw JSON body, e.g.
 //   `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"},"request_id":"..."}`
@@ -78,7 +78,7 @@ export function extractReadableAnthropicMessage(err: unknown): string {
 // ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────
 
 // ─── BYOK CUSTOM PATCH: Anthropic retry resilience ──────────────────
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Maintained directly in the BYOK fork source.
 // Classify Anthropic SDK / transport errors as retryable. Returns a label
 // used in progress messages, or null if the error is terminal.
 //
@@ -166,12 +166,11 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 	}
 
 	// ─── BYOK CUSTOM PATCH: anthropic known-models capability fallback ────────
-	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Maintained directly in the BYOK fork source.
 	// Upstream's generic fallback for models missing from `_knownModels`
 	// hard-codes `maxInputTokens: 100000`, `vision: false`, `thinking: false`.
-	// Under the BYOK fake-token bypass `_knownModels` is almost always empty
-	// (the list is fetched from GitHub and filtered by Copilot subscription),
-	// so every Anthropic model falls through to that fallback and the user
+	// In signed-out BYOK mode `_knownModels` can be empty, so Anthropic models
+	// fall through to that fallback and the user
 	// sees "vision is not supported by the current model" even when chatting
 	// with Claude Opus 4.6 which natively accepts images. Consult a small
 	// per-model-family capability table first.
@@ -218,7 +217,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 					modelList[model.id] = this._knownModels[model.id];
 				} else {
 					// ─── BYOK CUSTOM PATCH: vision-aware generic fallback ──────────
-					// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+					// Maintained directly in the BYOK fork source.
 					// Consult the static known-capability table first; fall back to
 					// a safe generic entry only if the model family is unrecognised.
 					const known = this._resolveAnthropicCapabilities(model.id);
@@ -474,7 +473,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 				: undefined;
 
 			// ─── BYOK CUSTOM PATCH: always cache system prompt + tools ────────────────────────
-			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			// Maintained directly in the BYOK fork source.
 			// Upstream `addCacheBreakpoints` only reserves leftover cache slots for
 			// the system message after tool-result breakpoints have been allocated,
 			// so in multi-tool-call turns the system prompt (often the largest
@@ -621,7 +620,6 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 						[GenAiAttr.RESPONSE_MODEL]: model.id,
 						[GenAiAttr.RESPONSE_ID]: requestId,
 						[GenAiAttr.RESPONSE_FINISH_REASONS]: ['stop'],
-						[GenAiAttr.CONVERSATION_ID]: requestId,
 						[GenAiAttr.REQUEST_STREAM]: true,
 						...(result.ttft ? { [CopilotChatAttr.TIME_TO_FIRST_TOKEN]: result.ttft } : {}),
 						...(result.ttft ? { [GenAiAttr.RESPONSE_TIME_TO_FIRST_CHUNK]: result.ttft / 1000 } : {}),
@@ -694,6 +692,8 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 						"clientPromptTokenCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of prompt tokens, locally counted", "isMeasurement": true },
 						"promptTokenCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of prompt tokens, server side counted", "isMeasurement": true },
 						"promptCacheTokenCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of prompt tokens hitting cache as reported by server", "isMeasurement": true },
+						"promptCacheCreation1hTokenCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Cache-creation input tokens written with the 1h (extended) TTL, billed at 2x base rate. Only populated when Anthropic reports the cache_creation breakdown.", "isMeasurement": true },
+						"promptCacheCreation5mTokenCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Cache-creation input tokens written with the default 5m TTL, billed at 1.25x base rate. Only populated when Anthropic reports the cache_creation breakdown.", "isMeasurement": true },
 						"tokenCountMax": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Maximum generated tokens", "isMeasurement": true },
 						"tokenCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of generated tokens", "isMeasurement": true },
 						"reasoningTokens": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of reasoning tokens", "isMeasurement": true },
@@ -705,6 +705,23 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 						"timeToComplete": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Time to complete the request", "isMeasurement": true },
 						"issuedTime": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Timestamp when the request was issued", "isMeasurement": true },
 						"isVisionRequest": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Whether the request was for a vision model", "isMeasurement": true },
+						"imageCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of input images attached to the request", "isMeasurement": true },
+						"totalImageBytes": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Sum of byte sizes for attached input images when known", "isMeasurement": true },
+						"maxImageBytes": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Largest known input image byte size in the request", "isMeasurement": true },
+						"maxImageWidth": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Largest known input image width in the request", "isMeasurement": true },
+						"maxImageHeight": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Largest known input image height in the request", "isMeasurement": true },
+						"maxImagePixels": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Largest known input image pixel count in the request", "isMeasurement": true },
+						"totalImagePixels": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Sum of known input image pixel counts in the request", "isMeasurement": true },
+						"imagePngCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of PNG input images", "isMeasurement": true },
+						"imageJpegCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of JPEG input images", "isMeasurement": true },
+						"imageGifCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of GIF input images", "isMeasurement": true },
+						"imageWebpCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of WebP input images", "isMeasurement": true },
+						"imageUnknownMimeCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of input images whose MIME type is unknown or unsupported", "isMeasurement": true },
+						"imageClipboardCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of input images sourced from clipboard or paste", "isMeasurement": true },
+						"imageScreenshotCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of input images sourced from screenshot capture", "isMeasurement": true },
+						"imageFileCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of input images sourced from local file attachment", "isMeasurement": true },
+						"imageUrlCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of input images sourced from URL", "isMeasurement": true },
+						"imageUnknownSourceCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of input images whose source could not be determined", "isMeasurement": true },
 						"isBYOK": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "Whether the request was for a BYOK model", "isMeasurement": true },
 						"isAuto": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "Whether the request was for an Auto model", "isMeasurement": true },
 						"bytesReceived": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of bytes received in the response", "isMeasurement": true },
@@ -775,14 +792,22 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 
 		// Create OTel span and execute with trace context + CapturingToken
 		const executeRequest = async () => {
+			const chatSessionId = capturingToken?.chatSessionId;
+			const parentChatSessionId = capturingToken?.parentChatSessionId;
+			const debugLogLabel = capturingToken?.debugLogLabel;
 			otelSpan = this._otelService.startSpan(`chat ${model.id}`, {
 				kind: SpanKind.CLIENT,
 				attributes: {
 					[GenAiAttr.OPERATION_NAME]: GenAiOperationName.CHAT,
 					[GenAiAttr.PROVIDER_NAME]: GenAiProviderName.ANTHROPIC,
 					[GenAiAttr.REQUEST_MODEL]: model.id,
+					...(chatSessionId ? { [GenAiAttr.CONVERSATION_ID]: chatSessionId } : {}),
 					[GenAiAttr.AGENT_NAME]: 'AnthropicBYOK',
 					[CopilotChatAttr.MAX_PROMPT_TOKENS]: model.maxInputTokens,
+					...(chatSessionId ? { [CopilotChatAttr.SESSION_ID]: chatSessionId } : {}),
+					...(chatSessionId ? { [CopilotChatAttr.CHAT_SESSION_ID]: chatSessionId } : {}),
+					...(parentChatSessionId ? { [CopilotChatAttr.PARENT_CHAT_SESSION_ID]: parentChatSessionId } : {}),
+					...(debugLogLabel ? { [CopilotChatAttr.DEBUG_LOG_LABEL]: debugLogLabel } : {}),
 					[StdAttr.SERVER_ADDRESS]: 'api.anthropic.com',
 				},
 			});
@@ -824,7 +849,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 	}
 
 	// ─── BYOK CUSTOM PATCH: self-calibrating chars-per-token ratio ────────────
-	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Maintained directly in the BYOK fork source.
 	// Upstream returns `Math.ceil(text.length / 4)`, which is optimistic for
 	// Claude (actual ratio is closer to 3.3 for code/JSON, 3.8 for English).
 	// Calling Anthropic's `/messages/count_tokens` endpoint on every
@@ -869,7 +894,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 
 	private async _makeRequest(anthropicClient: Anthropic, progress: RecordedProgress<LMResponsePart>, params: Anthropic.Beta.Messages.MessageCreateParamsStreaming, betas: string[], token: CancellationToken, issuedTime: number, retryCount = 0): Promise<{ ttft: number | undefined; ttfte: number | undefined; usage: APIUsage | undefined; contextManagement: ContextManagementResponse | undefined }> {
 		// ─── BYOK CUSTOM PATCH: retry + readable-error constants ──────────────────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Maintained directly in the BYOK fork source.
 		// Budget: 5s, 10s, 20s, 40s → 75s cumulative worst case. Matches the
 		// Gemini resilience patch (Patch 8) but capped tighter since
 		// (a) Anthropic has a real failover target (Vertex) for non-Vertex
@@ -885,7 +910,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		let ttfte: number | undefined;
 
 		// ─── BYOK CUSTOM PATCH: capture prompt chars for token ratio calibration ──
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Maintained directly in the BYOK fork source.
 		// Serialize the outgoing prompt once so that after the response returns
 		// we can divide promptChars / actual input_tokens to derive a real
 		// chars-per-token ratio for this model. JSON.stringify is a reasonable
@@ -902,7 +927,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
 
 		// ─── BYOK CUSTOM PATCH: retry + readable-error wrapping ─────────────────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Maintained directly in the BYOK fork source.
 		// Wrap the stream create + consume in try/catch so overloaded_error /
 		// rate limits / transient 5xx recover transparently instead of dumping
 		// a raw JSON blob into chat. Only retry when `ttft === undefined` —
@@ -1142,7 +1167,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		}
 
 		// ─── BYOK CUSTOM PATCH: calibrate chars-per-token from real usage ─────────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Maintained directly in the BYOK fork source.
 		// `usage.prompt_tokens` here already folds in cache-creation and
 		// cache-read tokens (see `message_start` handling above), which is what
 		// Anthropic actually billed and what their tokenizer produced. Using it
@@ -1154,7 +1179,7 @@ export class AnthropicLMProvider extends AbstractLanguageModelChatProvider {
 		// ─── END BYOK CUSTOM PATCH ────────────────────────────────────────────────
 
 		// ─── BYOK CUSTOM PATCH: per-request TokenBudget info log ──────────────────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Maintained directly in the BYOK fork source.
 		// Emits one info-level line per completed request so context-window
 		// behaviour is visible without enabling trace logging. Works for both
 		// direct Anthropic and Vertex-routed Anthropic (the subclass overrides

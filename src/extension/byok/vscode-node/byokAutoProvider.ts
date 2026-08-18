@@ -1,8 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  BYOK CUSTOM FILE (Patch 34). Canonical copy under
- *  `.github/byok-patches/files/byokAutoProvider.ts` and installed into
- *  `src/extension/byok/vscode-node/` by `.github/scripts/apply-byok-patches.sh`
- *  on every upstream sync. Do not edit the installed copy directly.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
@@ -36,39 +34,20 @@ import type {
 } from '../common/byokRoutingClassifier.types';
 import { classifyByHeuristic, isTrivialPrompt } from '../common/byokRoutingHeuristics';
 import type { IBYOKStorageService } from './byokStorageService';
+import { sendLanguageModelRequest } from './languageModelRequest';
 
 /**
  * Synthetic "Auto" model that lives in the BYOK world.
  *
- * Upstream Copilot Chat exposes `copilot/auto` as a pseudo-model backed by
- * `AutomodeService`, which POSTs to a CAPI `auto_mode` endpoint with the
- * Copilot session token to decide which real model to dispatch to. That path
- * does not survive the BYOK fake-token bypass (Patch 1): CAPI rejects the
- * fake token, the throw in `AutomodeService.resolveAutoModeEndpoint`
- * propagates through VS Code's `LanguageModelProxy.getModelForRequest`, and
- * the UI surfaces it as "Language model unavailable" on every turn.
+ * Upstream's `copilot/auto` pseudo-model selects GitHub-hosted models through
+ * CAPI. This provider registers a separate `byokauto` vendor so signed-out
+ * users get a "BYOK Auto" entry that resolves entirely client-side. Static
+ * mode delegates to `chat.byok.auto.defaultModel`; classifier mode selects a
+ * target from the configured routing table. Both paths resolve the provider
+ * through `vscode.lm.selectChatModels` and forward the response stream.
  *
- * This provider registers a parallel `byokauto` vendor so the picker shows a
- * "BYOK Auto" entry that resolves entirely client-side. On each request it
- * reads `chat.byok.auto.defaultModel` (formatted as `vendor/modelId`, e.g.
- * `vertexgemini/gemini-3.1-pro-preview`), resolves the target model via
- * `vscode.lm.selectChatModels`, and forwards the request through
- * `model.sendRequest(...)` — which re-enters the VS Code LM API and delegates
- * to the target provider's own `provideLanguageModelChatResponse`. The
- * response stream is piped back to the caller's `progress` reporter
- * unchanged.
- *
- * This is intentionally the "simple" stage (B2 in the design):
- *   - No classifier. Every request goes to the configured default model.
- *   - No routing table. The default model is a single setting value.
- *   - No topic-change detection or auto-compaction.
- *
- * It exists so users can actually *pick* Auto in the picker today and get a
- * working request flow while the full classifier-driven router (Patch 30's
- * `ByokRoutingClassifier` + a routing table) lands on top later (B3). The
- * public contract of this class is deliberately narrow so the B3 follow-up
- * can swap the resolution step (`_resolveTargetModel`) for classifier-driven
- * logic without touching the registration wire-up or the request plumbing.
+ * The public contract stays narrow so routing policy remains isolated from
+ * provider registration and response streaming.
  */
 export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageModelChatInformation> {
 
@@ -86,7 +65,7 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 	public static readonly modelId: string = 'byok-auto';
 
 	/**
-	 * Vendor preference order for auto-discovery (Patch 39). When
+	 * Vendor preference order for auto-discovery. When
 	 * `chat.byok.auto.defaultModel` is unset, we walk this list and pick
 	 * the first vendor that has at least one registered model. Rationale:
 	 *
@@ -96,7 +75,7 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 	 *      when the direct Gemini key isn't configured.
 	 *   3. `anthropic` — Claude direct API (BYOK Anthropic provider).
 	 *   4. `vertexanthropic` — Claude on Vertex, used as the Anthropic
-	 *      failover target (Patch 21) and the classifier fallback (Patch 30).
+	 *      failover target and classifier fallback.
 	 *   5. Anything else (OpenAI / xAI / OpenRouter / etc.) — last resort
 	 *      so Auto still resolves on BYOK installs that don't run Gemini
 	 *      or Anthropic.
@@ -104,7 +83,7 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 	 * The old compiled-in default (`vertexgemini/gemini-3.1-pro-preview`)
 	 * assumed every install had Vertex configured, which is false — most
 	 * users have the direct `gemini` vendor instead. That mismatch is what
-	 * surfaced as "Language model unavailable" before Patch 39.
+	 * surfaced as "Language model unavailable" before auto-discovery was added.
 	 */
 	private static readonly AUTO_DISCOVERY_VENDOR_PRIORITY: readonly string[] = [
 		'gemini',
@@ -185,7 +164,7 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 			maxOutputTokens: 64_000,
 			tooltip: 'Routes to the model configured in `chat.byok.auto.defaultModel`. Future versions will classify each prompt and pick the cheapest capable model.',
 			detail: this._describeConfiguredTarget(),
-			category: { label: '', order: Number.MIN_SAFE_INTEGER },
+			category: '',
 			// `isUserSelectable: true` is REQUIRED for VS Code's chat
 			// model picker to enable the entry for selection. Without
 			// it the picker renders the model in the list but greys it
@@ -235,12 +214,13 @@ export class BYOKAutoLMProvider implements LanguageModelChatProvider<LanguageMod
 			progress.report(new LanguageModelTextPart(this._formatRoutingHint(resolution)));
 		}
 
-		const response = await target.sendRequest(
+		const response = await sendLanguageModelRequest(
+			target,
 			messages,
 			{
 				modelOptions: options.modelOptions,
 				toolMode: options.toolMode,
-				tools: options.tools,
+				tools: options.tools ? [...options.tools] : undefined,
 				justification: 'BYOK Auto delegating to configured default model',
 			},
 			token,

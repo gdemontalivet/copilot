@@ -1,13 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  BYOK CUSTOM FILE (Patch 40). Canonical copy under
- *  `.github/byok-patches/files/byokAutoRouter.ts` and installed into
- *  `src/extension/byok/common/` by `.github/scripts/apply-byok-patches.sh`
- *  on every upstream sync. Do not edit the installed copy directly.
- *
- *  Pure-logic file — zero network, zero VS Code API, no SDK deps. Lives
- *  under `common/` so the router can be unit-tested without pulling in
- *  `@google/genai`, `@anthropic-ai/sdk`, or `vscode`. The provider
- *  (`byokAutoProvider.ts`, vscode-node/) wires it up with live models.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import type { ClassificationResult, TaskComplexity, TaskType } from './byokRoutingClassifier.types';
@@ -77,7 +70,7 @@ export type RoutingTable = {
  * picks the first registered match. If nothing in the row is registered,
  * it falls through to the complexity-level `'*'` default, then to the
  * global `DEFAULT_MODEL_PREFERENCES`, and finally to the vendor-priority
- * auto-discovery inside the provider (Patch 39).
+ * auto-discovery inside the provider.
  */
 export const DEFAULT_ROUTING_TABLE: RoutingTable = {
 	trivial: {
@@ -118,7 +111,7 @@ export const DEFAULT_ROUTING_TABLE: RoutingTable = {
 /**
  * Last-resort preference list used when the routing table has no match
  * for the (complexity, task_type) cell and no `'*'` default either.
- * Mirrors `BYOKAutoLMProvider.AUTO_DISCOVERY_MODEL_PREFERENCE` (Patch 39)
+ * Mirrors `BYOKAutoLMProvider.AUTO_DISCOVERY_MODEL_PREFERENCE`
  * so static vs classifier mode behave consistently when nothing is
  * configured.
  */

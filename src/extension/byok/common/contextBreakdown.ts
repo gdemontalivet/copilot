@@ -1,8 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  BYOK CUSTOM FILE (Patch 51). Canonical copy under
- *  `.github/byok-patches/files/contextBreakdown.ts` and installed into
- *  `src/extension/byok/common/` by `.github/scripts/apply-byok-patches.sh`
- *  on every upstream sync. Do not edit the installed copy directly.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import { Raw } from '@vscode/prompt-tsx';
@@ -10,7 +8,7 @@ import type { ITokenizer } from '../../../util/common/tokenizer';
 
 /**
  * Pure types + classifier for the chat-panel context-window breakdown
- * status item (Patch 51). See {@link computeContextBreakdown} for the
+ * status item. See {@link computeContextBreakdown} for the
  * compute pipeline; the BYOK-only ChatStatusItem in
  * `contextWindowStatusItem.ts` consumes the result and renders it in
  * the chat-panel status row alongside the codebase-index and
@@ -29,7 +27,7 @@ import type { ITokenizer } from '../../../util/common/tokenizer';
  *                       the caller via `ITokenizer.countToolTokens`)
  *   - `summary`       — text of the most recent
  *                       SummarizedConversationHistoryMetadata, when
- *                       compaction has fired (see Patches 4/6/23)
+ *                       compaction has fired
  *   - `history`       — every non-latest user / assistant / tool
  *                       message
  *   - `current`       — the latest user message

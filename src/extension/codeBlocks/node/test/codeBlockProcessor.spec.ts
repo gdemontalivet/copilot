@@ -9,7 +9,22 @@ import type { ChatVulnerability } from 'vscode';
 import { URI } from '../../../../util/vs/base/common/uri';
 import { MarkdownString } from '../../../../vscodeTypes';
 import { CodeBlock } from '../../../prompt/common/conversation';
-import { CodeBlockInfo, CodeBlockProcessor, LineProcessor } from '../codeBlockProcessor';
+import { CodeBlockInfo, CodeBlockProcessor, CodeBlockTrackingChatResponseStream, LineProcessor } from '../codeBlockProcessor';
+
+suite('CodeBlockTrackingChatResponseStream', () => {
+	test('supports VS Code versions without voiceProgress', () => {
+		const wrapped = new Proxy({}, {
+			get: (_target, property) => property === 'voiceProgress' ? undefined : () => { },
+		});
+		const stream = new CodeBlockTrackingChatResponseStream(
+			wrapped as any,
+			undefined,
+			{ resolveFilePath: () => undefined } as any,
+		);
+
+		assert.doesNotThrow(() => stream.voiceProgress('planning', 'Working'));
+	});
+});
 
 suite('CodeBlockProcessor', () => {
 

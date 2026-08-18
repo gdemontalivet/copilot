@@ -16,10 +16,6 @@ export interface ThinkingDataInMessage {
 	reasoning_opaque?: string;
 	reasoning_text?: string;
 
-	// DeepSeek / Moonshot (Kimi) / Minimax field.
-	reasoning_content?: string;
-	// OpenRouter field.
-	reasoning?: string;
 }
 
 export interface RawThinkingDelta {
@@ -34,11 +30,6 @@ export interface RawThinkingDelta {
 	// Copilot API fields
 	reasoning_opaque?: string;
 	reasoning_text?: string;
-
-	// DeepSeek / Moonshot (Kimi) / Minimax field.
-	reasoning_content?: string;
-	// OpenRouter field.
-	reasoning?: string;
 
 	// Anthropic fields
 	thinking?: string;

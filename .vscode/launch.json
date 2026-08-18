@@ -11,7 +11,6 @@
 			],
 			"smartStep": true,
 			"sourceMaps": true,
-			"preLaunchTask": "compile",
 			"envFile": "${workspaceFolder}/.env",
 			"env": {
 				"COPILOT_LOG_TELEMETRY": "true",
@@ -302,7 +301,6 @@
 			],
 			"smartStep": true,
 			"sourceMaps": true,
-			"preLaunchTask": "compile",
 			"envFile": "${workspaceFolder}/.env",
 			"env": {
 				"COPILOT_LOG_TELEMETRY": "true",

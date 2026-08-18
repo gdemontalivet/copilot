@@ -6,46 +6,64 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # Run the build in London time so file mtimes inside the VSIX, `date`
-      # output, and Node `Date.toString()` match the maintainer's local wall
-      # clock instead of the runner's default UTC. Swap for another IANA zone
-      # (e.g. `America/New_York`) if the maintainer ever changes timezone.
-      TZ: Europe/London
+      VSCODE_CHECKOUT: ${{ runner.temp }}/vscode-byok
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout fork
+        uses: actions/checkout@v6
+        with:
+          lfs: true
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: 24.x
+          node-version-file: .nvmrc
           cache: npm
 
-      - name: Install Dependencies
-        run: npm ci --verbose
+      - name: Assemble pinned VS Code checkout
+        run: bash script/prepareUpstreamCheckout.sh "$VSCODE_CHECKOUT"
 
-      - name: Apply Patch (Optional)
-        # If you prefer to apply the patch dynamically instead of committing it, 
-        # uncomment the line below. Otherwise, it uses the committed code.
-        # run: git apply my-byok-changes.patch
-        run: echo "Using committed code. If you want to apply a patch dynamically, update this step."
+      - name: Install dependencies
+        working-directory: ${{ env.VSCODE_CHECKOUT }}/extensions/copilot
+        run: npm ci
 
-      - name: Build Extension (VSIX)
-        run: |
-          npm run build
-          # Install vsce globally
-          npm install -g @vscode/vsce
-          # Package the extension
-          vsce package -o copilot-custom-build.vsix
+      - name: Typecheck
+        working-directory: ${{ env.VSCODE_CHECKOUT }}/extensions/copilot
+        run: npm run typecheck
 
-      - name: Upload VSIX Artifact
-        uses: actions/upload-artifact@v4
+      - name: Run local BYOK tests
+        working-directory: ${{ env.VSCODE_CHECKOUT }}/extensions/copilot
+        run: >-
+          npx vitest run
+          src/extension/byok/common/test/byokAutoRouter.spec.ts
+          src/extension/byok/common/test/byokFailover.spec.ts
+          src/extension/byok/common/test/byokRoutingHeuristics.spec.ts
+          src/extension/byok/common/test/contextBreakdown.spec.ts
+          src/extension/byok/common/test/dsmlToolCallStripper.spec.ts
+          src/extension/byok/vscode-node/test/byokAutoProvider.spec.ts
+          src/extension/byok/vscode-node/test/byokFusionProvider.spec.ts
+          src/extension/byok/vscode-node/test/byokRoutingClassifier.spec.ts
+          src/extension/byok/vscode-node/test/byokOTelHelpers.spec.ts
+          src/extension/byok/vscode-node/test/openRouterProvider.spec.ts
+
+      - name: Build extension
+        working-directory: ${{ env.VSCODE_CHECKOUT }}/extensions/copilot
+        run: npm run build
+
+      - name: Package extension
+        working-directory: ${{ env.VSCODE_CHECKOUT }}/extensions/copilot
+        run: npx vsce package --no-dependencies -o copilot-custom-build.vsix
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v7
         with:
           name: copilot-custom-build
-          path: copilot-custom-build.vsix
+          path: ${{ env.VSCODE_CHECKOUT }}/extensions/copilot/copilot-custom-build.vsix

@@ -1,7 +1,7 @@
-// ─── BYOK CUSTOM PATCH: DeepSeek native provider (Patch 55) ─────────────────
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-// Installed at: src/extension/byok/vscode-node/deepseekProvider.ts
-//
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
 // DeepSeek V4 is OpenAI-compatible at the wire level but has a few
 // important differences that warrant a dedicated provider rather than
 // asking users to configure it through CustomOAI:
@@ -10,7 +10,7 @@
 //      CustomOAI defaults to 128 K, so users would see silent truncation.
 //   2. Fixed base URL (https://api.deepseek.com) — no manual URL config.
 //   3. `reasoning_content` in responses is surfaced as a LanguageModelThinkingPart
-//      (via Patch 53) but must NOT be round-tripped back on the next request
+//      but must NOT be round-tripped back on the next request
 //      (per DeepSeek docs: including it causes HTTP 400). Setting
 //      `thinking: false` in capabilities tells the serialiser to drop it.
 //   4. `reasoning_effort` is `high` (default) / `max` — the existing
@@ -62,7 +62,7 @@ export class DeepSeekBYOKLMProvider extends AbstractOpenAICompatibleLMProvider {
 	public static readonly providerId   = 'deepseek';
 
 	constructor(
-		knownModels: BYOKKnownModels,
+		knownModels: BYOKKnownModels | undefined,
 		byokStorageService: IBYOKStorageService,
 		@IFetcherService fetcherService: IFetcherService,
 		@ILogService logService: ILogService,

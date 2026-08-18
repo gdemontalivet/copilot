@@ -1,9 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  BYOK CUSTOM FILE (Patch 51). Canonical copy under
- *  `.github/byok-patches/files/contextBreakdownChannel.ts` and installed
- *  into `src/extension/byok/common/` by
- *  `.github/scripts/apply-byok-patches.sh` on every upstream sync.
- *  Do not edit the installed copy directly.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import { Emitter, Event } from '../../../util/vs/base/common/event';
@@ -11,8 +8,8 @@ import type { ContextBreakdown } from './contextBreakdown';
 
 /**
  * Singleton event channel between the producer (the
- * `toolCallingLoop._onDidBuildPrompt.fire(...)` site, instrumented by
- * Patch 51) and the consumer (the `ContextWindowStatusItem` registered
+ * `toolCallingLoop._onDidBuildPrompt.fire(...)` site) and the consumer
+ * (the `ContextWindowStatusItem` registered
  * in `contributions.ts`).
  *
  * Why a module-level singleton instead of a DI-registered service?

@@ -4,12 +4,12 @@
  *--------------------------------------------------------------------------------------------*/
 import type { Content, FunctionCall, FunctionResponse, Part } from '@google/genai';
 import { Raw } from '@vscode/prompt-tsx';
-import type { LanguageModelChatMessage } from 'vscode';
+import type { LanguageModelChatMessage, LanguageModelChatMessage2 } from 'vscode';
 import { CustomDataPartMimeTypes } from '../../../platform/endpoint/common/endpointTypes';
 import { LanguageModelChatMessageRole, LanguageModelDataPart, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, LanguageModelToolResultPart, LanguageModelToolResultPart2 } from '../../../vscodeTypes';
 
 // ─── BYOK CUSTOM PATCH: resolve tool names across providers (Patch 43) ─────
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Maintained directly in the BYOK fork source.
 // When a conversation contains tool calls produced by *another* provider
 // (typically Anthropic, where tool_use.id looks like `toolu_01ABCdef…`),
 // the callId carries no tool name. The legacy `callId.split('_')[0]`
@@ -81,7 +81,7 @@ function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageMod
 			}
 		} else if (part instanceof LanguageModelToolResultPart || part instanceof LanguageModelToolResultPart2) {
 			// ─── BYOK CUSTOM PATCH: drop orphan tool-result parts (Patch 43) ──────
-			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			// Maintained directly in the BYOK fork source.
 			// Gemini's function-calling contract requires that every
 			// `functionResponse.name` in a user turn match a `functionCall.name`
 			// emitted by the model in the preceding turn (count + names). When
@@ -176,7 +176,7 @@ function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageMod
 	return convertedContent;
 }
 
-export function apiMessageToGeminiMessage(messages: LanguageModelChatMessage[]): { contents: Content[]; systemInstruction?: Content } {
+export function apiMessageToGeminiMessage(messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>): { contents: Content[]; systemInstruction?: Content } {
 	const contents: Content[] = [];
 	let systemInstruction: Content | undefined;
 
@@ -203,8 +203,7 @@ export function apiMessageToGeminiMessage(messages: LanguageModelChatMessage[]):
 		if (message.role === LanguageModelChatMessageRole.System) {
 			// Gemini uses system instruction separately
 			const systemText = message.content
-				.filter((p): p is LanguageModelTextPart => p instanceof LanguageModelTextPart)
-				.map(p => p.value)
+				.map(part => part instanceof LanguageModelTextPart ? part.value : '')
 				.join('');
 
 			if (systemText.trim()) {
@@ -270,7 +269,7 @@ export function apiMessageToGeminiMessage(messages: LanguageModelChatMessage[]):
 	}
 
 	// ─── BYOK CUSTOM PATCH: prune user messages emptied by orphan drop (Patch 43) ─
-	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Maintained directly in the BYOK fork source.
 	// If a user turn consisted entirely of orphan tool-results, it now has
 	// zero parts and would render as an empty `{role:'user', parts:[]}` which
 	// Gemini also rejects. Same rule as the model-role cleanup above.

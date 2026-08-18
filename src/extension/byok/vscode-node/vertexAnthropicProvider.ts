@@ -40,7 +40,7 @@ export interface VertexAnthropicProviderConfig extends LanguageModelChatConfigur
 }
 
 // ─── BYOK CUSTOM PATCH: vertex anthropic sensible context defaults ────────────
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Maintained directly in the BYOK fork source.
 // Upstream falls back to 100 000 when a Vertex model config omits
 // `maxInputTokens` and hard-codes `vision: false` for every Claude model,
 // which breaks three things:

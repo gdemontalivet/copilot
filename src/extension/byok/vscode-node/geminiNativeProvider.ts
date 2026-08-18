@@ -26,7 +26,7 @@ import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation
 import { IBYOKStorageService } from './byokStorageService';
 
 // ─── BYOK CUSTOM PATCH: readable Gemini errors ──────────────────────────────
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Maintained directly in the BYOK fork source.
 // The Gemini SDK (`@google/genai`) throws `ApiError` whose `message` is the
 // raw JSON body (e.g. `{"error":{"code":503,"message":"...","status":"..."}}`).
 // Surfacing that JSON in chat UI is noisy — extract the nested `error.message`.
@@ -46,7 +46,7 @@ function extractReadableGeminiMessage(err: unknown): string {
 // ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
 
 // ─── BYOK CUSTOM PATCH: detect Gemini tool-history INVALID_ARGUMENT errors ──
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Maintained directly in the BYOK fork source.
 // Gemini returns HTTP 400 with status="INVALID_ARGUMENT" when the
 // transcript's functionCall / functionResponse contract is violated
 // (count mismatch, name mismatch, orphan tool-results, etc.). Patch 43
@@ -89,7 +89,7 @@ export function isGeminiToolHistoryInvalidError(err: unknown): boolean {
 // ─── END BYOK CUSTOM PATCH ──────────────────────────────
 
 // ─── BYOK CUSTOM PATCH: Gemini retry resilience ─────────────────────────────
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Maintained directly in the BYOK fork source.
 // Classify SDK / transport errors as retryable. Returns a label used in
 // progress messages, or null if the error is terminal.
 function classifyRetryableGeminiError(err: unknown): 'rate-limit' | 'unavailable' | 'network' | null {
@@ -129,7 +129,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 	}
 
 	// ─── BYOK CUSTOM PATCH: createClient hook ──────────────────────────────────
-	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Maintained directly in the BYOK fork source.
 	// Factors out `new GoogleGenAI({ apiKey })` so subclasses (e.g.
 	// VertexGeminiLMProvider) can return a differently-configured client
 	// (Vertex endpoint, service-account auth) without re-implementing the
@@ -156,7 +156,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				}
 
 				// ─── BYOK CUSTOM PATCH: gemini model allowlist relaxation (Patch 59) ───
-				// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+				// Maintained directly in the BYOK fork source.
 				// Prefer the Microsoft-curated known-models entry when present so
 				// production-grade models keep their hand-tuned capabilities. For
 				// every other chat-capable model Google's API advertises, build a
@@ -170,7 +170,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				if (this._knownModels && this._knownModels[modelId]) {
 					const knownCaps = this._knownModels[modelId];
 					// ─── BYOK CUSTOM PATCH: cap Gemini maxInputTokens at 200K (Patch 60) ────
-					modelList[modelId] = { ...knownCaps, maxInputTokens: Math.min(knownCaps.maxInputTokens, GeminiNativeBYOKLMProvider._GEMINI_MAX_INPUT_TOKENS) };
+					modelList[modelId] = this._capKnownModelInputTokens(knownCaps);
 					// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────────────
 					continue;
 				}
@@ -329,7 +329,6 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 						[GenAiAttr.RESPONSE_MODEL]: model.id,
 						[GenAiAttr.RESPONSE_ID]: requestId,
 						[GenAiAttr.RESPONSE_FINISH_REASONS]: ['stop'],
-						[GenAiAttr.CONVERSATION_ID]: requestId,
 						[GenAiAttr.REQUEST_STREAM]: true,
 						...(result.ttft ? { [CopilotChatAttr.TIME_TO_FIRST_TOKEN]: result.ttft } : {}),
 						...(result.ttft ? { [GenAiAttr.RESPONSE_TIME_TO_FIRST_CHUNK]: result.ttft / 1000 } : {}),
@@ -402,6 +401,8 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 						"clientPromptTokenCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of prompt tokens, locally counted", "isMeasurement": true },
 						"promptTokenCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of prompt tokens, server side counted", "isMeasurement": true },
 						"promptCacheTokenCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of prompt tokens hitting cache as reported by server", "isMeasurement": true },
+						"promptCacheCreation1hTokenCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Cache-creation input tokens written with the 1h (extended) TTL, billed at 2x base rate. Only populated when Anthropic reports the cache_creation breakdown.", "isMeasurement": true },
+						"promptCacheCreation5mTokenCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Cache-creation input tokens written with the default 5m TTL, billed at 1.25x base rate. Only populated when Anthropic reports the cache_creation breakdown.", "isMeasurement": true },
 						"tokenCountMax": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Maximum generated tokens", "isMeasurement": true },
 						"tokenCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of generated tokens", "isMeasurement": true },
 						"reasoningTokens": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of reasoning tokens", "isMeasurement": true },
@@ -413,6 +414,23 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 						"timeToComplete": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Time to complete the request", "isMeasurement": true },
 						"issuedTime": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Timestamp when the request was issued", "isMeasurement": true },
 						"isVisionRequest": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Whether the request was for a vision model", "isMeasurement": true },
+						"imageCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of input images attached to the request", "isMeasurement": true },
+						"totalImageBytes": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Sum of byte sizes for attached input images when known", "isMeasurement": true },
+						"maxImageBytes": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Largest known input image byte size in the request", "isMeasurement": true },
+						"maxImageWidth": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Largest known input image width in the request", "isMeasurement": true },
+						"maxImageHeight": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Largest known input image height in the request", "isMeasurement": true },
+						"maxImagePixels": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Largest known input image pixel count in the request", "isMeasurement": true },
+						"totalImagePixels": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Sum of known input image pixel counts in the request", "isMeasurement": true },
+						"imagePngCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of PNG input images", "isMeasurement": true },
+						"imageJpegCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of JPEG input images", "isMeasurement": true },
+						"imageGifCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of GIF input images", "isMeasurement": true },
+						"imageWebpCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of WebP input images", "isMeasurement": true },
+						"imageUnknownMimeCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of input images whose MIME type is unknown or unsupported", "isMeasurement": true },
+						"imageClipboardCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of input images sourced from clipboard or paste", "isMeasurement": true },
+						"imageScreenshotCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of input images sourced from screenshot capture", "isMeasurement": true },
+						"imageFileCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of input images sourced from local file attachment", "isMeasurement": true },
+						"imageUrlCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of input images sourced from URL", "isMeasurement": true },
+						"imageUnknownSourceCount": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Count of input images whose source could not be determined", "isMeasurement": true },
 						"isBYOK": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "Whether the request was for a BYOK model", "isMeasurement": true },
 						"isAuto": { "classification": "SystemMetaData", "purpose": "FeatureInsight", "comment": "Whether the request was for an Auto model", "isMeasurement": true },
 						"bytesReceived": { "classification": "SystemMetaData", "purpose": "PerformanceAndHealth", "comment": "Number of bytes received in the response", "isMeasurement": true },
@@ -452,7 +470,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				this._logService.error(`BYOK GeminiNative error: ${toErrorMessage(err, true)}`);
 				const readableReason = token.isCancellationRequested ? 'cancelled' : extractReadableGeminiMessage(err);
 				// ─── BYOK CUSTOM PATCH: tag tool-history INVALID_ARGUMENT ─────
-				// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+				// Maintained directly in the BYOK fork source.
 				// When the error is a Gemini 400 INVALID_ARGUMENT specifically
 				// about tool call / response contract violation, swap the
 				// raw message for RESPONSE_TOOL_HISTORY_INVALID so
@@ -491,12 +509,20 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 
 		// Create OTel span and execute with trace context + CapturingToken
 		const executeRequest = async () => {
+			const chatSessionId = capturingToken?.chatSessionId;
+			const parentChatSessionId = capturingToken?.parentChatSessionId;
+			const debugLogLabel = capturingToken?.debugLogLabel;
 			otelSpan = this._otelService.startSpan(`chat ${model.id}`, {
 				kind: SpanKind.CLIENT,
 				attributes: {
 					[GenAiAttr.OPERATION_NAME]: GenAiOperationName.CHAT,
 					[GenAiAttr.PROVIDER_NAME]: GenAiProviderName.GEMINI,
 					[GenAiAttr.REQUEST_MODEL]: model.id,
+					...(chatSessionId ? { [GenAiAttr.CONVERSATION_ID]: chatSessionId } : {}),
+					...(chatSessionId ? { [CopilotChatAttr.SESSION_ID]: chatSessionId } : {}),
+					...(chatSessionId ? { [CopilotChatAttr.CHAT_SESSION_ID]: chatSessionId } : {}),
+					...(parentChatSessionId ? { [CopilotChatAttr.PARENT_CHAT_SESSION_ID]: parentChatSessionId } : {}),
+					...(debugLogLabel ? { [CopilotChatAttr.DEBUG_LOG_LABEL]: debugLogLabel } : {}),
 					[GenAiAttr.AGENT_NAME]: 'GeminiBYOK',
 					[CopilotChatAttr.MAX_PROMPT_TOKENS]: model.maxInputTokens,
 					[StdAttr.SERVER_ADDRESS]: 'generativelanguage.googleapis.com',
@@ -677,7 +703,7 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 				return { ttft, ttfte, usage };
 			}
 			// ─── BYOK CUSTOM PATCH: retry on transient errors ─────────────
-			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			// Maintained directly in the BYOK fork source.
 			const __byokRetryKind = classifyRetryableGeminiError(error);
 			if (__byokRetryKind && retryCount < MAX_RETRIES) {
 				const __byokDelay = Math.min(5000 * Math.pow(2, retryCount), 60_000);
@@ -704,13 +730,13 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 	}
 
 	// ─── BYOK CUSTOM PATCH: gemini model allowlist relaxation helpers (Patch 59) ───
-	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Maintained directly in the BYOK fork source.
 	// See call site above (search for "gemini model allowlist relaxation") for
 	// rationale. Both helpers are intentionally `protected` so subclasses
 	// (e.g. VertexGeminiLMProvider) can override the heuristic.
 	
 	// ─── BYOK CUSTOM PATCH: cap Gemini maxInputTokens at 200K (Patch 60) ────────
-	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Maintained directly in the BYOK fork source.
 	// Google Gemini's native context windows are 1M–2M tokens. Without a cap,
 	// Patch 23's large-context branch fires (modelMaxPromptTokens > 300K) and
 	// uses absolute compaction thresholds (tier1=180K, tier2=200K, tier3=220K).
@@ -719,6 +745,17 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 	// tier3=180K), triggering compaction ~40K tokens sooner and materially
 	// reducing per-turn Gemini costs on long agentic sessions.
 	private static readonly _GEMINI_MAX_INPUT_TOKENS = 200_000;
+
+	protected _capKnownModelInputTokens(capabilities: BYOKModelCapabilities): BYOKModelCapabilities {
+		const advertisedInputTokens = capabilities.maxInputTokens
+			?? (capabilities.contextWindow !== undefined
+				? Math.max(1, capabilities.contextWindow - capabilities.maxOutputTokens)
+				: GeminiNativeBYOKLMProvider._GEMINI_MAX_INPUT_TOKENS);
+		return {
+			...capabilities,
+			maxInputTokens: Math.min(advertisedInputTokens, GeminiNativeBYOKLMProvider._GEMINI_MAX_INPUT_TOKENS),
+		};
+	}
 	// ─── END BYOK CUSTOM PATCH ─────────────────────────────────────────────────────────
 
 	protected _inferGeminiCapabilities(model: { name?: string; displayName?: string; description?: string; supportedActions?: string[]; inputTokenLimit?: number; outputTokenLimit?: number }): BYOKModelCapabilities | undefined {

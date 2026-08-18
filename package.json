@@ -2,7 +2,7 @@
 	"name": "copilot-chat",
 	"displayName": "Copilot Full BYOK",
 	"description": "AI chat features powered by Copilot — Full Bring Your Own Key edition",
-	"version": "0.58.75",
+	"version": "0.60.1",
 	"build": "1",
 	"completionsCoreVersion": "1.378.1799",
 	"internalLargeStorageAriaKey": "ec712b3202c5462fb6877acae7f1f9d7-c19ad55e-3e3c-4f99-984b-827f6d95bd9e-6917",
@@ -22,7 +22,7 @@
 	"icon": "assets/copilot.png",
 	"pricing": "Trial",
 	"engines": {
-		"vscode": "^1.116.0",
+		"vscode": "^1.131.0",
 		"npm": ">=9.0.0",
 		"node": ">=22.14.0"
 	},
@@ -160,6 +160,7 @@
 				"icon": "$(folder)",
 				"userDescription": "%copilot.codebase.tool.description%",
 				"modelDescription": "Run a natural language search for relevant code or documentation comments from the user's current workspace. Returns relevant code snippets from the user's current workspace if it is large, or the full contents of the workspace if it is small.",
+				"when": "config.github.copilot.chat.semanticSearchTool.mode != disabled",
 				"tags": [
 					"codesearch",
 					"vscode_codesearch"
@@ -1875,6 +1876,11 @@
 							"secret": true,
 							"description": "API key for OpenAI",
 							"title": "API Key"
+						},
+						"zeroDataRetentionEnabled": {
+							"type": "boolean",
+							"default": false,
+							"markdownDescription": "Whether Zero Data Retention (ZDR) is enabled for this provider group. When `true`, OpenAI Responses requests from this group do not send `previous_response_id`."
 						}
 					},
 					"required": [
@@ -1961,11 +1967,15 @@
 									},
 									"maxInputTokens": {
 										"type": "number",
-										"description": "Maximum number of input tokens supported by the model"
+										"markdownDescription": "Maximum number of input (prompt) tokens supported by the model. Optional when `contextWindow` is set, in which case it is derived as `contextWindow - maxOutputTokens`."
 									},
 									"maxOutputTokens": {
 										"type": "number",
 										"description": "Maximum number of output tokens supported by the model"
+									},
+									"contextWindow": {
+										"type": "number",
+										"markdownDescription": "The model's full context window (input + output) in tokens, e.g. `1000000` for a 1M model. When set it is the source of truth for the context window and `maxInputTokens` can be omitted. Otherwise the window is derived as `maxInputTokens + maxOutputTokens`."
 									},
 									"editTools": {
 										"type": "array",
@@ -2006,9 +2016,10 @@
 										"type": "string",
 										"enum": [
 											"chat-completions",
-											"responses"
+											"responses",
+											"messages"
 										],
-										"markdownDescription": "Body shape used to forward the reasoning effort to the model. `chat-completions` sends a top-level `reasoning_effort` string. `responses` sends a nested `reasoning.effort` object. When unset the format follows the URL: `/responses` → nested, otherwise top-level."
+										"markdownDescription": "Body shape used to forward the reasoning effort to the model. `chat-completions` sends a top-level `reasoning_effort` string. `responses` sends a nested `reasoning.effort` object. `messages` sends the Anthropic Messages `output_config.effort` field. When unset the format follows the URL: `/responses` → nested, `/messages` → `output_config.effort`, otherwise top-level."
 									},
 									"requestHeaders": {
 										"type": "object",
@@ -2024,8 +2035,19 @@
 									"url",
 									"toolCalling",
 									"vision",
-									"maxInputTokens",
 									"maxOutputTokens"
+								],
+								"anyOf": [
+									{
+										"required": [
+											"maxInputTokens"
+										]
+									},
+									{
+										"required": [
+											"contextWindow"
+										]
+									}
 								]
 							}
 						}
@@ -2132,11 +2154,15 @@
 									},
 									"maxInputTokens": {
 										"type": "number",
-										"description": "Maximum number of input tokens supported by the model"
+										"markdownDescription": "Maximum number of input (prompt) tokens supported by the model. Optional when `contextWindow` is set, in which case it is derived as `contextWindow - maxOutputTokens`."
 									},
 									"maxOutputTokens": {
 										"type": "number",
 										"description": "Maximum number of output tokens supported by the model"
+									},
+									"contextWindow": {
+										"type": "number",
+										"markdownDescription": "The model's full context window (input + output) in tokens, e.g. `1000000` for a 1M model. When set it is the source of truth for the context window and `maxInputTokens` can be omitted. Otherwise the window is derived as `maxInputTokens + maxOutputTokens`."
 									},
 									"editTools": {
 										"type": "array",
@@ -2177,9 +2203,10 @@
 										"type": "string",
 										"enum": [
 											"chat-completions",
-											"responses"
+											"responses",
+											"messages"
 										],
-										"markdownDescription": "Body shape used to forward the reasoning effort to the model. `chat-completions` sends a top-level `reasoning_effort` string. `responses` sends a nested `reasoning.effort` object. When unset the format follows the URL: `/responses` → nested, otherwise top-level."
+										"markdownDescription": "Body shape used to forward the reasoning effort to the model. `chat-completions` sends a top-level `reasoning_effort` string. `responses` sends a nested `reasoning.effort` object. `messages` sends the Anthropic Messages `output_config.effort` field. When unset the format follows the URL: `/responses` → nested, `/messages` → `output_config.effort`, otherwise top-level."
 									},
 									"requestHeaders": {
 										"type": "object",
@@ -2187,6 +2214,30 @@
 										"additionalProperties": {
 											"type": "string"
 										}
+									},
+									"modelOptions": {
+										"type": "object",
+										"markdownDescription": "Sampling parameters to send with requests to this model. These override Copilot's defaults but are overridden by explicit per-request values. Set a property to `null` to omit it and use the model server's default.",
+										"properties": {
+											"temperature": {
+												"type": [
+													"number",
+													"null"
+												],
+												"minimum": 0,
+												"markdownDescription": "Sampling temperature. Set to `null` to omit the parameter."
+											},
+											"top_p": {
+												"type": [
+													"number",
+													"null"
+												],
+												"minimum": 0,
+												"maximum": 1,
+												"markdownDescription": "Nucleus sampling probability. Set to `null` to omit the parameter."
+											}
+										},
+										"additionalProperties": false
 									}
 								},
 								"required": [
@@ -2195,8 +2246,19 @@
 									"url",
 									"toolCalling",
 									"vision",
-									"maxInputTokens",
 									"maxOutputTokens"
+								],
+								"anyOf": [
+									{
+										"required": [
+											"maxInputTokens"
+										]
+									},
+									{
+										"required": [
+											"contextWindow"
+										]
+									}
 								]
 							}
 						}
@@ -2259,11 +2321,15 @@
 									},
 									"maxInputTokens": {
 										"type": "number",
-										"description": "Maximum number of input tokens supported by the model"
+										"markdownDescription": "Maximum number of input (prompt) tokens supported by the model. Optional when `contextWindow` is set, in which case it is derived as `contextWindow - maxOutputTokens`."
 									},
 									"maxOutputTokens": {
 										"type": "number",
 										"description": "Maximum number of output tokens supported by the model"
+									},
+									"contextWindow": {
+										"type": "number",
+										"markdownDescription": "The model's full context window (input + output) in tokens, e.g. `1000000` for a 1M model. When set it is the source of truth for the context window and `maxInputTokens` can be omitted. Otherwise the window is derived as `maxInputTokens + maxOutputTokens`."
 									},
 									"thinking": {
 										"type": "boolean",
@@ -2291,9 +2357,10 @@
 										"type": "string",
 										"enum": [
 											"chat-completions",
-											"responses"
+											"responses",
+											"messages"
 										],
-										"markdownDescription": "Body shape used to forward the reasoning effort to the model. `chat-completions` sends a top-level `reasoning_effort` string. `responses` sends a nested `reasoning.effort` object. When unset the format follows the URL: `/responses` → nested, otherwise top-level."
+										"markdownDescription": "Body shape used to forward the reasoning effort to the model. `chat-completions` sends a top-level `reasoning_effort` string. `responses` sends a nested `reasoning.effort` object. `messages` sends the Anthropic Messages `output_config.effort` field. When unset the format follows the URL: `/responses` → nested, `/messages` → `output_config.effort`, otherwise top-level."
 									},
 									"requestHeaders": {
 										"type": "object",
@@ -2309,8 +2376,19 @@
 									"url",
 									"toolCalling",
 									"vision",
-									"maxInputTokens",
 									"maxOutputTokens"
+								],
+								"anyOf": [
+									{
+										"required": [
+											"maxInputTokens"
+										]
+									},
+									{
+										"required": [
+											"contextWindow"
+										]
+									}
 								]
 							}
 						}
@@ -3225,6 +3303,151 @@
 				"title": "GitHub Copilot Chat",
 				"id": "stable",
 				"properties": {
+					"github.copilot.chat.vertexAnthropicModels": {
+						"type": "object",
+						"default": {},
+						"additionalProperties": {
+							"type": "object",
+							"properties": {
+								"name": {
+									"type": "string"
+								},
+								"projectId": {
+									"type": "string"
+								},
+								"locationId": {
+									"type": "string"
+								},
+								"maxInputTokens": {
+									"type": "number",
+									"minimum": 1
+								},
+								"maxOutputTokens": {
+									"type": "number",
+									"minimum": 1
+								}
+							},
+							"required": [
+								"name",
+								"projectId",
+								"locationId"
+							],
+							"additionalProperties": false
+						},
+						"markdownDescription": "%github.copilot.config.vertexAnthropicModels%"
+					},
+					"github.copilot.chat.vertexGeminiModels": {
+						"type": "object",
+						"default": {},
+						"additionalProperties": {
+							"type": "object",
+							"properties": {
+								"name": {
+									"type": "string"
+								},
+								"projectId": {
+									"type": "string"
+								},
+								"locationId": {
+									"type": "string"
+								},
+								"maxInputTokens": {
+									"type": "number",
+									"minimum": 1
+								},
+								"maxOutputTokens": {
+									"type": "number",
+									"minimum": 1
+								},
+								"vision": {
+									"type": "boolean"
+								}
+							},
+							"required": [
+								"name",
+								"projectId",
+								"locationId"
+							],
+							"additionalProperties": false
+						},
+						"markdownDescription": "%github.copilot.config.vertexGeminiModels%"
+					},
+					"github.copilot.chat.byok.auto.defaultModel": {
+						"type": "string",
+						"default": "",
+						"markdownDescription": "%github.copilot.config.byok.auto.defaultModel%"
+					},
+					"github.copilot.chat.byok.auto.showRoutingHint": {
+						"type": "boolean",
+						"default": true,
+						"markdownDescription": "%github.copilot.config.byok.auto.showRoutingHint%"
+					},
+					"github.copilot.chat.byok.auto.routingMode": {
+						"type": "string",
+						"enum": [
+							"static",
+							"classifier"
+						],
+						"default": "classifier",
+						"markdownDescription": "%github.copilot.config.byok.auto.routingMode%"
+					},
+					"github.copilot.chat.byok.auto.routingTable": {
+						"type": "object",
+						"default": {},
+						"additionalProperties": {
+							"type": "object",
+							"additionalProperties": {
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							}
+						},
+						"markdownDescription": "%github.copilot.config.byok.auto.routingTable%"
+					},
+					"github.copilot.chat.byok.anthropic.fallback.enabled": {
+						"type": "boolean",
+						"default": false,
+						"markdownDescription": "%github.copilot.config.byok.anthropic.fallback.enabled%"
+					},
+					"github.copilot.chat.byok.anthropic.fallback.modelMap": {
+						"type": "object",
+						"default": {},
+						"additionalProperties": {
+							"type": "string"
+						},
+						"markdownDescription": "%github.copilot.config.byok.anthropic.fallback.modelMap%"
+					},
+					"github.copilot.chat.byok.anthropic.fallback.maxConcurrency": {
+						"type": "integer",
+						"minimum": 0,
+						"default": 0,
+						"markdownDescription": "%github.copilot.config.byok.anthropic.fallback.maxConcurrency%"
+					},
+					"github.copilot.chat.byok.anthropic.fallback.cooldownSeconds": {
+						"type": "number",
+						"minimum": 0,
+						"default": 60,
+						"markdownDescription": "%github.copilot.config.byok.anthropic.fallback.cooldownSeconds%"
+					},
+					"github.copilot.chat.byok.fusion.models": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						},
+						"default": [],
+						"markdownDescription": "%github.copilot.config.byok.fusion.models%"
+					},
+					"github.copilot.chat.byok.fusion.mergerModel": {
+						"type": "string",
+						"default": "",
+						"markdownDescription": "%github.copilot.config.byok.fusion.mergerModel%"
+					},
+					"github.copilot.chat.byok.fusion.showHint": {
+						"type": "boolean",
+						"default": true,
+						"markdownDescription": "%github.copilot.config.byok.fusion.showHint%"
+					},
 					"github.copilot.chat.backgroundAgent.enabled": {
 						"type": "boolean",
 						"default": true,
@@ -3234,6 +3457,14 @@
 						"type": "boolean",
 						"default": true,
 						"markdownDescription": "%github.copilot.config.cloudAgent.enabled%"
+					},
+					"github.copilot.chat.localIndex.enabled": {
+						"type": "boolean",
+						"default": true,
+						"markdownDescription": "%github.copilot.config.localIndex.enabled%",
+						"tags": [
+							"onExp"
+						]
 					},
 					"github.copilot.chat.codeGeneration.useInstructionFiles": {
 						"type": "boolean",
@@ -3403,6 +3634,11 @@
 						"default": true,
 						"description": "%github.copilot.config.agent.currentEditorContext.enabled%"
 					},
+					"github.copilot.chat.preferLongContext.enabled": {
+						"type": "boolean",
+						"default": true,
+						"markdownDescription": "%github.copilot.config.preferLongContext.enabled%"
+					},
 					"github.copilot.enable": {
 						"type": "object",
 						"scope": "window",
@@ -3523,6 +3759,11 @@
 						"tags": [
 							"onExp"
 						]
+					},
+					"github.copilot.chat.imageUpload.enabled": {
+						"type": "boolean",
+						"default": true,
+						"markdownDescription": "%github.copilot.config.imageUpload.enabled%"
 					}
 				}
 			},
@@ -3667,15 +3908,6 @@
 							"experimental",
 							"onExp"
 						]
-					},
-					"github.copilot.chat.imageUpload.enabled": {
-						"type": "boolean",
-						"default": true,
-						"tags": [
-							"experimental",
-							"onExp"
-						],
-						"markdownDescription": "%github.copilot.config.imageUpload.enabled%"
 					},
 					"github.copilot.chat.codeGeneration.instructions": {
 						"markdownDeprecationMessage": "%github.copilot.config.codeGeneration.instructions.deprecated%",
@@ -4089,7 +4321,7 @@
 					},
 					"github.copilot.chat.gemini35FlashReducedToolUsePrompt.enabled": {
 						"type": "boolean",
-						"default": false,
+						"default": true,
 						"tags": [
 							"experimental",
 							"onExp"
@@ -4111,19 +4343,6 @@
 							"clear-both"
 						]
 					},
-					"github.copilot.chat.responsesApiReasoningSummary": {
-						"type": "string",
-						"default": "detailed",
-						"markdownDescription": "%github.copilot.config.responsesApiReasoningSummary%",
-						"tags": [
-							"experimental",
-							"onExp"
-						],
-						"enum": [
-							"off",
-							"detailed"
-						]
-					},
 					"github.copilot.chat.responsesApiContextManagement.enabled": {
 						"type": "boolean",
 						"default": false,
@@ -4142,10 +4361,10 @@
 							"onExp"
 						]
 					},
-					"github.copilot.chat.responsesApi.persistentCoT.enabled": {
+					"github.copilot.chat.responsesApi.promptCacheBreakpoint.enabled": {
 						"type": "boolean",
 						"default": false,
-						"markdownDescription": "%github.copilot.config.responsesApi.persistentCoT.enabled%",
+						"markdownDescription": "%github.copilot.config.responsesApi.promptCacheBreakpoint.enabled%",
 						"tags": [
 							"experimental",
 							"onExp"
@@ -4160,10 +4379,10 @@
 							"onExp"
 						]
 					},
-					"github.copilot.chat.claude47OpusPrompt.enabled": {
+					"github.copilot.chat.claudeOpus5Prompt.enabled": {
 						"type": "boolean",
 						"default": false,
-						"markdownDescription": "%github.copilot.config.claude47OpusPrompt.enabled%",
+						"markdownDescription": "%github.copilot.config.claudeOpus5Prompt.enabled%",
 						"tags": [
 							"experimental",
 							"onExp"
@@ -4178,9 +4397,18 @@
 							"onExp"
 						]
 					},
-					"github.copilot.chat.gemini3GetChangedFilesTool.enabled": {
+					"github.copilot.chat.gpt56Verbosity.enabled": {
 						"type": "boolean",
 						"default": true,
+						"markdownDescription": "%github.copilot.config.gpt56Verbosity.enabled%",
+						"tags": [
+							"experimental",
+							"onExp"
+						]
+					},
+					"github.copilot.chat.gemini3GetChangedFilesTool.enabled": {
+						"type": "boolean",
+						"default": false,
 						"markdownDescription": "%github.copilot.config.gemini3GetChangedFilesTool.enabled%",
 						"tags": [
 							"experimental",
@@ -4200,6 +4428,25 @@
 						"type": "boolean",
 						"default": true,
 						"markdownDescription": "%github.copilot.config.gpt55ReadFileTool.enabled%",
+						"tags": [
+							"experimental",
+							"onExp"
+						]
+					},
+					"github.copilot.chat.semanticSearchTool.mode": {
+						"type": "string",
+						"default": "enabled",
+						"enum": [
+							"enabled",
+							"disabled",
+							"preferred"
+						],
+						"markdownEnumDescriptions": [
+							"%github.copilot.config.semanticSearchTool.mode.enabled%",
+							"%github.copilot.config.semanticSearchTool.mode.disabled%",
+							"%github.copilot.config.semanticSearchTool.mode.preferred%"
+						],
+						"markdownDescription": "%github.copilot.config.semanticSearchTool.mode%",
 						"tags": [
 							"experimental",
 							"onExp"
@@ -4365,50 +4612,32 @@
 							"experimental"
 						]
 					},
-					"github.copilot.chat.localIndex.enabled": {
-						"type": "boolean",
-						"default": false,
-						"markdownDescription": "%github.copilot.config.localIndex.enabled%",
-						"tags": [
-							"experimental",
-							"onExp"
-						]
-					},
-					"github.copilot.chat.conversationCompaction.usePrismCompaction": {
-						"type": "boolean",
-						"default": false,
-						"markdownDescription": "%github.copilot.config.conversationCompaction.usePrismCompaction%",
-						"tags": [
-							"experimental",
-							"onExp"
-						]
-					},
-					"github.copilot.chat.conversationCompaction.model": {
-						"type": "string",
-						"default": "",
-						"markdownDescription": "%github.copilot.config.conversationCompaction.model%",
-						"tags": [
-							"experimental",
-							"onExp"
-						]
-					},
-					"github.copilot.chat.conversationCompaction.prismModelFilter": {
-						"type": "string",
-						"default": "claude-haiku-4.5,claude-sonnet-4.5,claude-sonnet-4.6,gemini-2.5-pro,gemini-3-flash,gemini-3.5-flash",
-						"markdownDescription": "%github.copilot.config.conversationCompaction.prismModelFilter%",
-						"tags": [
-							"experimental",
-							"onExp"
-						]
-					},
 					"github.copilot.chat.tools.grepSearch.outputFormat": {
 						"type": "string",
-						"default": "tag",
+						"default": "grep",
 						"enum": [
 							"grep",
 							"tag"
 						],
 						"markdownDescription": "%github.copilot.chat.tools.grepSearch.outputFormat%",
+						"tags": [
+							"experimental",
+							"onExp"
+						]
+					},
+					"github.copilot.chat.tools.grepSearch.defaultMaxResults": {
+						"type": "number",
+						"default": 100,
+						"markdownDescription": "%github.copilot.chat.tools.grepSearch.defaultMaxResults%",
+						"tags": [
+							"experimental",
+							"onExp"
+						]
+					},
+					"github.copilot.chat.tools.grepSearch.maxResultsCap": {
+						"type": "number",
+						"default": 200,
+						"markdownDescription": "%github.copilot.chat.tools.grepSearch.maxResultsCap%",
 						"tags": [
 							"experimental",
 							"onExp"
@@ -5617,7 +5846,7 @@
 				},
 				{
 					"command": "github.copilot.chat.checkoutPullRequestReroute",
-					"when": "chatSessionType == copilot-cloud-agent && !github.vscode-pull-request-github.activated && gitOpenRepositoryCount != 0",
+					"when": "chatSessionType == copilot-cloud-agent && chatSessionPullRequest != 'none' && !github.vscode-pull-request-github.activated && gitOpenRepositoryCount != 0",
 					"group": "navigation@0"
 				},
 				{
@@ -6835,7 +7064,7 @@
 				"inputPlaceholder": "Run local tasks with Claude, type `#` for adding context",
 				"order": 3,
 				"description": "%github.copilot.session.providerDescription.claude%",
-				"when": "config.github.copilot.chat.claudeAgent.enabled && ((isSessionsWindow && !config.chat.agents.claude.preferAgentHost) || (!isSessionsWindow && !config.chat.editor.claude.preferAgentHost))",
+				"when": "config.github.copilot.chat.claudeAgent.enabled && (!agentHostEnabled || (isSessionsWindow && !config.chat.agents.claude.preferAgentHost) || (!isSessionsWindow && !config.chat.editor.claude.preferAgentHost))",
 				"canDelegate": true,
 				"requiresCustomModels": true,
 				"supportsAutoModel": false,
@@ -7125,11 +7354,11 @@
 		"compile": "node .esbuild.mts --dev",
 		"watch": "npm-run-all -lp watch:esbuild watch:typecheck",
 		"watch:esbuild": "node .esbuild.mts --watch --dev",
-		"watch:typecheck": "npx tsgo --noEmit --watch --preserveWatchOutput --project tsconfig.json",
-		"watch:typecheck-extension": "npx tsgo --noEmit --watch --project tsconfig.json",
-		"watch:typecheck-extension-web": "npx tsgo --noEmit --watch --project tsconfig.worker.json",
-		"watch:typecheck-simulation-workbench": "npx tsgo --noEmit --watch --project test/simulation/workbench/tsconfig.json",
-		"typecheck": "npx tsgo --noEmit --project tsconfig.json && npx tsgo --noEmit --project test/simulation/workbench/tsconfig.json && npx tsgo --noEmit --project tsconfig.worker.json && npx tsgo --noEmit --project src/extension/completions-core/vscode-node/extension/src/copilotPanel/webView/tsconfig.json",
+		"watch:typecheck": "tsc --noEmit --watch --preserveWatchOutput --project tsconfig.json",
+		"watch:typecheck-extension": "tsc --noEmit --watch --project tsconfig.json",
+		"watch:typecheck-extension-web": "tsc --noEmit --watch --project tsconfig.worker.json",
+		"watch:typecheck-simulation-workbench": "tsc --noEmit --watch --project test/simulation/workbench/tsconfig.json",
+		"typecheck": "tsc --noEmit --project tsconfig.json && tsc --noEmit --project test/simulation/workbench/tsconfig.json && tsc --noEmit --project tsconfig.worker.json && tsc --noEmit --project src/extension/completions-core/vscode-node/extension/src/copilotPanel/webView/tsconfig.json",
 		"lint": "npx eslint . --max-warnings=0",
 		"lint-staged": "npx eslint --max-warnings=0",
 		"tsfmt": "npx tsfmt -r --verify",
@@ -7190,7 +7419,7 @@
 		"@typescript-eslint/eslint-plugin": "^8.35.0",
 		"@typescript-eslint/parser": "^8.32.0",
 		"@typescript-eslint/typescript-estree": "^8.26.1",
-		"@typescript/native-preview": "^7.0.0-dev.20260429",
+		"@typescript/native": "npm:typescript@^7.0.2",
 		"@vitest/coverage-v8": "^4.1.8",
 		"@vitest/snapshot": "^1.5.0",
 		"@vscode/debugadapter": "^1.68.0",
@@ -7199,16 +7428,16 @@
 		"@vscode/lsif-language-service": "^0.1.0-pre.4",
 		"@vscode/test-cli": "^0.0.11",
 		"@vscode/test-electron": "^2.5.2",
-		"@vscode/test-web": "^0.0.80",
+		"@vscode/test-web": "^0.0.81",
 		"@vscode/vsce": "3.6.0",
 		"copyfiles": "^2.4.1",
 		"csv-parse": "^6.0.0",
 		"dotenv": "^17.2.0",
-		"electron": "^39.8.5",
+		"electron": "^42.5.0",
 		"esbuild": "0.28.1",
 		"fastq": "^1.19.1",
 		"glob": "^11.1.0",
-		"js-yaml": "^4.1.1",
+		"js-yaml": "^4.3.0",
 		"minimist": "^1.2.8",
 		"mobx": "^6.13.7",
 		"mobx-react-lite": "^4.1.0",
@@ -7221,7 +7450,7 @@
 		"openai": "^6.7.0",
 		"outdent": "^0.8.0",
 		"picomatch": "^4.0.4",
-		"playwright": "^1.58.2",
+		"playwright": "^1.61.1",
 		"prettier": "^3.6.2",
 		"react": "^17.0.2",
 		"react-dom": "17.0.2",
@@ -7233,7 +7462,7 @@
 		"tar": "^7.5.16",
 		"ts-dedent": "^2.2.0",
 		"tsx": "^4.22.4",
-		"typescript": "^5.8.3",
+		"typescript": "npm:@typescript/typescript6@^6.0.2",
 		"vite-plugin-wasm": "^3.6.0",
 		"vitest": "^4.1.8",
 		"vscode-languageserver-protocol": "^3.17.5",
@@ -7247,22 +7476,22 @@
 		"@anthropic-ai/claude-agent-sdk": "0.2.112",
 		"@anthropic-ai/sdk": "^0.82.0",
 		"@github/blackbird-external-ingest-utils": "^0.3.0",
-		"@github/copilot": "^1.0.65",
+		"@github/copilot": "^1.0.73",
 		"@google/genai": "^2.10.0",
 		"@humanwhocodes/gitignore-to-minimatch": "1.0.2",
 		"@microsoft/tiktokenizer": "^1.0.10",
 		"@modelcontextprotocol/sdk": "^1.25.2",
 		"@opentelemetry/api": "^1.9.0",
 		"@opentelemetry/api-logs": "^0.212.0",
-		"@opentelemetry/exporter-logs-otlp-grpc": "^0.214.0",
-		"@opentelemetry/exporter-logs-otlp-http": "^0.214.0",
-		"@opentelemetry/exporter-logs-otlp-proto": "^0.214.0",
-		"@opentelemetry/exporter-metrics-otlp-grpc": "^0.214.0",
-		"@opentelemetry/exporter-metrics-otlp-http": "^0.214.0",
-		"@opentelemetry/exporter-metrics-otlp-proto": "^0.214.0",
-		"@opentelemetry/exporter-trace-otlp-grpc": "^0.214.0",
-		"@opentelemetry/exporter-trace-otlp-http": "^0.214.0",
-		"@opentelemetry/exporter-trace-otlp-proto": "^0.214.0",
+		"@opentelemetry/exporter-logs-otlp-grpc": "^0.219.0",
+		"@opentelemetry/exporter-logs-otlp-http": "^0.219.0",
+		"@opentelemetry/exporter-logs-otlp-proto": "^0.219.0",
+		"@opentelemetry/exporter-metrics-otlp-grpc": "^0.219.0",
+		"@opentelemetry/exporter-metrics-otlp-http": "^0.219.0",
+		"@opentelemetry/exporter-metrics-otlp-proto": "^0.219.0",
+		"@opentelemetry/exporter-trace-otlp-grpc": "^0.219.0",
+		"@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
+		"@opentelemetry/exporter-trace-otlp-proto": "^0.219.0",
 		"@opentelemetry/resources": "^2.5.1",
 		"@opentelemetry/sdk-logs": "^0.212.0",
 		"@opentelemetry/sdk-metrics": "^2.5.1",
@@ -7286,7 +7515,7 @@
 		"isbinaryfile": "^5.0.4",
 		"jsonc-parser": "^3.3.1",
 		"lru-cache": "^11.1.0",
-		"markdown-it": "^14.1.1",
+		"markdown-it": "^14.2.0",
 		"minimatch": "^10.2.1",
 		"undici": "^7.24.1",
 		"vscode-tas-client": "^0.1.84",
@@ -7294,6 +7523,7 @@
 	},
 	"overrides": {
 		"string_decoder": "npm:string_decoder@1.2.0",
+		"yauzl": "^3.3.1",
 		"zod": "3.25.76"
 	},
 	"vscodeCommit": "94c8e2adc50e26ef70af85a0de3a9efed757acaa",
@@ -7306,5 +7536,14 @@
 			"flags": "verified"
 		},
 		"publisherDisplayName": "GitHub"
+	},
+	"allowScripts": {
+		"esbuild@0.28.1": true,
+		"keytar@7.9.0": true,
+		"@playwright/browser-chromium@1.61.1": true,
+		"@vscode/vsce-sign@2.0.5": true,
+		"protobufjs": false,
+		"fsevents@2.3.3": true,
+		"fsevents@2.3.2": true
 	}
 }

@@ -99,7 +99,10 @@ export class MockEndpoint implements IChatEndpoint {
 	}
 
 	cloneWithTokenOverride(modelMaxPromptTokens: number): IChatEndpoint {
-		throw new Error('Method not implemented.');
+		const clone = new MockEndpoint(undefined, this._chatMLFetcher, this._tokenizerProvider);
+		Object.assign(clone, this);
+		clone.modelMaxPromptTokens = modelMaxPromptTokens;
+		return clone;
 	}
 
 	getExtraHeaders?(): Record<string, string> {

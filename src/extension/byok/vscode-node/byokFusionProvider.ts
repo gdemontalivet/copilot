@@ -18,6 +18,7 @@ import {
 } from 'vscode';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { ILogService } from '../../../platform/log/common/logService';
+import { sendLanguageModelRequest } from './languageModelRequest';
 
 interface CandidateResult {
 	model: LanguageModelChat;
@@ -97,7 +98,7 @@ export class BYOKFusionLMProvider implements LanguageModelChatProvider<LanguageM
 			maxOutputTokens: 64_000,
 			tooltip: 'Sends prompt to multiple BYOK models in parallel and merges outputs into a single high-quality response.',
 			detail: 'Capability Fusion (Multi-Model Parallel Synthesis)',
-			category: { label: '', order: Number.MIN_SAFE_INTEGER },
+			category: '',
 			isUserSelectable: true,
 			multiplierNumeric: 0,
 			capabilities: {
@@ -133,12 +134,13 @@ export class BYOKFusionLMProvider implements LanguageModelChatProvider<LanguageM
 			candidates.map(async (candidate) => {
 				const candStart = Date.now();
 				try {
-					const response = await candidate.sendRequest(
+					const response = await sendLanguageModelRequest(
+						candidate,
 						messages,
 						{
 							modelOptions: options.modelOptions,
 							toolMode: options.toolMode,
-							tools: options.tools,
+							tools: options.tools ? [...options.tools] : undefined,
 							justification: `BYOK Fusion candidate generation for ${candidate.vendor}/${candidate.id}`,
 						},
 						token,
@@ -224,12 +226,13 @@ Produce the final, merged, optimal response now.`;
 			vscode.LanguageModelChatMessage.User(mergerPrompt),
 		];
 
-		const mergerResponse = await merger.sendRequest(
+		const mergerResponse = await sendLanguageModelRequest(
+			merger,
 			mergerMessages,
 			{
 				modelOptions: options.modelOptions,
 				toolMode: options.toolMode,
-				tools: options.tools,
+				tools: options.tools ? [...options.tools] : undefined,
 				justification: 'BYOK Fusion merging candidate responses',
 			},
 			token,
@@ -376,36 +379,17 @@ Produce the final, merged, optimal response now.`;
 	}
 
 	private _readFusionModelsSetting(): string[] {
-		try {
-			const value = this._configurationService.getConfig(ConfigKey.ByokFusionModels);
-			if (Array.isArray(value)) {
-				return value.map(v => typeof v === 'string' ? v.trim() : '').filter(Boolean);
-			}
-		} catch {
-			// ignore
-		}
-		return [];
+		return this._configurationService.getConfig(ConfigKey.ByokFusionModels)
+			.map(value => value.trim())
+			.filter(Boolean);
 	}
 
 	private _readFusionMergerModelSetting(): string {
-		try {
-			const value = this._configurationService.getConfig(ConfigKey.ByokFusionMergerModel);
-			if (typeof value === 'string') {
-				return value.trim();
-			}
-		} catch {
-			// ignore
-		}
-		return '';
+		return this._configurationService.getConfig(ConfigKey.ByokFusionMergerModel).trim();
 	}
 
 	private _readShowHint(): boolean {
-		try {
-			const value = this._configurationService.getConfig(ConfigKey.ByokFusionShowHint);
-			return value !== false;
-		} catch {
-			return true;
-		}
+		return this._configurationService.getConfig(ConfigKey.ByokFusionShowHint);
 	}
 
 	private _parseTargetSpec(raw: string): { vendor: string; id: string } | undefined {

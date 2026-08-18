@@ -1,7 +1,7 @@
-// ─── BYOK CUSTOM PATCH: Qwen3 <think> tag stripping (Patch 61) ──────────────
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-// Installed at: src/extension/byok/common/qwenThinkingStripper.ts
-//
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
 // Qwen3 models (qwen3.6:27b, etc.) emit reasoning tokens inside
 // <think>...</think> tags directly in the `content` delta field of
 // /v1/chat/completions responses. Ollama (≤0.23.x) does not promote them

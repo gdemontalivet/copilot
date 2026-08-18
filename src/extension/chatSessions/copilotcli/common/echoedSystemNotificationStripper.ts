@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 // ─── BYOK CUSTOM PATCH: strip echoed SYSTEM NOTIFICATION header (Patch 46) ──
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Maintained directly in the BYOK fork source.
 // Purpose: drop the verbatim 3-line prompt wrapper that the Copilot CLI
 // SDK prepends to task-notification prompts when a language model echoes
 // it back at the start of its own response.

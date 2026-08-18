@@ -1,19 +1,24 @@
-# GitHub Copilot - Your autonomous AI peer programmer
+# Copilot Full BYOK
 
-**[GitHub Copilot](https://code.visualstudio.com/docs/copilot/overview)** is an AI peer programming tool that transforms how you write code in Visual Studio Code.
+Copilot Full BYOK is a local-model and bring-your-own-key fork of the Copilot Chat
+extension included with Visual Studio Code. It keeps the current editor, agent, tool,
+prompt, and inline-editing improvements while allowing chat to activate without a
+GitHub sign-in or Copilot subscription.
 
-GitHub Copilot agents handle complete coding tasks end-to-end, autonomously planning work, editing files, running commands, and self-correcting when they hit errors. You can also leverage inline suggestions for quick coding assistance and inline chat for precise, focused edits directly in the editor.
+The fork uses VS Code's native signed-out BYOK path. It does not create a synthetic
+Copilot token or report a paid GitHub entitlement. Select or add a model through the
+Language Models picker and use your own provider credentials.
 
-**Sign up for [GitHub Copilot Free](https://github.com/settings/copilot?utm_source=vscode-chat-readme&utm_medium=first&utm_campaign=2025mar-em-MSFT-signup)!**
+Additional providers and routing features include Vertex Anthropic, Vertex Gemini,
+Gemini ADC and Interactions, DeepSeek, BYOK Auto, BYOK Fusion, Anthropic failover, and
+the context-window status indicator. Standard upstream BYOK providers such as OpenAI,
+Anthropic, Gemini, Azure, Ollama, xAI, and OpenRouter remain available.
 
-![Working with GitHub Copilot agent mode to make edits to code in your workspace](https://github.com/microsoft/vscode-docs/raw/732b9599e49ee7034744a3e5b0485b7fb4bdf530/docs/copilot/images/getting-started/custom-reviewer-mode.png)
+This version is based on the exact VS Code revision recorded in
+`UPSTREAM_VSCODE_COMMIT` and requires the VS Code version declared by
+`engines.vscode` in `package.json`.
 
-
-## Getting access to GitHub Copilot
-
-Sign up for [GitHub Copilot Free](https://github.com/settings/copilot?utm_source=vscode-chat-readme&utm_medium=second&utm_campaign=2025mar-em-MSFT-signup), or request access from your enterprise admin.
-
-To access GitHub Copilot, an active GitHub Copilot subscription is required. You can read more about our business and individual offerings at [github.com/features/copilot](https://github.com/features/copilot?utm_source=vscode-chat&utm_medium=readme&utm_campaign=2025mar-em-MSFT-signup).
+## Upstream feature set
 
 ## Build with autonomous agents
 

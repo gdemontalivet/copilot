@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as vscode from 'vscode';
 import { LanguageModelChat, lm, type ChatRequest } from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
@@ -21,6 +20,13 @@ import { Emitter, Event } from '../../../util/vs/base/common/event';
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 
+
+// Keep in sync with `BYOKUtilityModelDefault` in `src/vs/workbench/contrib/chat/common/constants.ts` and the `chat.byokUtilityModelDefault` enum in `chat.shared.contribution.ts`.
+const enum BYOKUtilityModelDefault {
+	None = 'none',
+	MainAgent = 'mainAgent',
+	Copilot = 'copilot',
+}
 
 export class ProductionEndpointProvider extends Disposable implements IEndpointProvider {
 
@@ -54,11 +60,14 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 			this._onDidModelsRefresh.fire();
 		}));
 
-		// When the user changes their utility model overrides we need to invalidate any
-		// previously-resolved utility alias endpoints so the next request re-resolves.
+		// Utility model configuration changes invalidate previously resolved aliases.
 		this._register(this._configService.onDidChangeConfiguration(e => {
-			if (e.affectsConfiguration(ProductionEndpointProvider.UTILITY_MODEL_CONFIG_KEY) || e.affectsConfiguration(ProductionEndpointProvider.UTILITY_SMALL_MODEL_CONFIG_KEY)) {
-				this._logService.trace(`[ProductionEndpointProvider] Utility model override changed; invalidating alias endpoints.`);
+			if (
+				e.affectsConfiguration(ProductionEndpointProvider.UTILITY_MODEL_CONFIG_KEY)
+				|| e.affectsConfiguration(ProductionEndpointProvider.UTILITY_SMALL_MODEL_CONFIG_KEY)
+				|| e.affectsConfiguration(ProductionEndpointProvider.BYOK_UTILITY_MODEL_DEFAULT_CONFIG_KEY)
+			) {
+				this._logService.trace(`[ProductionEndpointProvider] Utility model configuration changed; invalidating alias endpoints.`);
 				// Clear telemetry fingerprints so a re-applied override emits
 				// once for its new value.
 				this._lastOverrideTelemetryFingerprint.clear();
@@ -77,6 +86,8 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 	// `vscode.lm.selectChatModels({ vendor, id })`.
 	private static readonly UTILITY_MODEL_CONFIG_KEY = 'chat.utilityModel';
 	private static readonly UTILITY_SMALL_MODEL_CONFIG_KEY = 'chat.utilitySmallModel';
+	private static readonly BYOK_UTILITY_MODEL_DEFAULT_CONFIG_KEY = 'chat.byokUtilityModelDefault';
+	private _mainAgentBYOKModel: LanguageModelChat | undefined;
 
 	/**
 	 * Per-family marker recording that we already emitted a telemetry event
@@ -107,6 +118,18 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 
 		if (!model) {
 			return this.getChatEndpoint('copilot-utility');
+		}
+
+		if (model.id !== 'copilot-utility' && model.id !== 'copilot-utility-small') {
+			const mainAgentBYOKModel = model.vendor !== 'copilot' ? model : undefined;
+			const mainAgentModelChanged = this._mainAgentBYOKModel?.vendor !== mainAgentBYOKModel?.vendor
+				|| this._mainAgentBYOKModel?.id !== mainAgentBYOKModel?.id
+				|| this._mainAgentBYOKModel?.version !== mainAgentBYOKModel?.version;
+			this._mainAgentBYOKModel = mainAgentBYOKModel;
+			if (mainAgentModelChanged) {
+				this._lastOverrideTelemetryFingerprint.clear();
+				this._onDidModelsRefresh.fire();
+			}
 		}
 
 		if (model.vendor !== 'copilot') {
@@ -157,22 +180,60 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 	 * `copilot-utility`) to a concrete `CopilotChatEndpoint`. The model
 	 * selection for each family lives in the corresponding resolver
 	 * class so callers don't need to know which CAPI family backs each
-	 * purpose. For any other string, falls through to a direct CAPI
-	 * family lookup so callers can resolve arbitrary CAPI-registered
-	 * model families (e.g. `trajectory-compaction`) by name.
+	 * purpose.
 	 */
-	private async _resolveUtilityFamily(family: ChatEndpointFamily): Promise<IChatEndpoint> {
+	private async _resolveUtilityFamily(family: 'copilot-utility' | 'copilot-utility-small'): Promise<IChatEndpoint> {
 		const override = await this._resolveUtilityOverride(family);
 		if (override) {
 			return override;
 		}
-		if (family === 'copilot-utility-small') {
-			return CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
-		} else if (family === 'copilot-utility') {
-			return CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
+
+		if (this._mainAgentBYOKModel) {
+			switch (this._getBYOKUtilityModelDefault()) {
+				case BYOKUtilityModelDefault.MainAgent:
+					return this._instantiationService.createInstance(ExtensionContributedChatEndpoint, this._mainAgentBYOKModel);
+				case BYOKUtilityModelDefault.None:
+					throw this._createMissingUtilityModelError(family);
+				case BYOKUtilityModelDefault.Copilot:
+					// Copilot utility models require a Copilot token source (unavailable for air-gapped / signed-out BYOK).
+					if (!this._authService.hasCopilotTokenSource) {
+						throw this._createMissingUtilityModelError(family);
+					}
+					break;
+			}
 		}
-		const modelMetadata = await this._modelFetcher.getChatModelFromCapiFamily(family);
-		return this.getOrCreateChatEndpointInstance(modelMetadata);
+
+		switch (family) {
+			case 'copilot-utility-small':
+				return CopilotUtilitySmallChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
+			case 'copilot-utility':
+				return CopilotUtilityChatEndpoint.resolve(this._modelFetcher, this._instantiationService);
+		}
+	}
+
+	/** Creates an actionable error for when no usable utility model is available for a BYOK main agent model. */
+	private _createMissingUtilityModelError(family: 'copilot-utility' | 'copilot-utility-small'): Error {
+		const utilityModelSetting = family === 'copilot-utility' ? 'chat.utilityModel' : 'chat.utilitySmallModel';
+		// 'copilot' is only usable when a Copilot token is available; for
+		// air-gapped / signed-out BYOK it cannot be used, so don't offer it.
+		const defaultOptions = this._authService.hasCopilotTokenSource ? `'mainAgent' or 'copilot'` : `'mainAgent'`;
+		return new Error(`No utility model is configured for '${family}' while the selected main agent model is BYOK. Configure setting '${utilityModelSetting}' or set 'chat.byokUtilityModelDefault' to ${defaultOptions}.`);
+	}
+
+	private _getBYOKUtilityModelDefault(): BYOKUtilityModelDefault {
+		const value = this._configService.getNonExtensionConfig<unknown>(ProductionEndpointProvider.BYOK_UTILITY_MODEL_DEFAULT_CONFIG_KEY);
+		switch (value) {
+			case undefined:
+				// Preserve the Copilot default when running against a core that does not register this setting.
+				return BYOKUtilityModelDefault.Copilot;
+			case BYOKUtilityModelDefault.None:
+			case BYOKUtilityModelDefault.MainAgent:
+			case BYOKUtilityModelDefault.Copilot:
+				return value;
+			default:
+				this._logService.warn(`[ProductionEndpointProvider] Ignoring invalid ${ProductionEndpointProvider.BYOK_UTILITY_MODEL_DEFAULT_CONFIG_KEY} value: '${String(value)}'.`);
+				return BYOKUtilityModelDefault.None;
+		}
 	}
 
 	/**
@@ -307,117 +368,4 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 		const models: IChatModelInformation[] = await this._modelFetcher.getAllChatModels();
 		return models.map(model => this.getOrCreateChatEndpointInstance(model));
 	}
-
-	// ─── BYOK CUSTOM PATCH: family fallback resolver ────────────────────────────
-	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-	// Picks a registered BYOK chat model when the upstream `_modelFetcher`
-	// can't resolve a generic family ('copilot-base' / 'copilot-fast').
-	//
-	// Both 'copilot-base' and 'copilot-fast' callsites in upstream are
-	// background helper tasks (title generation, intent detection, prompt
-	// categorisation, summarisation, code-mapper full-rewrite, search-intent
-	// keyword extraction, devcontainer / debug-config generation, settings-
-	// search, etc.) — almost always short prompts where the cheapest, fastest
-	// model wins on every axis. Selection priority is therefore by *capability
-	// class* first (cheap & fast: gemini-3.1-flash-lite > any flash/haiku/mini/
-	// lite > anything tool-capable) and by vendor only as a tiebreaker. The
-	// chosen model is wrapped in `ExtensionContributedChatEndpoint` (same
-	// shape used for non-copilot vendors at line ~80) so every IChatEndpoint
-	// consumer sees a real endpoint with a working tokenizer / send pipeline.
-	//
-	// `byokauto` is excluded: routing the family fallback through the synthetic
-	// Auto vendor would re-enter `provideLanguageModelChatResponse` and risk
-	// infinite recursion when a BYOK Auto delegation itself triggers a
-	// 'copilot-fast' lookup (e.g. for chat-title generation).
-	private static readonly _BYOK_FAMILY_FALLBACK_NEEDLES: readonly string[] = [
-		// Most-preferred → least-preferred. Each needle is matched
-		// case-insensitively against `id` AND `family`. First non-empty match
-		// wins. All variants here are intentionally cheap+fast classes.
-		// Ordered to spare rate-limited resources: DeepSeek first (no
-		// per-minute pressure on the maintainer's setup), then Vertex-routed
-		// Gemini Flash (Vertex projects don't share the direct-API 15rpm cap),
-		// then direct Gemini Flash variants only as a fallback to the
-		// fallback. Anthropic Haiku / OpenAI mini classes follow.
-		'deepseek-chat',
-		'deepseek',
-		'gemini-3.1-flash-lite',
-		'gemini-3-flash-lite',
-		'gemini-flash-lite',
-		'flash-lite',
-		'gemini-3.1-flash',
-		'gemini-3-flash',
-		'gemini-flash',
-		'flash',
-		'claude-haiku',
-		'haiku',
-		'gpt-5-nano', 'gpt-4.1-nano', 'gpt-4o-mini',
-		'mini',
-		'lite',
-	];
-	private static readonly _BYOK_FAMILY_FALLBACK_VENDOR_PRIORITY: readonly string[] = [
-		// `customendpoint` first because the maintainer's DeepSeek is configured
-		// there (customoai is deprecated); OpenRouter second (also generally cheap
-		// and provider-pooled).
-		// `vertexgemini` outranks direct `gemini` so we route Flash through
-		// Vertex when both are configured (avoids the direct-API 15rpm cap on
-		// the maintainer's free Gemini key).
-		'customendpoint', 'customoai', 'openrouter', 'vertexgemini', 'gemini',
-		'vertexanthropic', 'anthropic', 'openai',
-	];
-	private readonly _byokFamilyFallbackCache = new Map<string, IChatEndpoint>();
-
-	private async _byokFamilyFallback(family: ChatEndpointFamily): Promise<IChatEndpoint | undefined> {
-		const cached = this._byokFamilyFallbackCache.get(family);
-		if (cached) {
-			return cached;
-		}
-		try {
-			const all = await vscode.lm.selectChatModels({});
-			const eligible = all.filter(m => m.vendor && m.vendor !== 'byokauto' && m.vendor !== 'copilot');
-			if (eligible.length === 0) {
-				return undefined;
-			}
-			let chosen: vscode.LanguageModelChat | undefined;
-			let matchedNeedle: string | undefined;
-			for (const needle of ProductionEndpointProvider._BYOK_FAMILY_FALLBACK_NEEDLES) {
-				const lower = needle.toLowerCase();
-				const matches = eligible.filter(m =>
-					(m.id ?? '').toLowerCase().includes(lower) ||
-					(m.family ?? '').toLowerCase().includes(lower)
-				);
-				if (matches.length === 0) {
-					continue;
-				}
-				for (const v of ProductionEndpointProvider._BYOK_FAMILY_FALLBACK_VENDOR_PRIORITY) {
-					const hit = matches.find(m => m.vendor === v);
-					if (hit) {
-						chosen = hit;
-						matchedNeedle = needle;
-						break;
-					}
-				}
-				chosen ??= matches[0];
-				matchedNeedle ??= needle;
-				break;
-			}
-			if (!chosen) {
-				for (const v of ProductionEndpointProvider._BYOK_FAMILY_FALLBACK_VENDOR_PRIORITY) {
-					const hit = eligible.find(m => m.vendor === v);
-					if (hit) {
-						chosen = hit;
-						break;
-					}
-				}
-				chosen ??= eligible[0];
-			}
-			const endpoint = this._instantiationService.createInstance(ExtensionContributedChatEndpoint, chosen);
-			this._logService.info(`[BYOK family-fallback] '${family}' -> ${chosen.vendor}/${chosen.id}${matchedNeedle ? ` (matched '${matchedNeedle}')` : ' (vendor-priority)'}`);
-			this._byokFamilyFallbackCache.set(family, endpoint);
-			return endpoint;
-		} catch (err) {
-			this._logService.warn(`[BYOK family-fallback] failed to resolve '${family}': ${(err as Error)?.message ?? err}`);
-			return undefined;
-		}
-	}
-	// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
 }

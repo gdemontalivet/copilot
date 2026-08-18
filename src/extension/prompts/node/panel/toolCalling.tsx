@@ -35,7 +35,7 @@ import { ServiceCollection } from '../../../../util/vs/platform/instantiation/co
 import { LanguageModelDataPart, LanguageModelDataPart2, LanguageModelPartAudience, LanguageModelPromptTsxPart, LanguageModelTextPart, LanguageModelTextPart2, LanguageModelToolMCPSource, LanguageModelToolResult } from '../../../../vscodeTypes';
 import { isImageDataPart } from '../../../conversation/common/languageModelChatMessageHelpers';
 import { IResultMetadata } from '../../../prompt/common/conversation';
-import { IBuildPromptContext, IToolCall, IToolCallRound } from '../../../prompt/common/intents';
+import { getSubAgentInvocationId, IBuildPromptContext, IToolCall, IToolCallRound } from '../../../prompt/common/intents';
 import { toJsonSchema } from '../../../tools/common/toJsonSchema';
 import { ToolName } from '../../../tools/common/toolNames';
 import { CopilotToolMode } from '../../../tools/common/toolsRegistry';
@@ -121,7 +121,11 @@ export class ChatToolCalls extends PromptElement<ChatToolCallsProps, void> {
 		const children: PromptElement[] = [];
 
 		// Don't include this when rendering and triggering summarization
-		const statefulMarker = round.statefulMarker && <StatefulMarkerContainer statefulMarker={{ modelId: this.promptEndpoint.model, marker: round.statefulMarker }} />;
+		const statefulMarker = round.statefulMarker && <StatefulMarkerContainer statefulMarker={{
+			modelId: this.promptEndpoint.model,
+			marker: round.statefulMarker,
+			summarizedAtRoundId: round.statefulMarkerSummarizedAtRoundId,
+		}} />;
 		// Backward compat: older persisted rounds use `phaseModelId` instead of `modelId`. Read both.
 		const roundModelId = round.modelId ?? (round as IToolCallRound & { phaseModelId?: string }).phaseModelId;
 		const sameModelAsEndpoint = roundModelId === this.promptEndpoint.model;
@@ -291,7 +295,7 @@ function buildToolResultElement(accessor: ServicesAccessor, props: ToolResultOpt
 						inputObj = hookResult.updatedInput;
 					}
 
-					const subAgentInvocationId = promptContext.request?.subAgentInvocationId;
+					const subAgentInvocationId = getSubAgentInvocationId(promptContext);
 					// Capture the active trace context (from the invoke_agent span) so that
 					// the execute_tool span is properly parented even when async context
 					// propagation doesn't carry the active span.
@@ -505,7 +509,7 @@ export function sendInvokedToolTelemetry(instantiationService: IInstantiationSer
 	// Override the token budget to Infinity for telemetry counting to avoid truncation,
 	// matching the prior behavior with modelMaxPromptTokens: Infinity
 	// ─── BYOK CUSTOM PATCH: object-spread breaks getter-based endpoints (Patch 49) ───
-	// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+	// Maintained directly in the BYOK fork source.
 	// See the matching comment in chatVariables.tsx for the full rationale —
 	// `{ ...endpoint, modelMaxPromptTokens: Infinity }` drops every prototype
 	// getter on `ExtensionContributedChatEndpoint`, leaving `tokenizer === undefined`
@@ -754,8 +758,7 @@ class PrimitiveToolResult<T extends IPrimitiveToolResultProps> extends PromptEle
 		@IAuthenticationService private readonly authService?: IAuthenticationService,
 		@ILogService private readonly logService?: ILogService,
 		@IImageService private readonly imageService?: IImageService,
-		@IConfigurationService private readonly configurationService?: IConfigurationService,
-		@IExperimentationService private readonly experimentationService?: IExperimentationService
+		@IConfigurationService private readonly configurationService?: IConfigurationService
 	) {
 		super(props);
 		this.linkedResources = this.props.content.filter((c): c is LanguageModelDataPart => c instanceof LanguageModelDataPart && c.mimeType === McpLinkedResourceToolResult.mimeType);
@@ -803,11 +806,11 @@ class PrimitiveToolResult<T extends IPrimitiveToolResultProps> extends PromptEle
 
 	protected async onImage(part: LanguageModelDataPart, _imageIndex?: number) {
 		if (!this.endpoint?.supportsVision) {
-			return '[Image content is not available because vision is not supported by the current model or is disabled by your organization.]';
+			return '[Image content is not available because vision is not supported by the current model.]';
 		}
 
-		const uploadsEnabled = this.configurationService && this.experimentationService
-			? this.configurationService.getExperimentBasedConfig(ConfigKey.EnableChatImageUpload, this.experimentationService)
+		const uploadsEnabled = this.configurationService
+			? this.configurationService.getConfig(ConfigKey.EnableChatImageUpload)
 			: false;
 
 		// Anthropic (from CAPI) currently does not support image uploads from tool calls.
@@ -900,7 +903,7 @@ export class ToolResult extends PrimitiveToolResult<IToolResultProps> {
 		@IExperimentationService private readonly _experimentationService: IExperimentationService,
 		@IChatDiskSessionResources private readonly diskSessionResources: IChatDiskSessionResources,
 	) {
-		super(props, endpoint, authService, _logService, imageService, _configurationService, _experimentationService);
+		super(props, endpoint, authService, _logService, imageService, _configurationService);
 	}
 
 	protected override async onTSX(part: JSONTree.PromptElementJSON): Promise<any> {

@@ -1,7 +1,7 @@
-// ─── BYOK CUSTOM PATCH: DeepSeek V4 DSML tool-call leakage workaround (Patch 58) ───
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-// Installed at: src/extension/byok/common/dsmlToolCallStripper.ts
-//
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
 // DeepSeek-V4-Pro and DeepSeek-V4-Flash have a known server-side bug
 // (vllm-project/vllm#40801, deepseek-ai/DeepSeek-V3#1244,
 // CherryHQ/cherry-studio#14714) where, in ~11% of `tool_choice=auto`

@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 // ─── BYOK CUSTOM PATCH: Gemini API with ADC / OAuth auth (Patch 68) ──────────
-// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+// Maintained directly in the BYOK fork source.
 //
 // Google deprecated simple API key access to the Generative Language API for
 // GCP-routed accounts.  Users who authenticated via `gcloud auth
@@ -62,8 +62,6 @@ const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1_000;
 
 // Mirrors the 200K cap used by GeminiNativeBYOKLMProvider / GeminiInteractionLMProvider
 // so Patch 23's compaction thresholds behave identically to the API-key provider.
-const GEMINIADC_MAX_INPUT_TOKENS = 200_000;
-
 interface CredentialSlot {
 	auth: GoogleAuth;
 	/** GCP project to bill usage against (x-goog-user-project header). */
@@ -307,10 +305,7 @@ export class GeminiADCLMProvider extends GeminiInteractionLMProvider {
 				}
 				if (this._knownModels && this._knownModels[modelId]) {
 					const knownCaps = this._knownModels[modelId];
-					modelList[modelId] = {
-						...knownCaps,
-						maxInputTokens: Math.min(knownCaps.maxInputTokens, GEMINIADC_MAX_INPUT_TOKENS),
-					};
+					modelList[modelId] = this._capKnownModelInputTokens(knownCaps);
 					continue;
 				}
 				const inferred = this._inferGeminiCapabilities(model);

@@ -149,7 +149,7 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 	private async _getOllamaModelInfo(ollamaBaseUrl: string, modelId: string): Promise<IChatModelInformation> {
 		const modelInfo = await this._fetchOllamaModelInformation(ollamaBaseUrl, modelId);
 		// ─── BYOK CUSTOM PATCH: safe architecture extraction (Patch 66) ─────────────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+		// Maintained directly in the BYOK fork source.
 		// Upstream uses a single expression that crashes when model_info is present
 		// but 'general.architecture' is missing; this two-step form is safe.
 		const architecture = modelInfo?.model_info?.['general.architecture'];
@@ -161,7 +161,7 @@ export class OllamaLMProvider extends AbstractOpenAICompatibleLMProvider<OllamaC
 			maxOutputTokens: outputTokens,
 			maxInputTokens: contextWindow - outputTokens,
 			// ─── BYOK CUSTOM PATCH: force toolCalling:true for Ollama models (Patch 66) ──
-			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
+			// Maintained directly in the BYOK fork source.
 			// VS Code's chat picker requires capabilities.toolCalling:true to list a model.
 			// Ollama's /api/show only reports 'tools' in capabilities[] for models that
 			// explicitly declare tool support — many popular models (llama3, qwen, mistral,

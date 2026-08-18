@@ -55,59 +55,31 @@ export class BYOKContrib extends Disposable implements IExtensionContribution {
 		const instantiationService = this._instantiationService;
 
 		const anthropic = instantiationService.createInstance(AnthropicLMProvider, undefined, this._byokStorageService);
-		// ─── BYOK CUSTOM PATCH: GeminiInteraction as gemini vendor (Patch 69) ───────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-		// GeminiInteractionLMProvider replaces GeminiNativeBYOKLMProvider as the
-		// primary 'gemini' vendor. All 3 Gemini providers (gemini, vertexgemini,
-		// geminiadc) now use the Interactions API — Google manages context server-side.
+		// The direct Gemini provider uses Google's Interactions API so Google can
+		// retain server-side conversation state through previous_interaction_id.
 		const gemini = instantiationService.createInstance(GeminiInteractionLMProvider, undefined, this._byokStorageService);
 		const xai = instantiationService.createInstance(XAIBYOKLMProvider, {}, this._byokStorageService);
 		const openai = instantiationService.createInstance(OAIBYOKLMProvider, {}, this._byokStorageService);
 
 		this._providers.set(OllamaLMProvider.providerId, instantiationService.createInstance(OllamaLMProvider, this._byokStorageService));
 		this._providers.set(AnthropicLMProvider.providerId, anthropic);
-		// BYOK CUSTOM PATCH: Vertex-hosted Anthropic, registered as a separate vendor so it has
-		// independent API key / quota / concurrency state. Also wired as a failover target for
-		// the direct Anthropic provider (gated by chat.byok.anthropic.fallback.enabled).
 		const vertexAnthropicProvider = instantiationService.createInstance(VertexAnthropicLMProvider, undefined, this._byokStorageService);
 		this._providers.set(VertexAnthropicLMProvider.providerName.toLowerCase(), vertexAnthropicProvider);
 		anthropic.setFailoverTarget(vertexAnthropicProvider);
 		this._providers.set(GeminiInteractionLMProvider.providerName.toLowerCase(), gemini);
-		// BYOK CUSTOM PATCH: Vertex-hosted Gemini, registered as a separate vendor so it has
-		// independent API key / quota state. Auth is SA-JSON or pre-minted Bearer token, not
-		// the Gemini public-API apiKey.
 		this._providers.set(VertexGeminiLMProvider.providerName.toLowerCase(), instantiationService.createInstance(VertexGeminiLMProvider, undefined, this._byokStorageService));
-		// ─── BYOK CUSTOM PATCH: Gemini API with ADC / OAuth (Patch 68) ───────────
-		// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-		// Google deprecated raw API-key access for GCP-authenticated accounts;
-		// this provider authenticates via ADC (google-auth-library) instead.
 		this._providers.set(GeminiADCLMProvider.providerName.toLowerCase(), instantiationService.createInstance(GeminiADCLMProvider, undefined, this._byokStorageService));
-		// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────
 		this._providers.set(XAIBYOKLMProvider.providerId, xai);
 		this._providers.set(BYOKFusionLMProvider.vendorId, instantiationService.createInstance(BYOKFusionLMProvider));
-		// BYOK CUSTOM PATCH: DeepSeek provider registration (Patch 55)
 		this._providers.set(DeepSeekBYOKLMProvider.providerId, instantiationService.createInstance(DeepSeekBYOKLMProvider, undefined, this._byokStorageService));
 		this._providers.set(OAIBYOKLMProvider.providerId, openai);
 		this._providers.set(OpenRouterLMProvider.providerId, instantiationService.createInstance(OpenRouterLMProvider, this._byokStorageService));
 		this._providers.set(AzureBYOKModelProvider.providerId, instantiationService.createInstance(AzureBYOKModelProvider, this._byokStorageService));
 		this._providers.set(CustomOAIBYOKModelProvider.providerId, instantiationService.createInstance(CustomOAIBYOKModelProvider, this._byokStorageService));
-
-			// ─── BYOK CUSTOM PATCH: BYOK Auto provider (Patch 34) ─────────────
-			// Preserved by .github/scripts/apply-byok-patches.sh. Do not remove.
-			// Upstream's `copilot/auto` pseudo-model hits CAPI with the Copilot
-			// token to pick a real model — that flow dies under the BYOK
-			// fake-token bypass and surfaces as "Language model unavailable".
-			// Register a BYOK-native Auto provider that delegates to whichever
-			// model the user configures in `chat.byok.auto.defaultModel`.
-			// See byokAutoProvider.ts for the full rationale.
-			this._providers.set(
-				BYOKAutoLMProvider.vendorId,
-				// Patch 40 extended the constructor to take the shared
-				// BYOK storage service so the classifier can read the
-				// user's Gemini / Vertex keys without re-prompting.
-				instantiationService.createInstance(BYOKAutoLMProvider, this._byokStorageService),
-			);
-			// ─── END BYOK CUSTOM PATCH ──────────────────────────────
+		this._providers.set(
+			BYOKAutoLMProvider.vendorId,
+			instantiationService.createInstance(BYOKAutoLMProvider, this._byokStorageService),
+		);
 		this._providers.set(CustomEndpointBYOKModelProvider.providerId, instantiationService.createInstance(CustomEndpointBYOKModelProvider, this._byokStorageService));
 
 		this._knownModelsRefreshTargets = [
