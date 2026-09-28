@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      VSCODE_CHECKOUT: ${{ runner.temp }}/vscode-byok
+      VSCODE_CHECKOUT: ${{ github.workspace }}/.build/vscode-byok
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
 
     steps:
