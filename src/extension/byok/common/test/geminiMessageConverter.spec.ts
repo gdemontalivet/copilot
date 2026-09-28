@@ -101,6 +101,85 @@ describe('GeminiMessageConverter', () => {
 		}]);
 	});
 
+	it('drops unsigned historical tool turns when Gemini 3 thought signatures are required', () => {
+		const messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2> = [
+			{
+				role: LanguageModelChatMessageRole.User,
+				content: [new LanguageModelTextPart('Inspect the workspace')],
+				name: undefined,
+			},
+			{
+				role: LanguageModelChatMessageRole.Assistant,
+				content: [
+					new LanguageModelTextPart('I will inspect it.'),
+					new LanguageModelToolCallPart('legacy-call', 'default_api:run_in_terminal', { command: 'pwd' }),
+				],
+				name: undefined,
+			},
+			{
+				role: LanguageModelChatMessageRole.User,
+				content: [new LanguageModelToolResultPart('legacy-call', [new LanguageModelTextPart('/workspace')])],
+				name: undefined,
+			},
+		];
+
+		const result = apiMessageToGeminiMessage(messages, { requireThoughtSignatures: true });
+
+		expect(result.contents).toEqual([
+			{ role: 'user', parts: [{ text: 'Inspect the workspace' }] },
+			{ role: 'model', parts: [{ text: 'I will inspect it.' }] },
+		]);
+	});
+
+	it('keeps unsigned historical tool turns for models that do not require thought signatures', () => {
+		const messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2> = [
+			{
+				role: LanguageModelChatMessageRole.Assistant,
+				content: [new LanguageModelToolCallPart('legacy-call', 'default_api:view', { path: 'README.md' })],
+				name: undefined,
+			},
+			{
+				role: LanguageModelChatMessageRole.User,
+				content: [new LanguageModelToolResultPart('legacy-call', [new LanguageModelTextPart('contents')])],
+				name: undefined,
+			},
+		];
+
+		const result = apiMessageToGeminiMessage(messages);
+
+		expect(result.contents[0].parts![0]).toHaveProperty('functionCall');
+		expect(result.contents[1].parts![0]).toHaveProperty('functionResponse');
+	});
+
+	it('keeps every call in a signed parallel Gemini 3 tool turn', () => {
+		const messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2> = [
+			{
+				role: LanguageModelChatMessageRole.Assistant,
+				content: [
+					new LanguageModelThinkingPart('', undefined, { signature: 'parallel-signature' }),
+					new LanguageModelToolCallPart('call-1', 'default_api:view', { path: 'README.md' }),
+					new LanguageModelToolCallPart('call-2', 'default_api:view', { path: 'package.json' }),
+				],
+				name: undefined,
+			},
+			{
+				role: LanguageModelChatMessageRole.User,
+				content: [
+					new LanguageModelToolResultPart('call-1', [new LanguageModelTextPart('readme')]),
+					new LanguageModelToolResultPart('call-2', [new LanguageModelTextPart('package')]),
+				],
+				name: undefined,
+			},
+		];
+
+		const result = apiMessageToGeminiMessage(messages, { requireThoughtSignatures: true });
+
+		expect(result.contents[0].parts).toHaveLength(2);
+		expect(result.contents[0].parts![0]).toMatchObject({ thoughtSignature: 'parallel-signature' });
+		expect(result.contents[0].parts![1]).toHaveProperty('functionCall');
+		expect(result.contents[1].parts).toHaveLength(2);
+	});
+
 	it('should extract functionResponse parts from model message into subsequent user message and prune empty model', () => {
 		// Simulate a model message that (incorrectly) contains only a tool result part
 		const toolResult = new LanguageModelToolResultPart('myTool_12345', [new LanguageModelTextPart('{"foo":"bar"}')]);

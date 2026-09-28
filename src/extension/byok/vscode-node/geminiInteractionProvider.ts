@@ -94,6 +94,7 @@ import { RecordedProgress } from '../../../util/common/progressRecorder';
 import { generateUuid } from '../../../util/vs/base/common/uuid';
 import { BYOKKnownModels, LMResponsePart } from '../common/byokProvider';
 import { apiMessageToGeminiMessage, geminiMessagesToRawMessagesForLogging } from '../common/geminiMessageConverter';
+import { classifyRetryableGeminiError, extractReadableGeminiMessage } from '../common/geminiErrorUtils';
 import { ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
 import { IBYOKStorageService } from './byokStorageService';
 import { GeminiNativeBYOKLMProvider } from './geminiNativeProvider';
@@ -169,52 +170,10 @@ function _buildTextFallback(
 	return 'Please continue based on the previous context.';
 }
 
-function _extractReadableGeminiMessage(err: unknown): string {
-	if (err instanceof ApiError) {
-		try {
-			const parsed = JSON.parse(err.message);
-			const inner = parsed?.error?.message ?? parsed?.message;
-			if (inner) { return String(inner); }
-		} catch { /* fall through */ }
-		return err.message.split('\n')[0];
-	}
-	return toErrorMessage(err, false).split('\n')[0];
-}
-
-function _classifyRetryableError(err: unknown): 'rate-limit' | 'unavailable' | 'network' | null {
-	if (err instanceof ApiError) {
-		if (err.status === 429) { return 'rate-limit'; }
-		if (err.status === 503 || err.status === 502 || err.status === 504) { return 'unavailable'; }
-		return null;
-	}
-	const status = (err as any)?.status as number | undefined;
-	if (status === 429) { return 'rate-limit'; }
-	if (status === 503 || status === 502 || status === 504) { return 'unavailable'; }
-	const msg = String((err as any)?.message ?? '').toLowerCase();
-	const code = String((err as any)?.code ?? '');
-	if (['ECONNRESET', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNREFUSED', 'ERR_NETWORK'].includes(code) ||
-		msg.includes('fetch failed') || msg.includes('network error') || msg.includes('socket hang up') ||
-		msg.includes('geminiia connect timeout') || msg.includes('geminiia stream inactivity timeout')) {
-		return 'network';
-	}
-	// The Interactions API streams error events that we rethrow as plain Error objects with
-	// the API status code embedded in the message:
-	//   "Gemini Interactions API error (too_many_requests): ..."
-	//   "Gemini Interactions API error (quota_exceeded): ..."
-	//   "Gemini Interactions API error (resource_exhausted): ..."
-	// These never have a numeric .status, so the checks above all miss them.
-	if (/too_many_requests|quota_exceeded|resource_exhausted/i.test(msg)) { return 'rate-limit'; }
-	if (/service_unavailable|server_unavailable|unavailable|internal_error|server_error/i.test(msg) &&
-		!/invalid|bad_request|not_found|permission/i.test(msg)) {
-		return 'unavailable';
-	}
-	return null;
-}
-
 export function classifyGeminiInteractionRetryableErrorForTest(
 	err: unknown,
 ): 'rate-limit' | 'unavailable' | 'network' | null {
-	return _classifyRetryableError(err);
+	return classifyRetryableGeminiError(err);
 }
 
 /**
@@ -697,7 +656,7 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 				});
 			} catch (err) {
 				this._logService.error(`BYOK ${this._providerLabel} error: ${toErrorMessage(err, true)}`);
-				const readableReason = token.isCancellationRequested ? 'cancelled' : _extractReadableGeminiMessage(err);
+				const readableReason = token.isCancellationRequested ? 'cancelled' : extractReadableGeminiMessage(err);
 				pendingLoggedChatRequest.resolve({
 					type: token.isCancellationRequested ? ChatFetchResponseType.Canceled : ChatFetchResponseType.Unknown,
 					requestId, serverRequestId: requestId, reason: readableReason,
@@ -1105,13 +1064,13 @@ export class GeminiInteractionLMProvider extends GeminiNativeBYOKLMProvider {
 		// ─── END reactive tool-order fallback ─────────────────────────────
 
 		// ─── BYOK CUSTOM PATCH: retry on transient errors ─────────────
-		const retryKind = _classifyRetryableError(error);
+		const retryKind = classifyRetryableGeminiError(error);
 		if (retryKind && retryCount < MAX_RETRIES) {
 			const delay = Math.min(5000 * Math.pow(2, retryCount), 60_000);
 			const label = retryKind === 'rate-limit' ? '[Rate limit] 429'
 				: retryKind === 'unavailable' ? '[Service unavailable]'
 				: '[Network error]';
-			this._logService.warn(`${this._providerLabel} ${retryKind}, retry ${retryCount + 1}/${MAX_RETRIES} in ${delay}ms: ${_extractReadableGeminiMessage(error)}`);
+			this._logService.warn(`${this._providerLabel} ${retryKind}, retry ${retryCount + 1}/${MAX_RETRIES} in ${delay}ms: ${extractReadableGeminiMessage(error)}`);
 			progress.report(new LanguageModelThinkingPart(`${label} retry ${retryCount + 1}/${MAX_RETRIES}: waiting ~${Math.ceil(delay / 1000)}s…\n`));
 			await new Promise(resolve => setTimeout(resolve, delay));
 			if (token.isCancellationRequested) { return { ttft, ttfte, usage }; }

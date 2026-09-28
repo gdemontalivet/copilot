@@ -20,30 +20,11 @@ import { buildOTelInputFromChatMessages } from './byokOTelHelpers';
 import { RecordedProgress } from '../../../util/common/progressRecorder';
 import { generateUuid } from '../../../util/vs/base/common/uuid';
 import { BYOKKnownModels, byokKnownModelsToAPIInfo, BYOKModelCapabilities, LMResponsePart } from '../common/byokProvider';
+import { classifyRetryableGeminiError, extractReadableGeminiMessage } from '../common/geminiErrorUtils';
 import { toGeminiFunction as toGeminiFunctionDeclaration, ToolJsonSchema } from '../common/geminiFunctionDeclarationConverter';
 import { apiMessageToGeminiMessage, geminiMessagesToRawMessagesForLogging } from '../common/geminiMessageConverter';
 import { AbstractLanguageModelChatProvider, ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
 import { IBYOKStorageService } from './byokStorageService';
-
-// ─── BYOK CUSTOM PATCH: readable Gemini errors ──────────────────────────────
-// Maintained directly in the BYOK fork source.
-// The Gemini SDK (`@google/genai`) throws `ApiError` whose `message` is the
-// raw JSON body (e.g. `{"error":{"code":503,"message":"...","status":"..."}}`).
-// Surfacing that JSON in chat UI is noisy — extract the nested `error.message`.
-function extractReadableGeminiMessage(err: unknown): string {
-	if (err instanceof ApiError) {
-		try {
-			const parsed = JSON.parse(err.message);
-			const nested = parsed?.error?.message;
-			if (typeof nested === 'string' && nested.length > 0) {
-				return nested;
-			}
-		} catch { /* fall through */ }
-		return err.message;
-	}
-	return toErrorMessage(err);
-}
-// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
 
 // ─── BYOK CUSTOM PATCH: detect Gemini tool-history INVALID_ARGUMENT errors ──
 // Maintained directly in the BYOK fork source.
@@ -87,26 +68,6 @@ export function isGeminiToolHistoryInvalidError(err: unknown): boolean {
 	}
 }
 // ─── END BYOK CUSTOM PATCH ──────────────────────────────
-
-// ─── BYOK CUSTOM PATCH: Gemini retry resilience ─────────────────────────────
-// Maintained directly in the BYOK fork source.
-// Classify SDK / transport errors as retryable. Returns a label used in
-// progress messages, or null if the error is terminal.
-function classifyRetryableGeminiError(err: unknown): 'rate-limit' | 'unavailable' | 'network' | null {
-	if (err instanceof ApiError) {
-		if (err.status === 429) { return 'rate-limit'; }
-		if (err.status === 502 || err.status === 503 || err.status === 504) { return 'unavailable'; }
-		return null;
-	}
-	const e = err as any;
-	const code = typeof e?.code === 'string' ? e.code : (typeof e?.cause?.code === 'string' ? e.cause.code : undefined);
-	const transientCodes = new Set(['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
-	if (code && transientCodes.has(code)) { return 'network'; }
-	const msg = typeof e?.message === 'string' ? e.message.toLowerCase() : '';
-	if (/fetch failed|network error|timed? ?out|socket hang up/.test(msg)) { return 'network'; }
-	return null;
-}
-// ─── END BYOK CUSTOM PATCH ──────────────────────────────────────────────────
 
 export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvider {
 
@@ -219,7 +180,9 @@ export class GeminiNativeBYOKLMProvider extends AbstractLanguageModelChatProvide
 			// (VertexGeminiLMProvider) can swap in a Vertex-configured client.
 			const client = this.createClient(apiKey, model);
 			// Convert the messages from the API format into messages that we can use against Gemini
-			const { contents, systemInstruction } = apiMessageToGeminiMessage(messages as LanguageModelChatMessage[]);
+			const { contents, systemInstruction } = apiMessageToGeminiMessage(messages as LanguageModelChatMessage[], {
+				requireThoughtSignatures: /(?:^|\/)gemini-3(?:[.-]|$)/i.test(model.id),
+			});
 
 			const requestId = generateUuid();
 			const pendingLoggedChatRequest = this._requestLogger.logChatRequest(

@@ -31,30 +31,55 @@ export function resolveToolName(callId: string | undefined, callIdToName: Map<st
 }
 // ─── END BYOK CUSTOM PATCH ─────────────────────────────
 
-function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelToolCallPart | LanguageModelDataPart | LanguageModelThinkingPart)[], callIdToName: Map<string, string> = new Map()): Part[] {
+export interface GeminiMessageConversionOptions {
+	/**
+	 * Gemini 3 rejects historical function-call turns that do not contain the
+	 * encrypted thought signature returned with the original model response.
+	 * Such signatures cannot be reconstructed, so omit only those tool turns
+	 * and their matching results when replaying an older transcript.
+	 */
+	requireThoughtSignatures?: boolean;
+}
+
+function getThoughtSignature(part: LanguageModelThinkingPart): string | undefined {
+	if (part.metadata && typeof part.metadata === 'object' && 'signature' in part.metadata) {
+		const metadata = part.metadata as Record<string, unknown>;
+		return typeof metadata.signature === 'string' && metadata.signature.length > 0
+			? metadata.signature
+			: undefined;
+	}
+	return undefined;
+}
+
+function getEmbeddedThoughtSignature(callId: string | undefined): string | undefined {
+	if (!callId) {
+		return undefined;
+	}
+	const separatorIndex = callId.indexOf('|');
+	return separatorIndex >= 0 && separatorIndex < callId.length - 1
+		? callId.slice(separatorIndex + 1)
+		: undefined;
+}
+
+function apiContentToGeminiContent(
+	content: (LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelToolCallPart | LanguageModelDataPart | LanguageModelThinkingPart)[],
+	callIdToName: Map<string, string> = new Map(),
+	allowedToolCallIds?: ReadonlySet<string>,
+): Part[] {
 	const convertedContent: Part[] = [];
 	let pendingSignature: string | undefined;
 
 	for (const part of content) {
 		if (part instanceof LanguageModelThinkingPart) {
-			// Extract thought signature from thinking part metadata
-			if (part.metadata && typeof part.metadata === 'object' && 'signature' in part.metadata) {
-				const metadataObj = part.metadata as Record<string, unknown>;
-				if (typeof metadataObj.signature === 'string') {
-					pendingSignature = metadataObj.signature;
-				}
-			}
+			pendingSignature = getThoughtSignature(part) ?? pendingSignature;
 			// Note: We don't emit thinking content to Gemini as it's already been processed
 			// The signature will be attached to the next function call
 		} else if (part instanceof LanguageModelToolCallPart) {
-			// BYOK CUSTOM PATCH: extract thought signature from callId if it was embedded
-			let signature = pendingSignature;
-			let callId = part.callId;
-			if (callId && callId.includes('|')) {
-				const parts = callId.split('|');
-				signature = parts.slice(1).join('|');
-				callId = parts[0];
+			if (allowedToolCallIds && !allowedToolCallIds.has(part.callId)) {
+				continue;
 			}
+			// BYOK CUSTOM PATCH: extract thought signature from callId if it was embedded
+			const signature = getEmbeddedThoughtSignature(part.callId) ?? pendingSignature;
 
 			const functionCallPart: Part = {
 				functionCall: {
@@ -80,6 +105,9 @@ function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageMod
 				});
 			}
 		} else if (part instanceof LanguageModelToolResultPart || part instanceof LanguageModelToolResultPart2) {
+			if (allowedToolCallIds && !allowedToolCallIds.has(part.callId)) {
+				continue;
+			}
 			// ─── BYOK CUSTOM PATCH: drop orphan tool-result parts (Patch 43) ──────
 			// Maintained directly in the BYOK fork source.
 			// Gemini's function-calling contract requires that every
@@ -176,7 +204,7 @@ function apiContentToGeminiContent(content: (LanguageModelTextPart | LanguageMod
 	return convertedContent;
 }
 
-export function apiMessageToGeminiMessage(messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>): { contents: Content[]; systemInstruction?: Content } {
+export function apiMessageToGeminiMessage(messages: Array<LanguageModelChatMessage | LanguageModelChatMessage2>, options: GeminiMessageConversionOptions = {}): { contents: Content[]; systemInstruction?: Content } {
 	const contents: Content[] = [];
 	let systemInstruction: Content | undefined;
 
@@ -190,10 +218,28 @@ export function apiMessageToGeminiMessage(messages: Array<LanguageModelChatMessa
 	// provider (Anthropic `toolu_…`, OpenAI `call_…`, etc.). This map is
 	// the single source of truth for `functionResponse.name` below.
 	const callIdToName = new Map<string, string>();
+	const allowedToolCallIds = options.requireThoughtSignatures ? new Set<string>() : undefined;
 	for (const message of messages) {
+		let turnHasThoughtSignature = false;
+		const turnToolCallIds: string[] = [];
 		for (const part of message.content) {
+			if (part instanceof LanguageModelThinkingPart && getThoughtSignature(part)) {
+				turnHasThoughtSignature = true;
+			}
 			if (part instanceof LanguageModelToolCallPart && part.callId && part.name) {
 				callIdToName.set(part.callId, part.name);
+				turnToolCallIds.push(part.callId);
+				if (getEmbeddedThoughtSignature(part.callId)) {
+					turnHasThoughtSignature = true;
+				}
+			}
+		}
+		// A single thought signature authenticates a parallel function-call turn.
+		// Google places it on the first function-call part, so retain all calls
+		// from that same assistant message when any part carries the signature.
+		if (allowedToolCallIds && turnHasThoughtSignature) {
+			for (const callId of turnToolCallIds) {
+				allowedToolCallIds.add(callId);
 			}
 		}
 	}
@@ -213,7 +259,7 @@ export function apiMessageToGeminiMessage(messages: Array<LanguageModelChatMessa
 				};
 			}
 		} else if (message.role === LanguageModelChatMessageRole.Assistant) {
-			const parts = apiContentToGeminiContent(message.content, callIdToName);
+			const parts = apiContentToGeminiContent(message.content, callIdToName, allowedToolCallIds);
 
 			// Store function calls for later matching with responses
 			parts.forEach(part => {
@@ -227,7 +273,7 @@ export function apiMessageToGeminiMessage(messages: Array<LanguageModelChatMessa
 				parts
 			});
 		} else if (message.role === LanguageModelChatMessageRole.User) {
-			const parts = apiContentToGeminiContent(message.content, callIdToName);
+			const parts = apiContentToGeminiContent(message.content, callIdToName, allowedToolCallIds);
 
 			contents.push({
 				role: 'user',

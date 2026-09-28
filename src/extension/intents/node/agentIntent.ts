@@ -454,7 +454,10 @@ export class AgentIntent extends EditCodeIntent {
 		// Report auto-mode routing decision if one was made during endpoint resolution
 		const routingDecision = this._automodeService.consumeLastRoutingDecision();
 		if (routingDecision) {
-			stream.push(new ChatResponseAutoModeResolutionPart(routingDecision.resolvedModel, routingDecision.resolvedModelName, routingDecision.predictedLabel, routingDecision.confidence));
+			stream.push(new ChatResponseAutoModeResolutionPart({
+				id: routingDecision.resolvedModel,
+				name: routingDecision.resolvedModelName,
+			}));
 		}
 
 		try {

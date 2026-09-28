@@ -48,10 +48,13 @@ jobs:
           src/extension/byok/common/test/byokRoutingHeuristics.spec.ts
           src/extension/byok/common/test/contextBreakdown.spec.ts
           src/extension/byok/common/test/dsmlToolCallStripper.spec.ts
+          src/extension/byok/common/test/geminiErrorUtils.spec.ts
+          src/extension/byok/common/test/geminiMessageConverter.spec.ts
           src/extension/byok/vscode-node/test/byokAutoProvider.spec.ts
           src/extension/byok/vscode-node/test/byokFusionProvider.spec.ts
           src/extension/byok/vscode-node/test/byokRoutingClassifier.spec.ts
           src/extension/byok/vscode-node/test/byokOTelHelpers.spec.ts
+          src/extension/byok/vscode-node/test/geminiInteractionProvider.spec.ts
           src/extension/byok/vscode-node/test/openRouterProvider.spec.ts
 
       - name: Build extension
