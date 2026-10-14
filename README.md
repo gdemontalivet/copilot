@@ -19,7 +19,7 @@ This version is based on the exact VS Code revision recorded in
 `engines.vscode` in `package.json`.
 
 The current release targets VS Code 1.141.0 and its bundled Copilot 0.69.0.
-Full BYOK 0.69.3 supersedes both the built-in extension and the restored 0.69.1
+Full BYOK 0.69.4 supersedes both the built-in extension and the restored 0.69.1
 bundle. CI checks the release targets against the pinned upstream manifest before
 packaging and preserves every local provider contribution.
 
@@ -31,8 +31,11 @@ selected project's billing or prepaid credit balance; retries cannot resolve it.
 To use Gemini through `aiplatform.googleapis.com`, add a **Google Gemini (Vertex
 AI)** group in the Language Models picker. Its credentials field accepts an
 absolute ADC JSON file path, `adc` for system credentials, inline credential JSON,
-or an OAuth access token. File-based credentials refresh automatically without
-copying tokens into settings. Define models in your VS Code user settings:
+or an OAuth access token. Enter the value through **Update API Key** in the model
+group's menu: VS Code stores it as a secret reference in `chatLanguageModels.json`.
+Writing a literal path directly into that file's secret `apiKey` field does not
+work. File-based credentials refresh automatically without copying tokens into
+settings. Define models in your VS Code user settings:
 
 ```json
 "github.copilot.chat.vertexGeminiModels": {

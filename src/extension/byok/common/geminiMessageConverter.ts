@@ -327,6 +327,21 @@ export function apiMessageToGeminiMessage(messages: Array<LanguageModelChatMessa
 	}
 	// ─── END BYOK CUSTOM PATCH ──────────────────
 
+	// The chat endpoint emits a separate user message for each tool result.
+	// Gemini requires every result of a parallel call turn in a single content
+	// entry; otherwise it compares the first result against the full call count.
+	for (let i = 1; i < contents.length; i++) {
+		const previous = contents[i - 1];
+		const current = contents[i];
+		if (previous.role === 'user' && current.role === 'user'
+			&& previous.parts?.some(part => part.functionResponse)
+			&& current.parts?.some(part => part.functionResponse)) {
+			previous.parts = [...previous.parts, ...current.parts];
+			contents.splice(i, 1);
+			i--;
+		}
+	}
+
 	return { contents, systemInstruction };
 }
 

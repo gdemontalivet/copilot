@@ -7,6 +7,7 @@ import { Raw } from '@vscode/prompt-tsx';
 import { describe, expect, it } from 'vitest';
 import type { LanguageModelChatMessage, LanguageModelChatMessage2 } from 'vscode';
 import { CustomDataPartMimeTypes } from '../../../../platform/endpoint/common/endpointTypes';
+import { convertToApiChatMessage } from '../../../../platform/endpoint/vscode-node/extChatEndpoint';
 import { LanguageModelChatMessageRole, LanguageModelDataPart, LanguageModelTextPart, LanguageModelThinkingPart, LanguageModelToolCallPart, LanguageModelToolResultPart, LanguageModelTextPart as LMText } from '../../../../vscodeTypes';
 import { apiMessageToGeminiMessage } from '../geminiMessageConverter';
 
@@ -178,6 +179,45 @@ describe('GeminiMessageConverter', () => {
 		expect(result.contents[0].parts![0]).toMatchObject({ thoughtSignature: 'parallel-signature' });
 		expect(result.contents[0].parts![1]).toHaveProperty('functionCall');
 		expect(result.contents[1].parts).toHaveLength(2);
+	});
+
+	it('groups separate tool-result messages from the chat endpoint into one parallel response turn', () => {
+		const messages = convertToApiChatMessage([
+			{ role: Raw.ChatRole.User, content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'Read both files' }] },
+			{
+				role: Raw.ChatRole.Assistant,
+				content: [],
+				toolCalls: [
+					{ id: 'call-1|parallel-signature', type: 'function', function: { name: 'read_file', arguments: '{"path":"README.md"}' } },
+					{ id: 'call-2', type: 'function', function: { name: 'read_file', arguments: '{"path":"package.json"}' } },
+				],
+			},
+			{ role: Raw.ChatRole.Tool, toolCallId: 'call-1|parallel-signature', content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'readme' }] },
+			{ role: Raw.ChatRole.Tool, toolCallId: 'call-2', content: [{ type: Raw.ChatCompletionContentPartKind.Text, text: 'package' }] },
+		]);
+		const result = apiMessageToGeminiMessage(messages, { requireThoughtSignatures: true });
+		expect(result.contents).toHaveLength(3);
+		expect(result.contents[1].parts).toEqual([
+			{ functionCall: { name: 'read_file', args: { path: 'README.md' } }, thoughtSignature: 'parallel-signature' },
+			{ functionCall: { name: 'read_file', args: { path: 'package.json' } } },
+		]);
+		expect(result.contents[2]).toEqual({ role: 'user', parts: [
+			{ functionResponse: { name: 'read_file', response: { result: 'readme' } } },
+			{ functionResponse: { name: 'read_file', response: { result: 'package' } } },
+		] });
+	});
+
+	it('keeps sequential tool turns separate when grouping parallel results', () => {
+		const messages: LanguageModelChatMessage[] = [
+			{ role: LanguageModelChatMessageRole.Assistant, content: [new LanguageModelToolCallPart('call-1', 'read_file', {})], name: undefined },
+			{ role: LanguageModelChatMessageRole.User, content: [new LanguageModelToolResultPart('call-1', [new LanguageModelTextPart('first')])], name: undefined },
+			{ role: LanguageModelChatMessageRole.Assistant, content: [new LanguageModelToolCallPart('call-2', 'read_file', {})], name: undefined },
+			{ role: LanguageModelChatMessageRole.User, content: [new LanguageModelToolResultPart('call-2', [new LanguageModelTextPart('second')])], name: undefined },
+		];
+		const result = apiMessageToGeminiMessage(messages);
+		expect(result.contents.map(content => content.role)).toEqual(['model', 'user', 'model', 'user']);
+		expect(result.contents[1].parts).toHaveLength(1);
+		expect(result.contents[3].parts).toHaveLength(1);
 	});
 
 	it('should extract functionResponse parts from model message into subsequent user message and prune empty model', () => {
