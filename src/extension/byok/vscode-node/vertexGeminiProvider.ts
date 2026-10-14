@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { GoogleGenAI } from '@google/genai';
+import { isAbsolute } from 'node:path';
 import { ConfigKey, IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { ILogService } from '../../../platform/log/common/logService';
 import { IOTelService } from '../../../platform/otel/common/otelService';
@@ -95,7 +96,9 @@ function resolveVertexGeminiLimits(modelId: string, cfg: { maxInputTokens?: numb
  * endpoint but retained Vertex AI access.
  *
  * Auth: the user's "API key" for this provider is either:
- *   - A Google Cloud service-account JSON (full credentials object as a string), or
+ *   - An absolute path to a Google ADC or service-account JSON file,
+ *   - The literal `adc` to use system Application Default Credentials,
+ *   - Google OAuth or service-account JSON (full credentials object as a string), or
  *   - A pre-fetched OAuth 2.0 Bearer access token
  *
  * Models: configured either via the `chat.vertexGeminiModels` user setting
@@ -134,16 +137,37 @@ export class VertexGeminiLMProvider extends GeminiNativeBYOKLMProvider {
 
 	protected override createClient(apiKey: string, model: ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>): GoogleGenAI {
 		const vertexModel = model as ExtendedLanguageModelChatInformation<VertexGeminiProviderConfig>;
-		const vertexModelId = (vertexModel as unknown as { id: string }).id;
-		const modelConfig = vertexModel.configuration?.models?.find(m => m.id === vertexModelId);
+		const vertexModelId = vertexModel.id;
+		// The abstract provider attaches the group configuration to each model,
+		// replacing getAllModels' derived configuration. Resolve global models
+		// here too so a model listed from settings can actually be used in chat.
+		const modelConfig = vertexModel.configuration?.models?.find(m => m.id === vertexModelId)
+			?? this._configurationService.getConfig(ConfigKey.VertexGeminiModels)?.[vertexModelId];
 		if (!modelConfig) {
 			throw new Error(`Configuration not found for Vertex Gemini model ${vertexModelId}`);
 		}
 
 		const { projectId, locationId } = modelConfig;
 		const trimmedApiKey = apiKey.trim();
+		const vertexOptions = {
+			vertexai: true,
+			project: projectId,
+			location: locationId,
+			httpOptions: { headers: { 'x-goog-user-project': projectId } },
+		};
 
-		// Case 1: service-account JSON — let google-auth-library handle
+		if (trimmedApiKey === 'adc' || isAbsolute(trimmedApiKey)) {
+			return new GoogleGenAI({
+				...vertexOptions,
+				googleAuthOptions: {
+					...(trimmedApiKey === 'adc' ? {} : { keyFilename: trimmedApiKey }),
+					scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+					projectId,
+				},
+			});
+		}
+
+		// Inline OAuth or service-account JSON — let google-auth-library handle
 		// token minting, refresh, and the `x-goog-user-project` quota header.
 		if (trimmedApiKey.startsWith('{')) {
 			let credentials: Record<string, unknown>;
@@ -151,13 +175,11 @@ export class VertexGeminiLMProvider extends GeminiNativeBYOKLMProvider {
 				credentials = JSON.parse(trimmedApiKey);
 			} catch (e) {
 				this._logService.error(`[VertexGemini] Failed to parse credentials JSON: ${e}`);
-				throw new Error('Invalid Vertex Gemini credentials: expected a service-account JSON object.');
+				throw new Error('Invalid Vertex Gemini credentials: expected an OAuth or service-account JSON object.');
 			}
-			this._logService.trace(`[VertexGemini] Using SA credentials (type: ${credentials.type ?? 'unknown'}) for ${vertexModelId} @ ${locationId}`);
+			this._logService.trace(`[VertexGemini] Using JSON credentials (type: ${credentials.type ?? 'unknown'}) for ${vertexModelId} @ ${locationId}`);
 			return new GoogleGenAI({
-				vertexai: true,
-				project: projectId,
-				location: locationId,
+				...vertexOptions,
 				googleAuthOptions: {
 					credentials: credentials as any, // CredentialBody shape validated by the SDK
 					scopes: ['https://www.googleapis.com/auth/cloud-platform'],
@@ -166,18 +188,12 @@ export class VertexGeminiLMProvider extends GeminiNativeBYOKLMProvider {
 			});
 		}
 
-		// Case 2: raw Bearer access token (already minted, e.g. via `gcloud
-		// auth print-access-token`). Inject as an HTTP header and disable the
-		// SDK's default ADC lookup by passing a no-op `googleAuthOptions`.
+		// Preserve support for a pre-minted OAuth access token.
 		this._logService.trace(`[VertexGemini] Using pre-minted Bearer token for ${vertexModelId} @ ${locationId}`);
 		return new GoogleGenAI({
-			vertexai: true,
-			project: projectId,
-			location: locationId,
+			...vertexOptions,
 			httpOptions: {
-				headers: {
-					Authorization: `Bearer ${trimmedApiKey}`,
-				},
+				headers: { ...vertexOptions.httpOptions.headers, Authorization: `Bearer ${trimmedApiKey}` },
 			},
 		});
 	}

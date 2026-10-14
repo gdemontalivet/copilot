@@ -7,6 +7,45 @@ import { describe, expect, it } from 'vitest';
 import { classifyRetryableGeminiError, extractReadableGeminiMessage } from '../geminiErrorUtils';
 
 describe('Gemini error utilities', () => {
+	it('does not retry depleted billing credits labelled RESOURCE_EXHAUSTED', () => {
+		const error = new Error(JSON.stringify({ error: {
+			message: JSON.stringify({ error: { code: 402, message: 'Your prepayment credits are depleted.', status: 'RESOURCE_EXHAUSTED' } }),
+			code: 402,
+			status: 'Payment Required',
+		} }));
+
+		expect(extractReadableGeminiMessage(error)).toContain('Gemini API payment required (HTTP 402)');
+		expect(extractReadableGeminiMessage(error)).toContain('https://aistudio.google.com/projects');
+		expect(classifyRetryableGeminiError(error)).toBeNull();
+	});
+
+	it('recognizes the opaque payment error produced by the bundled Interactions SDK', () => {
+		const error = new Error('402 API error occurred: {"httpMeta":{"response":{},"request":{}}}');
+
+		expect(extractReadableGeminiMessage(error)).toContain('prepaid credit balance');
+		expect(classifyRetryableGeminiError(error)).toBeNull();
+	});
+
+	it('reads the Interactions SDK response body and statusCode through error causes', () => {
+		const cause = Object.assign(new Error('API error occurred'), {
+			statusCode: 400,
+			body: JSON.stringify({ error: { message: 'Function call is missing a thought_signature.', status: 'INVALID_ARGUMENT' } }),
+		});
+		const error = new Error('Request failed', { cause });
+
+		expect(extractReadableGeminiMessage(error)).toBe('Function call is missing a thought_signature.');
+		expect(classifyRetryableGeminiError(error)).toBeNull();
+	});
+
+	it('reads a payment status from HTTP metadata without treating it as a rate limit', () => {
+		const error = Object.assign(new Error('API error occurred'), {
+			httpMeta: { response: { status: 402 }, body: { error: { message: 'Your prepayment credits are depleted.', status: 'RESOURCE_EXHAUSTED' } } },
+		});
+
+		expect(extractReadableGeminiMessage(error)).toContain('Gemini API payment required (HTTP 402)');
+		expect(classifyRetryableGeminiError(error)).toBeNull();
+	});
+
 	it('turns a double-wrapped Gemini capacity response into an actionable message', () => {
 		const providerResponse = JSON.stringify({
 			error: {

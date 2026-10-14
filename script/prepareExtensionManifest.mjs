@@ -6,10 +6,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const [extensionRoot, upstreamVersion, upstreamEngine, vscodeCommit] = process.argv.slice(2);
+const [extensionRoot, upstreamVersion, upstreamEngine, vscodeCommit, checkoutVersion, checkoutEngine] = process.argv.slice(2);
 
 if (!extensionRoot || !upstreamVersion || !upstreamEngine || !vscodeCommit) {
-	console.error('Usage: node script/prepareExtensionManifest.mjs <extension-root> <upstream-version> <upstream-engine> <vscode-commit>');
+	console.error('Usage: node script/prepareExtensionManifest.mjs <extension-root> <upstream-version> <upstream-engine> <vscode-commit> [checkout-version] [checkout-engine]');
 	process.exit(2);
 }
 
@@ -36,7 +36,22 @@ const packagePath = path.join(extensionRoot, 'package.json');
 const packageLockPath = path.join(extensionRoot, 'package-lock.json');
 const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
 const sourceVersion = parseVersion(packageJson.version, 'fork');
-const builtinVersion = parseVersion(upstreamVersion, 'built-in');
+let builtinVersion = parseVersion(upstreamVersion, 'built-in');
+if (checkoutVersion) {
+	const checkedOutVersion = parseVersion(checkoutVersion, 'checked-out');
+	if (compareVersions(checkedOutVersion, builtinVersion) > 0) {
+		builtinVersion = checkedOutVersion;
+	}
+}
+let vscodeEngine = upstreamEngine;
+for (const candidate of [packageJson.engines?.vscode, checkoutEngine]) {
+	if (candidate && compareVersions(
+		parseVersion(candidate.replace(/^\^/, ''), 'source engine'),
+		parseVersion(vscodeEngine.replace(/^\^/, ''), 'target engine'),
+	) > 0) {
+		vscodeEngine = candidate;
+	}
+}
 
 const packagedVersion = compareVersions(sourceVersion, builtinVersion) > 0
 	? sourceVersion
@@ -45,7 +60,7 @@ const packagedVersionString = packagedVersion.join('.');
 
 packageJson.version = packagedVersionString;
 packageJson.engines ??= {};
-packageJson.engines.vscode = upstreamEngine;
+packageJson.engines.vscode = vscodeEngine;
 packageJson.vscodeCommit = vscodeCommit;
 fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, '\t')}\n`);
 
@@ -55,9 +70,9 @@ if (fs.existsSync(packageLockPath)) {
 	if (packageLock.packages?.['']) {
 		packageLock.packages[''].version = packagedVersionString;
 		packageLock.packages[''].engines ??= {};
-		packageLock.packages[''].engines.vscode = upstreamEngine;
+		packageLock.packages[''].engines.vscode = vscodeEngine;
 	}
 	fs.writeFileSync(packageLockPath, `${JSON.stringify(packageLock, null, '\t')}\n`);
 }
 
-console.log(`Prepared Copilot Full BYOK ${packagedVersionString} for VS Code ${upstreamEngine} (${vscodeCommit}).`);
+console.log(`Prepared Copilot Full BYOK ${packagedVersionString} for VS Code ${vscodeEngine} (${vscodeCommit}).`);

@@ -44,6 +44,7 @@ import { IOTelService } from '../../../platform/otel/common/otelService';
 import { IRequestLogger } from '../../../platform/requestLogger/common/requestLogger';
 import { ITelemetryService } from '../../../platform/telemetry/common/telemetry';
 import { BYOKKnownModels, BYOKModelCapabilities, byokKnownModelsToAPIInfo } from '../common/byokProvider';
+import { extractReadableGeminiMessage } from '../common/geminiErrorUtils';
 import { ExtendedLanguageModelChatInformation, LanguageModelChatConfiguration } from './abstractLanguageModelChatProvider';
 import { IBYOKStorageService } from './byokStorageService';
 import { GeminiInteractionLMProvider } from './geminiInteractionProvider';
@@ -349,11 +350,9 @@ export class GeminiADCLMProvider extends GeminiInteractionLMProvider {
 			let parsed: { error?: { message?: string; status?: string; details?: Array<{ reason?: string }> } } | undefined;
 			try { parsed = JSON.parse(err.message); } catch { /* not JSON */ }
 
-			const reason = parsed?.error?.details?.[0]?.reason ?? '';
-			const status = parsed?.error?.status ?? '';
 			const message = parsed?.error?.message ?? err.message;
 
-			if (reason === 'ACCESS_TOKEN_SCOPE_INSUFFICIENT' || status === 'PERMISSION_DENIED') {
+			if (parsed?.error?.details?.some(detail => detail.reason === 'ACCESS_TOKEN_SCOPE_INSUFFICIENT')) {
 				return new Error(
 					`[GeminiADC] Insufficient OAuth scopes on your Application Default Credentials.\n\n` +
 					`Personal-account ADC tokens created by plain "gcloud auth application-default login"\n` +
@@ -371,9 +370,9 @@ export class GeminiADCLMProvider extends GeminiInteractionLMProvider {
 				);
 			}
 
-			return new Error(message, { cause: err });
+			return new Error(extractReadableGeminiMessage(err), { cause: err });
 		}
-		return new Error(err instanceof Error ? err.message : String(err));
+		return new Error(extractReadableGeminiMessage(err), { cause: err });
 	}
 
 	// ─── provideLanguageModelChatResponse override ────────────────────────────
@@ -460,6 +459,7 @@ export class GeminiADCLMProvider extends GeminiInteractionLMProvider {
 			configuration: { ...(options.configuration ?? {}), apiKey: 'adc' },
 		};
 		const PICKER_TIMEOUT_MS = 2_000;
+		let pickerTimeout: ReturnType<typeof setTimeout> | undefined;
 		// Use a single race keyed by the super call; the abstract class's inflight-dedup
 		// (Patch 42) ensures only one getAllModels is in flight per cache key, so the
 		// timeout only needs to guard this method's return — not every concurrent caller.
@@ -468,10 +468,12 @@ export class GeminiADCLMProvider extends GeminiInteractionLMProvider {
 		try {
 			const superPromise = super.provideLanguageModelChatInformation(enrichedOptions, token);
 			const timeoutPromise = new Promise<ExtendedLanguageModelChatInformation<LanguageModelChatConfiguration>[]>(
-				resolve => setTimeout(() => {
-					this._logService.info('[GeminiADC] picker timeout (2s) — returning [] so dropdown is not blocked');
-					resolve([]);
-				}, PICKER_TIMEOUT_MS)
+				resolve => {
+					pickerTimeout = setTimeout(() => {
+						this._logService.info('[GeminiADC] picker timeout (2s) — returning [] so dropdown is not blocked');
+						resolve([]);
+					}, PICKER_TIMEOUT_MS);
+				}
 			);
 			return await Promise.race([superPromise, timeoutPromise]);
 		} catch (err) {
@@ -480,6 +482,10 @@ export class GeminiADCLMProvider extends GeminiInteractionLMProvider {
 				`[GeminiADC] No credentials available, suppressing picker error: ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`
 			);
 			return [];
+		} finally {
+			if (pickerTimeout !== undefined) {
+				clearTimeout(pickerTimeout);
+			}
 		}
 	}
 }

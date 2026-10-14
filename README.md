@@ -18,6 +18,36 @@ This version is based on the exact VS Code revision recorded in
 `UPSTREAM_VSCODE_COMMIT` and requires the VS Code version declared by
 `engines.vscode` in `package.json`.
 
+The current release targets VS Code 1.141.0 and its bundled Copilot 0.69.0.
+Full BYOK 0.69.2 supersedes both the built-in extension and the restored 0.69.1
+bundle. CI checks the release targets against the pinned upstream manifest before
+packaging and preserves every local provider contribution.
+
+Gemini ADC uses OAuth with the Gemini Developer API and shares its billing rules
+with API-key access. To use Google Cloud Vertex AI, select the separate Vertex
+Gemini provider. HTTP 402 from the Gemini Developer API requires attention to the
+selected project's billing or prepaid credit balance; retries cannot resolve it.
+
+To use Gemini through `aiplatform.googleapis.com`, add a **Google Gemini (Vertex
+AI)** group in the Language Models picker. Its credentials field accepts an
+absolute ADC JSON file path, `adc` for system credentials, inline credential JSON,
+or an OAuth access token. File-based credentials refresh automatically without
+copying tokens into settings. Define models in your VS Code user settings:
+
+```json
+"github.copilot.chat.vertexGeminiModels": {
+  "gemini-3.8-flash": {
+    "name": "Gemini 3.8 Flash (Vertex)",
+    "projectId": "your-google-cloud-project",
+    "locationId": "global"
+  }
+}
+```
+
+Select that Vertex model in chat. To also route helper requests through Vertex,
+set `chat.utilityModel` and `chat.utilitySmallModel` to `vertexgemini/<model-id>`
+for a configured Vertex model.
+
 ## Upstream feature set
 
 ## Build with autonomous agents

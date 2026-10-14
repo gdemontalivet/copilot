@@ -32,6 +32,11 @@ git -C "$target" sparse-checkout set extensions/copilot src/typings src/vscode-d
 git -C "$target" fetch --depth=1 origin "$commit"
 GIT_LFS_SKIP_SMUDGE=1 git -C "$target" checkout --detach FETCH_HEAD
 
+# Read the upstream manifest before the fork overlay replaces it. Release
+# metadata can be stale; the package must also beat the checked-out version.
+checkout_copilot_version="$(node -p "require(require('node:path').resolve(process.argv[1])).version" "$target/extensions/copilot/package.json")"
+checkout_vscode_engine="$(node -p "require(require('node:path').resolve(process.argv[1])).engines.vscode" "$target/extensions/copilot/package.json")"
+
 rsync -a --delete \
 	--exclude='.git' \
 	--exclude='.agents' \
@@ -50,6 +55,8 @@ node "$repo_root/script/prepareExtensionManifest.mjs" \
 	"$target/extensions/copilot" \
 	"$builtin_copilot_version" \
 	"^$target_vscode_version" \
-	"$commit"
+	"$commit" \
+	"$checkout_copilot_version" \
+	"$checkout_vscode_engine"
 
 echo "$target/extensions/copilot"

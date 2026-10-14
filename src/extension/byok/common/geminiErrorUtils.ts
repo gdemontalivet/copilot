@@ -17,6 +17,7 @@ interface GeminiErrorDetails {
 const GEMINI_CAPACITY_MESSAGE = 'Gemini is temporarily at capacity. Retry shortly or choose another model.';
 const GEMINI_UNAVAILABLE_MESSAGE = 'Gemini is temporarily unavailable. Retry shortly or choose another model.';
 const GEMINI_RATE_LIMIT_MESSAGE = 'Gemini rate limit reached. Retry shortly or choose another model.';
+const GEMINI_PAYMENT_REQUIRED_MESSAGE = 'Gemini API payment required (HTTP 402). Check the selected project\'s billing and prepaid credit balance at https://aistudio.google.com/projects. Changing from an API key to ADC does not change Gemini API billing.';
 
 function asStatusCode(value: unknown): number | undefined {
 	if (typeof value === 'number' && Number.isFinite(value)) {
@@ -33,7 +34,7 @@ function collectErrorMetadata(value: unknown, details: GeminiErrorDetails): void
 		return;
 	}
 	const object = value as Record<string, unknown>;
-	details.statusCode ??= asStatusCode(object.status) ?? asStatusCode(object.code);
+	details.statusCode ??= asStatusCode(object.status) ?? asStatusCode(object.statusCode) ?? asStatusCode(object.code);
 	if (!details.statusName && typeof object.status === 'string' && !asStatusCode(object.status)) {
 		details.statusName = object.status;
 	}
@@ -49,12 +50,24 @@ function collectErrorMetadata(value: unknown, details: GeminiErrorDetails): void
  */
 function getGeminiErrorDetails(err: unknown): GeminiErrorDetails {
 	const details: GeminiErrorDetails = { message: toErrorMessage(err, false) };
+	let responseBody: string | undefined;
 
 	let cause: unknown = err;
 	for (let depth = 0; depth < 5 && cause && typeof cause === 'object'; depth++) {
 		collectErrorMetadata(cause, details);
-		cause = (cause as { cause?: unknown }).cause;
+		const object = cause as { body?: unknown; httpMeta?: { body?: unknown; response?: { status?: number } }; cause?: unknown };
+		details.statusCode ??= asStatusCode(object.httpMeta?.response?.status);
+		const body = object.body ?? object.httpMeta?.body;
+		if (typeof body === 'string' && body.trim()) {
+			responseBody ??= body.trim();
+		} else if (body && typeof body === 'object' && ('error' in body || 'message' in body)) {
+			responseBody ??= JSON.stringify(body);
+		}
+		cause = object.cause;
 	}
+	details.message = responseBody ?? details.message;
+	// Some bundled Interactions SDK errors retain only the HTTP status prefix.
+	details.statusCode ??= asStatusCode(/^\s*(\d{3})\s+(?:API error|Payment Required)/i.exec(details.message)?.[1]);
 
 	for (let depth = 0; depth < 5; depth++) {
 		let parsed: unknown;
@@ -89,6 +102,9 @@ export function extractReadableGeminiMessage(err: unknown): string {
 	const lowerMessage = message.toLowerCase();
 	const normalizedStatus = details.statusName?.toLowerCase().replace(/[\s-]+/g, '_');
 
+	if (details.statusCode === 402) {
+		return GEMINI_PAYMENT_REQUIRED_MESSAGE;
+	}
 	if (/high demand|at capacity|capacity pressure/.test(lowerMessage)) {
 		return GEMINI_CAPACITY_MESSAGE;
 	}
@@ -107,6 +123,11 @@ export function classifyRetryableGeminiError(err: unknown): GeminiRetryableError
 	const message = details.message.toLowerCase();
 	const normalizedStatus = details.statusName?.toLowerCase().replace(/[\s-]+/g, '_');
 
+	// Depleted billing credits are also labelled RESOURCE_EXHAUSTED by Google,
+	// but retrying them cannot succeed without a billing change.
+	if (details.statusCode === 402) {
+		return null;
+	}
 	if (details.statusCode === 429 || normalizedStatus === 'resource_exhausted' || /too_many_requests|quota_exceeded|resource_exhausted/.test(message)) {
 		return 'rate-limit';
 	}

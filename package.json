@@ -2,7 +2,7 @@
 	"name": "copilot-chat",
 	"displayName": "Copilot Full BYOK",
 	"description": "AI chat features powered by Copilot — Full Bring Your Own Key edition",
-	"version": "0.60.1",
+	"version": "0.69.2",
 	"build": "1",
 	"completionsCoreVersion": "1.378.1799",
 	"internalLargeStorageAriaKey": "ec712b3202c5462fb6877acae7f1f9d7-c19ad55e-3e3c-4f99-984b-827f6d95bd9e-6917",
@@ -22,7 +22,7 @@
 	"icon": "assets/copilot.png",
 	"pricing": "Trial",
 	"engines": {
-		"vscode": "^1.131.0",
+		"vscode": "^1.141.0",
 		"npm": ">=9.0.0",
 		"node": ">=22.14.0"
 	},
@@ -1823,7 +1823,7 @@
 						"apiKey": {
 							"type": "string",
 							"secret": true,
-							"description": "Google Cloud service-account JSON or access token for the Vertex AI project that hosts the Gemini model family.",
+							"description": "Absolute path to an ADC or service-account JSON file, the literal adc for system credentials, inline credentials JSON, or an OAuth access token. Configure the Gemini model, Google Cloud project, and location in github.copilot.chat.vertexGeminiModels.",
 							"title": "Vertex AI credentials"
 						}
 					},
@@ -7526,7 +7526,7 @@
 		"yauzl": "^3.3.1",
 		"zod": "3.25.76"
 	},
-	"vscodeCommit": "94c8e2adc50e26ef70af85a0de3a9efed757acaa",
+	"vscodeCommit": "2a59476c9bfcb90b3ddc372c36762471b7dfad1c",
 	"__metadata": {
 		"id": "7ec7d6e6-b89e-4cc5-a59b-d6c4d238246f",
 		"publisherId": {

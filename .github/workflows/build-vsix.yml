@@ -28,6 +28,9 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
 
+      - name: Check release manifest preparation
+        run: node --test script/test/prepareExtensionManifest.test.mjs
+
       - name: Assemble pinned VS Code checkout
         run: bash script/prepareUpstreamCheckout.sh "$VSCODE_CHECKOUT"
 
@@ -55,6 +58,8 @@ jobs:
           src/extension/byok/vscode-node/test/byokRoutingClassifier.spec.ts
           src/extension/byok/vscode-node/test/byokOTelHelpers.spec.ts
           src/extension/byok/vscode-node/test/geminiInteractionProvider.spec.ts
+          src/extension/byok/vscode-node/test/geminiADCProvider.spec.ts
+          src/extension/byok/vscode-node/test/vertexGeminiProvider.spec.ts
           src/extension/byok/vscode-node/test/openRouterProvider.spec.ts
 
       - name: Build extension
