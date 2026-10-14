@@ -199,6 +199,12 @@ export class VertexGeminiLMProvider extends GeminiNativeBYOKLMProvider {
 	}
 
 	protected override async getAllModels(silent: boolean, apiKey: string | undefined, configuration?: VertexGeminiProviderConfig | undefined): Promise<ExtendedLanguageModelChatInformation<VertexGeminiProviderConfig>[]> {
+		// Global model settings describe deployments, not credentials. Publishing
+		// them during unconfigured vendor discovery creates duplicate, keyless
+		// models that the picker and utility-model lookup can select.
+		if (!apiKey?.trim()) {
+			return [];
+		}
 		// Prefer per-group `configuration.models` (VS Code LM group config). Fall back to the global
 		// `chat.vertexGeminiModels` setting so users who only edit settings still see models.
 		let modelConfigs = configuration?.models;

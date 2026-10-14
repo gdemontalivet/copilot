@@ -19,7 +19,7 @@ This version is based on the exact VS Code revision recorded in
 `engines.vscode` in `package.json`.
 
 The current release targets VS Code 1.141.0 and its bundled Copilot 0.69.0.
-Full BYOK 0.69.2 supersedes both the built-in extension and the restored 0.69.1
+Full BYOK 0.69.3 supersedes both the built-in extension and the restored 0.69.1
 bundle. CI checks the release targets against the pinned upstream manifest before
 packaging and preserves every local provider contribution.
 
@@ -47,6 +47,9 @@ copying tokens into settings. Define models in your VS Code user settings:
 Select that Vertex model in chat. To also route helper requests through Vertex,
 set `chat.utilityModel` and `chat.utilitySmallModel` to `vertexgemini/<model-id>`
 for a configured Vertex model.
+
+Vertex models are listed only for groups with credentials. Deployment settings
+alone do not publish an unconfigured default copy of each model.
 
 ## Upstream feature set
 

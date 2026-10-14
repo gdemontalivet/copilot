@@ -3,8 +3,9 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { GoogleGenAIOptions } from '@google/genai';
+import type { GenerateContentParameters, GoogleGenAIOptions } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { LanguageModelChatMessage, LanguageModelChatToolMode, LanguageModelTextPart, type LanguageModelResponsePart2, type Progress } from 'vscode';
 import { ConfigKey, IConfigurationService } from '../../../../platform/configuration/common/configurationService';
 import { CancellationToken } from '../../../../util/vs/base/common/cancellation';
 import { DisposableStore } from '../../../../util/vs/base/common/lifecycle';
@@ -14,10 +15,21 @@ import type { ExtendedLanguageModelChatInformation } from '../abstractLanguageMo
 import type { IBYOKStorageService } from '../byokStorageService';
 import { VertexGeminiLMProvider, type VertexGeminiProviderConfig } from '../vertexGeminiProvider';
 
-const mocks = vi.hoisted(() => ({ clientOptions: [] as GoogleGenAIOptions[] }));
+const mocks = vi.hoisted(() => ({ clientOptions: [] as GoogleGenAIOptions[], requests: [] as GenerateContentParameters[] }));
 vi.mock('@google/genai', async importOriginal => {
 	class MockGoogleGenAI {
 		constructor(options: GoogleGenAIOptions) { mocks.clientOptions.push(options); }
+		models = {
+			generateContentStream: async (request: GenerateContentParameters) => {
+				mocks.requests.push(request);
+				return (async function* () {
+					yield {
+						candidates: [{ content: { parts: [{ text: 'Vertex reply' }] } }],
+						usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2, totalTokenCount: 6 },
+					};
+				})();
+			},
+		};
 	}
 	return { ...await importOriginal<typeof import('@google/genai')>(), GoogleGenAI: MockGoogleGenAI };
 });
@@ -37,6 +49,11 @@ class TestVertexGeminiProvider extends VertexGeminiLMProvider {
 	}
 }
 
+class TestProgress implements Progress<LanguageModelResponsePart2> {
+	readonly items: LanguageModelResponsePart2[] = [];
+	report(value: LanguageModelResponsePart2): void { this.items.push(value); }
+}
+
 describe('Vertex Gemini authentication and model configuration', () => {
 	const disposables = new DisposableStore();
 	const credentialFile = '/test/gcloud/adc.json';
@@ -45,6 +62,7 @@ describe('Vertex Gemini authentication and model configuration', () => {
 
 	beforeEach(async () => {
 		mocks.clientOptions.length = 0;
+		mocks.requests.length = 0;
 		const services = disposables.add(createExtensionUnitTestingServices());
 		const accessor = disposables.add(services.createTestingAccessor());
 		configuration = accessor.get(IConfigurationService);
@@ -61,6 +79,13 @@ describe('Vertex Gemini authentication and model configuration', () => {
 		return models[0];
 	}
 
+	it('does not publish keyless default models when global deployments are configured', async () => {
+		for (const options of [{ silent: true }, { silent: false }, { silent: false, configuration: {} }]) {
+			expect(await provider.provideLanguageModelChatInformation(options, CancellationToken.None)).toEqual([]);
+		}
+		expect(mocks.clientOptions).toEqual([]);
+	});
+
 	it('uses a model discovered from global settings after the group configuration is attached', async () => {
 		const model = await modelForCredential(credentialFile);
 		provider.clientForModel(model);
@@ -70,6 +95,20 @@ describe('Vertex Gemini authentication and model configuration', () => {
 			googleAuthOptions: { keyFilename: credentialFile, scopes: ['https://www.googleapis.com/auth/cloud-platform'] },
 		});
 		expect(mocks.clientOptions[0].apiKey).toBeUndefined();
+	});
+
+	it('streams a chat response using the credentialed group after keyless vendor discovery', async () => {
+		expect(await provider.provideLanguageModelChatInformation({ silent: true }, CancellationToken.None)).toEqual([]);
+		const model = await modelForCredential(credentialFile);
+		const progress = new TestProgress();
+		await provider.provideLanguageModelChatResponse(model, [LanguageModelChatMessage.User('Hello')], {
+			requestInitiator: 'test', tools: [], toolMode: LanguageModelChatToolMode.Auto,
+		}, progress, CancellationToken.None);
+		expect(mocks.requests).toHaveLength(1);
+		expect(mocks.requests[0].model).toBe('gemini-3.8-flash');
+		expect(mocks.clientOptions[0].googleAuthOptions?.keyFilename).toBe(credentialFile);
+		expect(mocks.clientOptions[0].vertexai).toBe(true);
+		expect(progress.items.filter(part => part instanceof LanguageModelTextPart).map(part => part.value)).toEqual(['Vertex reply']);
 	});
 
 	it('loads system ADC when the credential is adc', async () => {
